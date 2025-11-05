@@ -1,5 +1,7 @@
 **/data/
 wandb/
+JSettlers2/
+**/weights
 
 # Python-generated files
 __pycache__/

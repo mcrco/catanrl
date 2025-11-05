@@ -9,11 +9,10 @@ import argparse
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader
 from tqdm import tqdm
 import wandb
 from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE
-from data import CatanDataset, LazyLoadingCatanDataset
+from data import CatanDataset, InterleavedFileLoader
 from models import PolicyNetwork
 
 
@@ -24,7 +23,8 @@ def train_policy_network(
     lr: float = 1e-3,
     device: str = 'cuda' if torch.cuda.is_available() else 'cpu',
     save_path: str = 'policy_network_best.pt',
-    log_batch_freq: int = 10
+    log_batch_freq: int = 10,
+    num_files_loaded: int = 4,
 ):
     """Train the policy network to predict actions (behavior cloning)."""
     
@@ -38,15 +38,29 @@ def train_policy_network(
     num_actions = ACTION_SPACE_SIZE
     model = PolicyNetwork(input_dim, num_actions).to(device)
     
-    # Split data into train/val
-    train_size = int(0.9 * len(dataset))
-    val_size = len(dataset) - train_size
-    train_dataset, val_dataset = torch.utils.data.random_split(
-        dataset, [train_size, val_size]
+    # Split data into train/val by file count (90/10 split)
+    num_train_files = int(0.9 * len(dataset.parquet_files))
+    train_indices = list(range(num_train_files))
+    val_indices = list(range(num_train_files, len(dataset.parquet_files)))
+    
+    print(f"Train: {len(train_indices)} files, Val: {len(val_indices)} files")
+    
+    # Create loaders with file subsets
+    train_loader = InterleavedFileLoader(
+        dataset,
+        batch_size=batch_size,
+        num_files_loaded=num_files_loaded,
+        drop_last=True,
+        file_indices=train_indices
     )
     
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=4)
+    val_loader = InterleavedFileLoader(
+        dataset,
+        batch_size=batch_size,
+        num_files_loaded=min(num_files_loaded, len(val_indices)),
+        drop_last=False,
+        file_indices=val_indices
+    )
     
     # Loss and optimizer
     criterion = nn.CrossEntropyLoss()
@@ -63,6 +77,10 @@ def train_policy_network(
         train_correct = 0
         train_total = 0
         
+        # Start epoch: shuffle files and load initial pool
+        train_loader.start_epoch()
+        
+        num_train_batches = 0
         for batch_idx, (features, actions, _) in enumerate(tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs} [Train]")):
             features = features.to(device)
             actions = actions.to(device)
@@ -75,6 +93,7 @@ def train_policy_network(
             
             batch_loss = loss.item()
             train_loss += batch_loss
+            num_train_batches += 1
             _, predicted = torch.max(logits, 1)
             batch_correct = (predicted == actions).sum().item()
             batch_total = actions.size(0)
@@ -92,7 +111,7 @@ def train_policy_network(
             
             global_step += 1
         
-        train_loss /= len(train_loader)
+        train_loss /= num_train_batches
         train_acc = 100 * train_correct / train_total
         
         # Validation
@@ -101,6 +120,10 @@ def train_policy_network(
         val_correct = 0
         val_total = 0
         
+        # Start validation epoch
+        val_loader.start_epoch()
+        
+        num_val_batches = 0
         with torch.no_grad():
             for features, actions, _ in tqdm(val_loader, desc=f"Epoch {epoch+1}/{epochs} [Val]"):
                 features = features.to(device)
@@ -110,11 +133,12 @@ def train_policy_network(
                 loss = criterion(logits, actions)
                 
                 val_loss += loss.item()
+                num_val_batches += 1
                 _, predicted = torch.max(logits, 1)
                 val_correct += (predicted == actions).sum().item()
                 val_total += actions.size(0)
         
-        val_loss /= len(val_loader)
+        val_loss /= num_val_batches
         val_acc = 100 * val_correct / val_total
         
         # Learning rate scheduling
@@ -168,9 +192,6 @@ Examples:
   
   # Custom hyperparameters
   python train_policy.py --data-dir data/games --epochs 10 --batch-size 2048 --lr 5e-4
-  
-  # In-memory mode (if you have enough RAM)
-  python train_policy.py --data-dir data/games --mode memory
         """
     )
     parser.add_argument('--data-dir', type=str, required=True, help='Path to data directory')
@@ -178,17 +199,10 @@ Examples:
     parser.add_argument('--batch-size', type=int, default=1024, help='Batch size (default: 1024)')
     parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate (default: 1e-3)')
     parser.add_argument(
-        '--mode', 
-        type=str, 
-        default='lazy', 
-        choices=['memory', 'lazy'],
-        help='Data loading mode (default: lazy)'
-    )
-    parser.add_argument(
-        '--cache-size',
+        '--num-files-loaded',
         type=int,
-        default=10,
-        help='Number of files to keep in cache for lazy mode (default: 10)'
+        default=4,
+        help='Number of parquet files to keep loaded in memory at once (default: 4)'
     )
     parser.add_argument(
         '--save-path',
@@ -239,15 +253,7 @@ Examples:
     
     # Load dataset
     print("Loading dataset...")
-    if args.mode == 'memory':
-        print("Using in-memory mode")
-        dataset = CatanDataset(args.data_dir, max_files=None)
-    elif args.mode == 'lazy':
-        print(f"Using lazy-loading mode (caches {args.cache_size} files)")
-        dataset = LazyLoadingCatanDataset(args.data_dir, max_files=None, cache_size=args.cache_size)
-    else:
-        raise ValueError(f"Unknown mode: {args.mode}")
-    
+    dataset = CatanDataset(args.data_dir, max_files=None)
     print(f"Dataset loaded: {len(dataset)} samples")
     print(f"Feature dimension: {len(dataset.feature_cols)}")
     print(f"Action space size: {ACTION_SPACE_SIZE}")
@@ -262,8 +268,6 @@ Examples:
                 'epochs': args.epochs,
                 'batch_size': args.batch_size,
                 'learning_rate': args.lr,
-                'mode': args.mode,
-                'cache_size': args.cache_size if args.mode == 'lazy' else None,
                 'dataset_size': len(dataset),
                 'feature_dim': len(dataset.feature_cols),
                 'action_space_size': ACTION_SPACE_SIZE,
@@ -281,7 +285,8 @@ Examples:
         batch_size=args.batch_size,
         lr=args.lr,
         save_path=args.save_path,
-        log_batch_freq=args.log_batch_freq
+        log_batch_freq=args.log_batch_freq,
+        num_files_loaded=args.num_files_loaded,
     )
     
     print("\n" + "="*60)
