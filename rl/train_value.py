@@ -12,20 +12,22 @@ import torch.optim as optim
 from tqdm import tqdm
 import wandb
 from typing import List
-from data import CatanDataset, InterleavedFileLoader
+from data import create_dataloader, estimate_steps_per_epoch
 from models import ValueNetwork
 
 
 def train_value_network(
-    dataset,
+    data_dir: str,
     epochs: int = 10,
     batch_size: int = 256,
     lr: float = 1e-3,
     device: str = 'cuda' if torch.cuda.is_available() else 'cpu',
     save_path: str = 'value_network_best.pt',
-    log_batch_freq: int = 10,
+    log_batch_freq: int = 1,
     hidden_dims: List[int] = [512, 512],
-    num_files_loaded: int = 4,
+    num_workers: int = 4,
+    buffer_size: int = 10000,
+    wandb_config: dict = None,
 ):
     """Train the value network to predict returns."""
     
@@ -34,38 +36,50 @@ def train_value_network(
     print(f"{'='*60}")
     print(f"Device: {device}")
     
+    # Create data loaders
+    train_loader = create_dataloader(
+        data_dir=data_dir,
+        batch_size=batch_size,
+        split='train',
+        shuffle=True,
+        buffer_size=buffer_size,
+        num_workers=num_workers,
+    )
+    
+    val_loader = create_dataloader(
+        data_dir=data_dir,
+        batch_size=batch_size,
+        split='validation',
+        shuffle=False,
+        buffer_size=buffer_size,
+        num_workers=num_workers,
+    )
+    
+    # Get input dimension from first batch
+    first_batch = next(iter(train_loader))
+    input_dim = first_batch['features'].shape[1]
+    print(f"Input dimension: {input_dim}")
+    
+    # Initialize wandb after dataloaders are ready
+    if wandb_config:
+        wandb.init(**wandb_config)
+        print(f"Initialized wandb: {wandb_config['project']}/{wandb_config.get('name', wandb.run.name)}")
+    else:
+        wandb.init(mode='disabled')
+    
     # Create model
-    input_dim = len(dataset.feature_cols)
     model = ValueNetwork(input_dim, hidden_dims).to(device)
-    
-    # Split data into train/val by file count (90/10 split)
-    num_train_files = int(0.9 * len(dataset.parquet_files))
-    train_indices = list(range(num_train_files))
-    val_indices = list(range(num_train_files, len(dataset.parquet_files)))
-    
-    print(f"Train: {len(train_indices)} files, Val: {len(val_indices)} files")
-    
-    # Create loaders with file subsets
-    train_loader = InterleavedFileLoader(
-        dataset,
-        batch_size=batch_size,
-        num_files_loaded=num_files_loaded,
-        drop_last=True,
-        file_indices=train_indices
-    )
-    
-    val_loader = InterleavedFileLoader(
-        dataset,
-        batch_size=batch_size,
-        num_files_loaded=min(num_files_loaded, len(val_indices)),
-        drop_last=False,
-        file_indices=val_indices
-    )
     
     # Loss and optimizer
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=lr)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=2, factor=0.5)
+    
+    # Calculate steps per epoch for progress bars
+    train_steps = estimate_steps_per_epoch(data_dir, 'train', batch_size)
+    val_steps = estimate_steps_per_epoch(data_dir, 'validation', batch_size)
+    print(f"Train steps per epoch: {train_steps}")
+    print(f"Validation steps per epoch: {val_steps}")
     
     best_val_loss = float('inf')
     global_step = 0
@@ -76,13 +90,10 @@ def train_value_network(
         train_correct = 0
         train_total = 0
         
-        # Start epoch: shuffle files and load initial pool
-        train_loader.start_epoch()
-        
         num_train_batches = 0
-        for batch_idx, (features, _, returns) in enumerate(tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs} [Train]")):
-            features = features.to(device, non_blocking=True)
-            returns = returns.to(device, non_blocking=True)
+        for batch_idx, batch in enumerate(tqdm(train_loader, total=train_steps, desc=f"Epoch {epoch+1}/{epochs} [Train]", unit="batch")):
+            features = batch['features'].to(device, non_blocking=True)
+            returns = batch['returns'].to(device, non_blocking=True)
             
             optimizer.zero_grad()
             predictions = model(features)
@@ -121,14 +132,11 @@ def train_value_network(
         val_correct = 0
         val_total = 0
         
-        # Start validation epoch
-        val_loader.start_epoch()
-        
         num_val_batches = 0
         with torch.no_grad():
-            for features, _, returns in tqdm(val_loader, desc=f"Epoch {epoch+1}/{epochs} [Val]"):
-                features = features.to(device, non_blocking=True)
-                returns = returns.to(device, non_blocking=True)
+            for batch in tqdm(val_loader, total=val_steps, desc=f"Epoch {epoch+1}/{epochs} [Val]", unit="batch"):
+                features = batch['features'].to(device, non_blocking=True)
+                returns = batch['returns'].to(device, non_blocking=True)
                 
                 predictions = model(features)
                 loss = criterion(predictions, returns)
@@ -181,10 +189,16 @@ def main():
     parser.add_argument('--batch-size', type=int, default=1024, help='Batch size (default: 1024)')
     parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate (default: 1e-3)')
     parser.add_argument(
-        '--num-files-loaded',
+        '--num-workers',
         type=int,
         default=4,
-        help='Number of parquet files to keep loaded in memory at once (default: 4)'
+        help='Number of parallel data loading workers (default: 4)'
+    )
+    parser.add_argument(
+        '--buffer-size',
+        type=int,
+        default=10000,
+        help='Shuffle buffer size - larger = more random but more memory (default: 10000)'
     )
     parser.add_argument(
         '--hidden-dims',
@@ -218,8 +232,8 @@ def main():
     parser.add_argument(
         '--log-batch-freq',
         type=int,
-        default=10,
-        help='Log batch metrics every N batches (default: 10)'
+        default=1,
+        help='Log batch metrics every N batches (default: 1)'
     )
     args = parser.parse_args()
     
@@ -242,42 +256,36 @@ def main():
     # Parse hidden dimensions
     hidden_dims = [int(dim) for dim in args.hidden_dims.split(',')]
     
-    # Load dataset
-    print("Loading dataset...")
-    dataset = CatanDataset(args.data_dir, max_files=None)
-    print(f"Dataset loaded: {len(dataset)} samples")
-    print(f"Feature dimension: {len(dataset.feature_cols)}")
-    
-    # Initialize wandb
+    # Prepare wandb config (will be initialized inside train function)
+    wandb_config = None
     if args.wandb:
-        wandb.init(
-            project=args.wandb_project,
-            name=args.wandb_run_name,
-            config={
+        wandb_config = {
+            'project': args.wandb_project,
+            'name': args.wandb_run_name,
+            'config': {
                 'model': 'value_network',
                 'epochs': args.epochs,
                 'batch_size': args.batch_size,
                 'hidden_dims': hidden_dims,
                 'learning_rate': args.lr,
-                'dataset_size': len(dataset),
-                'feature_dim': len(dataset.feature_cols),
+                'num_workers': args.num_workers,
+                'buffer_size': args.buffer_size,
                 'log_batch_freq': args.log_batch_freq,
             }
-        )
-        print(f"Initialized wandb: {args.wandb_project}/{args.wandb_run_name if args.wandb_run_name else wandb.run.name}")
-    else:
-        wandb.init(mode='disabled')
+        }
     
     # Train model
     train_value_network(
-        dataset,
+        data_dir=args.data_dir,
         epochs=args.epochs,
         batch_size=args.batch_size,
         lr=args.lr,
         hidden_dims=hidden_dims,
         save_path=args.save_path,
         log_batch_freq=args.log_batch_freq,
-        num_files_loaded=args.num_files_loaded,
+        num_workers=args.num_workers,
+        buffer_size=args.buffer_size,
+        wandb_config=wandb_config,
     )
     
     print("\n" + "="*60)

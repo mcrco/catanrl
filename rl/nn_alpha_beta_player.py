@@ -9,7 +9,7 @@ from catanatron.cli.cli_players import register_cli_player
 from catanatron.models.map import build_map
 from catanatron.features import create_sample_vector
 from catanatron.gym.board_tensor_features import create_board_tensor
-from rl.models import ValueNetwork
+from sl.models import ValueNetwork
 
 def game_to_features(game: Game, color: int) -> np.ndarray:
     """
@@ -21,7 +21,7 @@ def game_to_features(game: Game, color: int) -> np.ndarray:
     return np.concatenate([feature_vector, board_tensor.flatten()], axis=0)
 
 
-class RLValuePlayer(AlphaBetaPlayer):
+class NNAlphaBetaPlayer(AlphaBetaPlayer):
     """
     An AlphaBetaPlayer that uses a trained ValueNetwork for leaf evaluation.
     """
@@ -45,7 +45,7 @@ class RLValuePlayer(AlphaBetaPlayer):
         self.value_net.eval()
 
         self.use_value_function = True
-        self.value_fn_builder_name = "rl_value_network"
+        self.value_fn_builder_name = "nn_value_network"
 
     def value_function(self, game: Game, p0_color: int) -> float:
         """
@@ -65,9 +65,9 @@ class RLValuePlayer(AlphaBetaPlayer):
     def __repr__(self) -> str:
         return super().__repr__()
 
-def create_simple_rl_player(color, map_template='BASE'):
+def create_nn_alpha_beta_player(color, map_template='BASE'):
     """
-    Factory function to create RLValuePlayer.
+    Factory function to create NNAlphaBetaPlayer.
     
     Args:
         color: Player color
@@ -100,10 +100,10 @@ def create_simple_rl_player(color, map_template='BASE'):
     board_tensor = create_board_tensor(dummy_game, dummy_game.state.colors[0])
     input_dim = len(sample_vec) + board_tensor.size
     
-    return RLValuePlayer(
+    return NNAlphaBetaPlayer(
         color=color,
         model_path=model_path,
         input_dim=input_dim
     )
 
-register_cli_player("RL", create_simple_rl_player)
+register_cli_player("NNAB", create_nn_alpha_beta_player)
