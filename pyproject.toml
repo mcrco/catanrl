@@ -16,6 +16,7 @@ dependencies = [
     "tqdm>=4.65.0",
     "wandb>=0.15.0",
     "datasets>=4.4.0",
+    "gymnasium>=1.2.2",
 ]
 
 [project.optional-dependencies]

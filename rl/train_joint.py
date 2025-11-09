@@ -12,6 +12,7 @@ import torch.optim as optim
 from tqdm import tqdm
 import wandb
 from typing import List
+from sklearn.metrics import f1_score
 from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE
 from data import create_dataloader, estimate_steps_per_epoch
 from models import PolicyValueNetwork
@@ -113,6 +114,10 @@ def train_policy_value_network(
         train_policy_total = 0
         train_value_correct = 0
         train_value_total = 0
+        train_policy_all_preds = []
+        train_policy_all_labels = []
+        train_value_all_pred_signs = []
+        train_value_all_true_signs = []
         
         num_train_batches = 0
         for batch_idx, batch in enumerate(tqdm(train_loader, total=train_steps, desc=f"Epoch {epoch+1}/{epochs} [Train]", unit="batch")):
@@ -150,12 +155,22 @@ def train_policy_value_network(
             train_policy_correct += batch_policy_correct
             train_policy_total += batch_policy_total
             
+            # Store policy predictions and labels for F1 calculation
+            train_policy_all_preds.extend(predicted.cpu().numpy())
+            train_policy_all_labels.extend(actions.cpu().numpy())
+            
             # Value accuracy (correct winner prediction based on sign)
             pred_sign = torch.sign(value_pred)
             true_sign = torch.sign(returns)
             batch_value_correct = (pred_sign == true_sign).sum().item()
             train_value_correct += batch_value_correct
             train_value_total += returns.size(0)
+            
+            # Store value predictions and labels for F1 calculation (convert to binary: 1 for positive, 0 for negative/zero)
+            pred_binary = (pred_sign > 0).cpu().numpy().astype(int)
+            true_binary = (true_sign > 0).cpu().numpy().astype(int)
+            train_value_all_pred_signs.extend(pred_binary)
+            train_value_all_true_signs.extend(true_binary)
             
             # Log batch metrics to wandb
             if batch_idx % log_batch_freq == 0:
@@ -177,6 +192,8 @@ def train_policy_value_network(
         train_total_loss /= num_train_batches
         train_policy_acc = 100 * train_policy_correct / train_policy_total
         train_value_acc = train_value_correct / train_value_total if train_value_total > 0 else 0.0
+        train_policy_f1 = f1_score(train_policy_all_labels, train_policy_all_preds, average='macro', zero_division=0)
+        train_value_f1 = f1_score(train_value_all_true_signs, train_value_all_pred_signs, average='binary', zero_division=0)
         
         # Validation
         model.eval()
@@ -187,6 +204,10 @@ def train_policy_value_network(
         val_policy_total = 0
         val_value_correct = 0
         val_value_total = 0
+        val_policy_all_preds = []
+        val_policy_all_labels = []
+        val_value_all_pred_signs = []
+        val_value_all_true_signs = []
         
         num_val_batches = 0
         with torch.no_grad():
@@ -213,17 +234,29 @@ def train_policy_value_network(
                 val_policy_correct += (predicted == actions).sum().item()
                 val_policy_total += actions.size(0)
                 
+                # Store policy predictions and labels for F1 calculation
+                val_policy_all_preds.extend(predicted.cpu().numpy())
+                val_policy_all_labels.extend(actions.cpu().numpy())
+                
                 # Value accuracy (correct winner prediction based on sign)
                 pred_sign = torch.sign(value_pred)
                 true_sign = torch.sign(returns)
                 val_value_correct += (pred_sign == true_sign).sum().item()
                 val_value_total += returns.size(0)
+                
+                # Store value predictions and labels for F1 calculation (convert to binary: 1 for positive, 0 for negative/zero)
+                pred_binary = (pred_sign > 0).cpu().numpy().astype(int)
+                true_binary = (true_sign > 0).cpu().numpy().astype(int)
+                val_value_all_pred_signs.extend(pred_binary)
+                val_value_all_true_signs.extend(true_binary)
         
         val_policy_loss /= num_val_batches
         val_value_loss /= num_val_batches
         val_total_loss /= num_val_batches
         val_policy_acc = 100 * val_policy_correct / val_policy_total
         val_value_acc = val_value_correct / val_value_total if val_value_total > 0 else 0.0
+        val_policy_f1 = f1_score(val_policy_all_labels, val_policy_all_preds, average='macro', zero_division=0)
+        val_value_f1 = f1_score(val_value_all_true_signs, val_value_all_pred_signs, average='binary', zero_division=0)
         
         # Learning rate scheduling (based on total validation loss)
         scheduler.step(val_total_loss)
@@ -234,21 +267,25 @@ def train_policy_value_network(
             'train/value_loss': train_value_loss,
             'train/total_loss': train_total_loss,
             'train/policy_acc': train_policy_acc,
+            'train/policy_f1': train_policy_f1,
             'train/value_acc': train_value_acc,
+            'train/value_f1': train_value_f1,
             'val/policy_loss': val_policy_loss,
             'val/value_loss': val_value_loss,
             'val/total_loss': val_total_loss,
             'val/policy_acc': val_policy_acc,
+            'val/policy_f1': val_policy_f1,
             'val/value_acc': val_value_acc,
+            'val/value_f1': val_value_f1,
             'learning_rate': optimizer.param_groups[0]['lr'],
             'epoch': epoch + 1
         }, step=global_step)
         
         print(f"Epoch {epoch+1}/{epochs}")
-        print(f"  Train - Policy Loss: {train_policy_loss:.4f}, Policy Acc: {train_policy_acc:.2f}% | "
-              f"Value Loss: {train_value_loss:.6f}, Value Acc: {train_value_acc:.4f} | Total Loss: {train_total_loss:.4f}")
-        print(f"  Val   - Policy Loss: {val_policy_loss:.4f}, Policy Acc: {val_policy_acc:.2f}% | "
-              f"Value Loss: {val_value_loss:.6f}, Value Acc: {val_value_acc:.4f} | Total Loss: {val_total_loss:.4f}")
+        print(f"  Train - Policy Loss: {train_policy_loss:.4f}, Policy Acc: {train_policy_acc:.2f}%, Policy F1: {train_policy_f1:.4f} | "
+              f"Value Loss: {train_value_loss:.6f}, Value Acc: {train_value_acc:.4f}, Value F1: {train_value_f1:.4f} | Total Loss: {train_total_loss:.4f}")
+        print(f"  Val   - Policy Loss: {val_policy_loss:.4f}, Policy Acc: {val_policy_acc:.2f}%, Policy F1: {val_policy_f1:.4f} | "
+              f"Value Loss: {val_value_loss:.6f}, Value Acc: {val_value_acc:.4f}, Value F1: {val_value_f1:.4f} | Total Loss: {val_total_loss:.4f}")
         
         # Save best model based on combined metric (policy accuracy and total loss)
         is_best = False

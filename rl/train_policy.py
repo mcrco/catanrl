@@ -11,6 +11,7 @@ import torch.nn as nn
 import torch.optim as optim
 from tqdm import tqdm
 import wandb
+from sklearn.metrics import f1_score
 from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE
 from data import create_dataloader, estimate_steps_per_epoch
 from models import PolicyNetwork
@@ -101,6 +102,8 @@ def train_policy_network(
         train_loss = 0.0
         train_correct = 0
         train_total = 0
+        train_all_preds = []
+        train_all_labels = []
         
         num_train_batches = 0
         for batch_idx, batch in enumerate(tqdm(train_loader, total=train_steps, desc=f"Epoch {epoch+1}/{epochs} [Train]", unit="batch")):
@@ -122,6 +125,10 @@ def train_policy_network(
             train_correct += batch_correct
             train_total += batch_total
             
+            # Store predictions and labels for F1 calculation
+            train_all_preds.extend(predicted.cpu().numpy())
+            train_all_labels.extend(actions.cpu().numpy())
+            
             # Log batch metrics to wandb
             if batch_idx % log_batch_freq == 0:
                 batch_acc = 100 * batch_correct / batch_total
@@ -135,12 +142,15 @@ def train_policy_network(
         
         train_loss /= num_train_batches
         train_acc = 100 * train_correct / train_total
+        train_f1 = f1_score(train_all_labels, train_all_preds, average='macro', zero_division=0)
         
         # Validation
         model.eval()
         val_loss = 0.0
         val_correct = 0
         val_total = 0
+        val_all_preds = []
+        val_all_labels = []
         
         num_val_batches = 0
         with torch.no_grad():
@@ -156,9 +166,14 @@ def train_policy_network(
                 _, predicted = torch.max(logits, 1)
                 val_correct += (predicted == actions).sum().item()
                 val_total += actions.size(0)
+                
+                # Store predictions and labels for F1 calculation
+                val_all_preds.extend(predicted.cpu().numpy())
+                val_all_labels.extend(actions.cpu().numpy())
         
         val_loss /= num_val_batches
         val_acc = 100 * val_correct / val_total
+        val_f1 = f1_score(val_all_labels, val_all_preds, average='macro', zero_division=0)
         
         # Learning rate scheduling
         scheduler.step(val_loss)
@@ -167,14 +182,16 @@ def train_policy_network(
         wandb.log({
             'policy/train_loss': train_loss,
             'policy/train_acc': train_acc,
+            'policy/train_f1': train_f1,
             'policy/val_loss': val_loss,
             'policy/val_acc': val_acc,
+            'policy/val_f1': val_f1,
             'policy/learning_rate': optimizer.param_groups[0]['lr'],
             'policy/epoch': epoch + 1
         }, step=global_step)
         
-        print(f"Epoch {epoch+1}/{epochs} - Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}% | "
-              f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.2f}%")
+        print(f"Epoch {epoch+1}/{epochs} - Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}%, Train F1: {train_f1:.4f} | "
+              f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.2f}%, Val F1: {val_f1:.4f}")
         
         # Save best model
         if val_acc > best_val_acc:

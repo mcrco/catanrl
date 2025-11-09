@@ -131,9 +131,9 @@ def create_nn_policy_player(color, map_template='BASE'):
     
     # Use different model weights based on map type
     model_paths = {
-        'MINI': 'rl/weights/ab2-ab2-mini-10k-samp0.1_policy.pt',
-        'BASE': 'rl/weights/ab2-ab2-base-10k-samp0.1_policy.pt',
-        'TOURNAMENT': 'rl/weights/ab2-ab2-tournament-10k-samp0.1_policy.pt',
+        'MINI': 'rl/weights/f-f-mini-10k-samp0.1/f-f-mini-10k-samp0.1_policy.pt',
+        'BASE': 'rl/weights/f-f-base-10k-samp0.1/f-f-base-10k-samp0.1_policy.pt',
+        'TOURNAMENT': 'rl/weights/f-f-tournament-10k-samp0.1/f-f-tournament-10k-samp0.1_policy.pt',
     }
     model_path = model_paths.get(map_type, model_paths['BASE'])
     

@@ -12,6 +12,7 @@ import torch.optim as optim
 from tqdm import tqdm
 import wandb
 from typing import List
+from sklearn.metrics import f1_score
 from data import create_dataloader, estimate_steps_per_epoch
 from models import ValueNetwork
 
@@ -89,6 +90,8 @@ def train_value_network(
         train_loss = 0.0
         train_correct = 0
         train_total = 0
+        train_all_pred_signs = []
+        train_all_true_signs = []
         
         num_train_batches = 0
         for batch_idx, batch in enumerate(tqdm(train_loader, total=train_steps, desc=f"Epoch {epoch+1}/{epochs} [Train]", unit="batch")):
@@ -112,6 +115,12 @@ def train_value_network(
             train_correct += correct
             train_total += returns.size(0)
             
+            # Store predictions and labels for F1 calculation (convert to binary: 1 for positive, 0 for negative/zero)
+            pred_binary = (pred_sign > 0).cpu().numpy().astype(int)
+            true_binary = (true_sign > 0).cpu().numpy().astype(int)
+            train_all_pred_signs.extend(pred_binary)
+            train_all_true_signs.extend(true_binary)
+            
             # Log batch metrics to wandb
             if batch_idx % log_batch_freq == 0:
                 batch_accuracy = correct / returns.size(0)
@@ -125,12 +134,15 @@ def train_value_network(
         
         train_loss /= num_train_batches
         train_accuracy = train_correct / train_total if train_total > 0 else 0.0
+        train_f1 = f1_score(train_all_true_signs, train_all_pred_signs, average='binary', zero_division=0)
         
         # Validation
         model.eval()
         val_loss = 0.0
         val_correct = 0
         val_total = 0
+        val_all_pred_signs = []
+        val_all_true_signs = []
         
         num_val_batches = 0
         with torch.no_grad():
@@ -148,9 +160,16 @@ def train_value_network(
                 true_sign = torch.sign(returns)
                 val_correct += (pred_sign == true_sign).sum().item()
                 val_total += returns.size(0)
+                
+                # Store predictions and labels for F1 calculation (convert to binary: 1 for positive, 0 for negative/zero)
+                pred_binary = (pred_sign > 0).cpu().numpy().astype(int)
+                true_binary = (true_sign > 0).cpu().numpy().astype(int)
+                val_all_pred_signs.extend(pred_binary)
+                val_all_true_signs.extend(true_binary)
         
         val_loss /= num_val_batches
         val_accuracy = val_correct / val_total if val_total > 0 else 0.0
+        val_f1 = f1_score(val_all_true_signs, val_all_pred_signs, average='binary', zero_division=0)
         
         # Learning rate scheduling
         scheduler.step(val_loss)
@@ -159,13 +178,16 @@ def train_value_network(
         wandb.log({
             'value/train_loss': train_loss,
             'value/train_accuracy': train_accuracy,
+            'value/train_f1': train_f1,
             'value/val_loss': val_loss,
             'value/val_accuracy': val_accuracy,
+            'value/val_f1': val_f1,
             'value/learning_rate': optimizer.param_groups[0]['lr'],
             'value/epoch': epoch + 1
         }, step=global_step)
         
-        print(f"Epoch {epoch+1}/{epochs} - Train Loss: {train_loss:.6f}, Train Acc: {train_accuracy:.4f}, Val Loss: {val_loss:.6f}, Val Acc: {val_accuracy:.4f}")
+        print(f"Epoch {epoch+1}/{epochs} - Train Loss: {train_loss:.6f}, Train Acc: {train_accuracy:.4f}, Train F1: {train_f1:.4f}, "
+              f"Val Loss: {val_loss:.6f}, Val Acc: {val_accuracy:.4f}, Val F1: {val_f1:.4f}")
         
         # Save best model
         if val_loss < best_val_loss:

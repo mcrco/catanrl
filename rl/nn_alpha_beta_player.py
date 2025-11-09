@@ -9,7 +9,7 @@ from catanatron.cli.cli_players import register_cli_player
 from catanatron.models.map import build_map
 from catanatron.features import create_sample_vector
 from catanatron.gym.board_tensor_features import create_board_tensor
-from sl.models import ValueNetwork
+from rl.models import ValueNetwork
 
 def game_to_features(game: Game, color: int) -> np.ndarray:
     """
@@ -87,9 +87,9 @@ def create_nn_alpha_beta_player(color, map_template='BASE'):
     
     # Use different model weights based on map type
     model_paths = {
-        'MINI': 'rl/weights/ab2-ab2-mini-100k_value.pt',
-        'BASE': 'rl/weights/value_network_best.pt',  # Update with your base map model
-        'TOURNAMENT': 'rl/weights/value_network_best.pt',  # Update with your tournament map model
+        'MINI': 'rl/weights/f-f-mini-10k-samp0.1/f-f-mini-10k-samp0.1_value.pt',
+        'BASE': 'rl/weights/f-f-base-10k-samp0.1/f-f-base-10k-samp0.1_value.pt',  # Update with your base map model
+        'TOURNAMENT': 'rl/weights/f-f-tournament-10k-samp0.1/f-f-tournament-10k-samp0.1_value.pt',  # Update with your tournament map model
     }
     model_path = model_paths.get(map_type, model_paths['BASE'])
     
