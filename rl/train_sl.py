@@ -164,7 +164,8 @@ def train(
     
     # Get input dimension from first batch
     first_batch = next(iter(train_loader))
-    input_dim = first_batch['features'].shape[1]
+    # Handle both [batch, features] and [features] shapes safely
+    input_dim = first_batch['features'].shape[-1]
     print(f"Input dimension: {input_dim}")
     
     # Collect training actions for class weight computation

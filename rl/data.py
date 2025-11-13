@@ -456,8 +456,10 @@ def create_dataloader_from_shards(
     
     # Shuffle if requested (after pruning to reduce memory)
     if shuffle:
-        dataset = dataset.shuffle(buffer_size=buffer_size, seed=seed)
-        print(f"Shuffling with buffer_size={buffer_size}")
+        # Cap buffer size to prevent excessive memory use with large shards
+        effective_buffer = min(buffer_size, batch_size * 8)
+        dataset = dataset.shuffle(buffer_size=effective_buffer, seed=seed)
+        print(f"Shuffling with buffer_size={effective_buffer}")
     
     # Map to PyTorch format
     def format_batch(batch):
@@ -478,12 +480,18 @@ def create_dataloader_from_shards(
     # Apply formatting with batching
     dataset = dataset.map(format_batch, batched=True, batch_size=batch_size)
     
+    # Use batch_size=1 and unwrap to avoid double-batching
+    # (HF map already produces batched tensors, so we don't want DataLoader to batch again)
+    def _unwrap_collate(items):
+        return items[0]
+    
     # Create PyTorch DataLoader
     # Note: num_workers=0 because HF Datasets handles parallelism internally
     loader = DataLoader(
         dataset,
-        batch_size=batch_size,
+        batch_size=1,                # Important: avoid double-batching
         num_workers=0,
+        collate_fn=_unwrap_collate,  # Unwrap the pre-batched item
         pin_memory=torch.cuda.is_available(),
     )
     
