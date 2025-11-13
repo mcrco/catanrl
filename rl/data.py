@@ -226,7 +226,19 @@ def create_dataloader(
     # Identify feature columns from schema of the first file
     sample_pf = ParquetFile(str(files[0]))
     schema_names = list(sample_pf.schema_arrow.names)
-    feature_cols: List[str] = [c for c in schema_names if c.startswith('F_') or c.startswith('BT_')]
+    # Keep BT_* and non-graph F_* only (exclude F_NODE*, F_EDGE*, F_TILE*, F_PORT*)
+    def _is_non_graph_feature(col: str) -> bool:
+        if not col.startswith('F_'):
+            return False
+        return not (
+            col.startswith('F_NODE')
+            or col.startswith('F_EDGE')
+            or col.startswith('F_TILE')
+            or col.startswith('F_PORT')
+        )
+    feature_cols: List[str] = [
+        c for c in schema_names if c.startswith('BT_') or _is_non_graph_feature(c)
+    ]
     return_col = value_type if value_type != 'RETURN' else 'RETURN'
     required_cols = feature_cols + ['ACTION', return_col]
     print(f"Features: {len(feature_cols)} columns")
@@ -443,7 +455,17 @@ def create_dataloader_from_shards(
     # Get feature columns from first sample
     print("Identifying feature columns...")
     first_sample = next(iter(dataset))
-    feature_cols = [c for c in first_sample.keys() if c.startswith('F_') or c.startswith('BT_')]
+    # Keep BT_* and non-graph F_* only (exclude F_NODE*, F_EDGE*, F_TILE*, F_PORT*)
+    def _is_non_graph_feature(col: str) -> bool:
+        if not col.startswith('F_'):
+            return False
+        return not (
+            col.startswith('F_NODE')
+            or col.startswith('F_EDGE')
+            or col.startswith('F_TILE')
+            or col.startswith('F_PORT')
+        )
+    feature_cols = [c for c in first_sample.keys() if c.startswith('BT_') or _is_non_graph_feature(c)]
     return_col = value_type
     print(f"Features: {len(feature_cols)} columns")
     
