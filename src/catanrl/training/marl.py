@@ -7,7 +7,6 @@ with PPO-based reinforcement learning where all agents share the same policy/val
 network and learn via self-play in the CatanatronAECEnv.
 """
 
-import argparse
 import os
 import random
 from collections import defaultdict, deque
@@ -16,15 +15,21 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 import torch.optim as optim
-from tqdm import tqdm
 import wandb
+from tqdm import tqdm
 
-from catanatron.features import get_feature_ordering
-from catanatron.gym.board_tensor_features import get_channels, is_graph_feature
 from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE
-from catanatron.zoo.env.catanatron_aec_env import CatanatronAECEnv, aec_env
+
+from ..agents import MultiAgentRLAgent
+from ..algorithms.ppo.buffers import MultiAgentExperienceBuffer
+from ..algorithms.ppo.trainer_marl import ppo_update
+from ..envs.multi_env import (
+    build_marl_env,
+    compute_multiagent_input_dim,
+    flatten_marl_observation,
+    get_valid_actions,
+)
 from ..models.models import PolicyValueNetwork
 
 
@@ -37,128 +42,6 @@ class PendingExperience:
     valid_actions: np.ndarray
 
 
-class MultiAgentRLAgent:
-    """Shared policy/value agent for all players."""
-
-    def __init__(self, model: PolicyValueNetwork, device: str):
-        self.model = model
-        self.device = device
-
-    def select_action(
-        self, state_vec: np.ndarray, valid_actions: np.ndarray, deterministic: bool = False
-    ) -> Tuple[int, float, float]:
-        """Select an action for the current agent with action masking."""
-        if valid_actions.size == 0:
-            valid_actions = np.arange(ACTION_SPACE_SIZE, dtype=np.int64)
-
-        state_tensor = torch.from_numpy(state_vec).float().unsqueeze(0).to(self.device)
-        self.model.eval()
-        with torch.no_grad():
-            policy_logits, value = self.model(state_tensor)
-
-            mask = torch.full_like(policy_logits, float("-inf"))
-            mask[0, valid_actions] = 0.0
-            masked_logits = torch.clamp(policy_logits + mask, min=-100, max=100)
-
-            probs = torch.softmax(masked_logits, dim=-1)
-            log_probs_all = torch.log_softmax(masked_logits, dim=-1)
-
-            if deterministic:
-                action_idx = torch.argmax(probs[0, valid_actions]).item()
-                action = int(valid_actions[action_idx])
-            else:
-                valid_probs = probs[0, valid_actions]
-                valid_probs = valid_probs / (valid_probs.sum() + 1e-12)
-                dist = torch.distributions.Categorical(valid_probs)
-                action = int(valid_actions[dist.sample().item()])
-
-            log_prob = float(log_probs_all[0, action].item())
-            value_out = float(value.item())
-
-        return action, log_prob, value_out
-
-    def evaluate_actions(
-        self,
-        states: torch.Tensor,
-        actions: torch.Tensor,
-        valid_actions_batch: List[np.ndarray],
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Evaluate log-probs, values, and entropy with action masking."""
-        policy_logits, values = self.model(states)
-        batch_size, num_actions = policy_logits.shape
-
-        masks = torch.full(
-            (batch_size, num_actions), float("-inf"), device=states.device
-        )
-        for idx, valid in enumerate(valid_actions_batch):
-            if valid.size == 0:
-                masks[idx] = 0.0
-            else:
-                masks[idx, valid] = 0.0
-
-        masked_logits = torch.clamp(policy_logits + masks, min=-100, max=100)
-        log_probs_all = torch.log_softmax(masked_logits, dim=-1)
-        probs = torch.softmax(masked_logits, dim=-1)
-
-        log_probs = log_probs_all.gather(1, actions.unsqueeze(1)).squeeze(1)
-        entropy = -(probs * log_probs_all).sum(dim=-1)
-        return log_probs, values, entropy
-
-
-class ExperienceBuffer:
-    """Simple on-policy buffer collecting transitions across agents."""
-
-    def __init__(self):
-        self.states: List[np.ndarray] = []
-        self.actions: List[int] = []
-        self.rewards: List[float] = []
-        self.values: List[float] = []
-        self.log_probs: List[float] = []
-        self.valid_actions: List[np.ndarray] = []
-        self.dones: List[bool] = []
-
-    def add(
-        self,
-        state: np.ndarray,
-        action: int,
-        reward: float,
-        value: float,
-        log_prob: float,
-        valid_actions: np.ndarray,
-        done: bool,
-    ):
-        self.states.append(state.astype(np.float32, copy=False))
-        self.actions.append(int(action))
-        self.rewards.append(float(reward))
-        self.values.append(float(value))
-        self.log_probs.append(float(log_prob))
-        self.valid_actions.append(valid_actions.astype(np.int64, copy=False))
-        self.dones.append(bool(done))
-
-    def get(self):
-        return (
-            np.stack(self.states).astype(np.float32),
-            np.array(self.actions, dtype=np.int64),
-            np.array(self.rewards, dtype=np.float32),
-            np.array(self.values, dtype=np.float32),
-            np.array(self.log_probs, dtype=np.float32),
-            self.valid_actions,
-            np.array(self.dones, dtype=np.bool_),
-        )
-
-    def clear(self):
-        self.states.clear()
-        self.actions.clear()
-        self.rewards.clear()
-        self.values.clear()
-        self.log_probs.clear()
-        self.valid_actions.clear()
-        self.dones.clear()
-
-    def __len__(self) -> int:
-        return len(self.states)
-
-
 def set_global_seeds(seed: Optional[int]):
     if seed is None:
         return
@@ -167,170 +50,6 @@ def set_global_seeds(seed: Optional[int]):
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-
-
-def compute_input_dim(
-    num_players: int, map_type: str, representation: str
-) -> Tuple[int, Optional[Tuple[int, int, int]], int]:
-    features = get_feature_ordering(num_players, map_type)
-    if representation == "mixed":
-        numeric_features = [f for f in features if not is_graph_feature(f)]
-        channels = get_channels(num_players)
-        board_shape = (channels, 21, 11)
-        board_dim = int(np.prod(board_shape))
-        numeric_dim = len(numeric_features)
-        return numeric_dim + board_dim, board_shape, numeric_dim
-    return len(features), None, len(features)
-
-
-def flatten_observation(
-    observation: np.ndarray, representation: str
-) -> np.ndarray:
-    if representation == "mixed":
-        numeric = observation["numeric"].astype(np.float32, copy=False)
-        board = observation["board"].astype(np.float32, copy=False)
-        board_ch_last = np.transpose(board, (1, 2, 0))
-        board_flat = board_ch_last.reshape(-1).astype(np.float32, copy=False)
-        return np.concatenate([numeric, board_flat], axis=0)
-    return observation.astype(np.float32, copy=False)
-
-
-def get_valid_actions(info: Dict) -> np.ndarray:
-    actions = info.get("valid_actions")
-    if not actions:
-        return np.arange(ACTION_SPACE_SIZE, dtype=np.int64)
-    return np.array(actions, dtype=np.int64)
-
-
-def compute_gae(
-    rewards: np.ndarray,
-    values: np.ndarray,
-    dones: np.ndarray,
-    next_value: float,
-    gamma: float,
-    gae_lambda: float,
-) -> Tuple[np.ndarray, np.ndarray]:
-    advantages = np.zeros_like(rewards)
-    last_gae = 0.0
-
-    for t in reversed(range(len(rewards))):
-        if t == len(rewards) - 1:
-            next_value_t = 0.0 if dones[t] else next_value
-        else:
-            next_value_t = values[t + 1]
-
-        delta = rewards[t] + gamma * next_value_t * (1 - dones[t]) - values[t]
-        last_gae = delta + gamma * gae_lambda * (1 - dones[t]) * last_gae
-        advantages[t] = last_gae
-
-    returns = advantages + values
-    return advantages, returns
-
-
-def ppo_update(
-    agent: MultiAgentRLAgent,
-    optimizer: optim.Optimizer,
-    buffer: ExperienceBuffer,
-    clip_epsilon: float,
-    value_coef: float,
-    entropy_coef: float,
-    n_epochs: int,
-    batch_size: int,
-    device: str,
-    gamma: float,
-    gae_lambda: float,
-    max_grad_norm: float,
-) -> Dict[str, float]:
-    states, actions, rewards, old_values, old_log_probs, valid_actions, dones = buffer.get()
-
-    agent.model.eval()
-    with torch.no_grad():
-        last_state = torch.from_numpy(states[-1:]).float().to(device)
-        _, next_value_tensor = agent.model(last_state)
-        next_value = float(next_value_tensor.item())
-    agent.model.train()
-
-    advantages, returns = compute_gae(
-        rewards, old_values, dones, next_value, gamma, gae_lambda
-    )
-    advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-
-    states_t = torch.from_numpy(states).float().to(device)
-    actions_t = torch.from_numpy(actions).long().to(device)
-    old_log_probs_t = torch.from_numpy(old_log_probs).float().to(device)
-    advantages_t = torch.from_numpy(advantages).float().to(device)
-    returns_t = torch.from_numpy(returns).float().to(device)
-
-    total_policy_loss = 0.0
-    total_value_loss = 0.0
-    total_entropy = 0.0
-    total_loss = 0.0
-    n_updates = 0
-
-    for _ in range(n_epochs):
-        indices = np.random.permutation(len(states))
-        for start in range(0, len(states), batch_size):
-            end = start + batch_size
-            batch_idx = indices[start:end]
-            if len(batch_idx) < 2:
-                continue
-
-            batch_states = states_t[batch_idx]
-            batch_actions = actions_t[batch_idx]
-            batch_old_log_probs = old_log_probs_t[batch_idx]
-            batch_advantages = advantages_t[batch_idx]
-            batch_returns = returns_t[batch_idx]
-            batch_valid_actions = [valid_actions[i] for i in batch_idx]
-
-            log_probs, values, entropy = agent.evaluate_actions(
-                batch_states, batch_actions, batch_valid_actions
-            )
-
-            ratio = torch.exp(log_probs - batch_old_log_probs)
-            surr1 = ratio * batch_advantages
-            surr2 = torch.clamp(ratio, 1 - clip_epsilon, 1 + clip_epsilon) * batch_advantages
-            policy_loss = -torch.min(surr1, surr2).mean()
-
-            value_loss = F.mse_loss(values.squeeze(-1), batch_returns)
-            entropy_loss = -entropy.mean()
-
-            loss = policy_loss + value_coef * value_loss + entropy_coef * entropy_loss
-
-            optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(agent.model.parameters(), max_grad_norm)
-
-            has_nan_grad = any(
-                torch.isnan(param.grad).any()
-                for param in agent.model.parameters()
-                if param.grad is not None
-            )
-            if has_nan_grad:
-                optimizer.zero_grad()
-                continue
-
-            optimizer.step()
-
-            total_policy_loss += float(policy_loss.item())
-            total_value_loss += float(value_loss.item())
-            total_entropy += float(entropy_loss.item())
-            total_loss += float(loss.item())
-            n_updates += 1
-
-    if n_updates == 0:
-        return {
-            "policy_loss": 0.0,
-            "value_loss": 0.0,
-            "entropy_loss": 0.0,
-            "total_loss": 0.0,
-        }
-
-    return {
-        "policy_loss": total_policy_loss / n_updates,
-        "value_loss": total_value_loss / n_updates,
-        "entropy_loss": total_entropy / n_updates,
-        "total_loss": total_loss / n_updates,
-    }
 
 
 def train(
@@ -367,7 +86,9 @@ def train(
     set_global_seeds(seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    input_dim, board_shape, numeric_dim = compute_input_dim(num_players, map_type, representation)
+    input_dim, board_shape, numeric_dim = compute_multiagent_input_dim(
+        num_players, map_type, representation
+    )
     print(f"\n{'=' * 60}")
     print("Multi-Agent Self-Play Training (PPO)")
     print(f"{'=' * 60}")
@@ -387,7 +108,7 @@ def train(
         "invalid_action_reward": invalid_action_reward,
         "max_invalid_actions": max_invalid_actions,
     }
-    env: CatanatronAECEnv = aec_env(env_config)
+    env = build_marl_env(env_config)
 
     if wandb_config:
         wandb.init(**wandb_config)
@@ -409,7 +130,7 @@ def train(
     agent = MultiAgentRLAgent(model, device)
     optimizer = optim.Adam(model.parameters(), lr=lr)
 
-    buffer = ExperienceBuffer()
+    buffer = MultiAgentExperienceBuffer()
     recent_rewards = deque(maxlen=100)
     recent_wins = deque(maxlen=100)
     best_win_rate = -float("inf")
@@ -449,7 +170,7 @@ def train(
                     env.step(None)
                     continue
 
-                obs_vector = flatten_observation(observation, representation)
+                obs_vector = flatten_marl_observation(observation, representation)
                 valid_actions = get_valid_actions(info)
                 action, log_prob, value = agent.select_action(
                     obs_vector, valid_actions, deterministic=deterministic_policy
@@ -493,18 +214,18 @@ def train(
 
             if len(buffer) >= max(batch_size * 2, rollout_steps):
                 metrics = ppo_update(
-                    agent,
-                    optimizer,
-                    buffer,
-                    clip_epsilon,
-                    value_coef,
-                    entropy_coef,
-                    ppo_epochs,
-                    batch_size,
-                    device,
-                    gamma,
-                    gae_lambda,
-                    max_grad_norm,
+                    agent=agent,
+                    optimizer=optimizer,
+                    buffer=buffer,
+                    clip_epsilon=clip_epsilon,
+                    value_coef=value_coef,
+                    entropy_coef=entropy_coef,
+                    n_epochs=ppo_epochs,
+                    batch_size=batch_size,
+                    device=device,
+                    gamma=gamma,
+                    gae_lambda=gae_lambda,
+                    max_grad_norm=max_grad_norm,
                 )
                 buffer.clear()
                 agent.model.eval()
