@@ -10,6 +10,7 @@ import random
 import os
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 from datasets import load_dataset
+from tqdm import tqdm
 
 
 class ParquetBatchIterable(IterableDataset):
@@ -59,11 +60,13 @@ class ParquetBatchIterable(IterableDataset):
         if self.shuffle:
             rng.shuffle(worker_files)
         
-        # Shuffle buffer: accumulate buffer_size rows from multiple files,
-        # shuffle them, then yield batches
-        shuffle_buf_features = []
-        shuffle_buf_actions = []
-        shuffle_buf_returns = []
+        # Use a fixed-size reservoir buffer to avoid repeated large concatenations
+        num_features = len(self.feature_cols)
+        buf_features = np.empty((self.buffer_size, num_features), dtype=np.float32)
+        buf_actions = np.empty((self.buffer_size,), dtype=np.int64)
+        buf_returns = np.empty((self.buffer_size,), dtype=np.float32)
+        filled = 0
+        rng_np = np.random.RandomState(self.seed + worker_id)
         
         for fp in worker_files:
             # Read only required columns from file
@@ -76,81 +79,57 @@ class ParquetBatchIterable(IterableDataset):
             acts = df['ACTION'].to_numpy(dtype=np.int64, copy=False)
             rets = df[self.return_col].to_numpy(dtype=np.float32, copy=False)
             
-            # Add rows to shuffle buffer
-            shuffle_buf_features.append(feats)
-            shuffle_buf_actions.append(acts)
-            shuffle_buf_returns.append(rets)
-            
-            # Calculate current buffer size
-            current_buffer_size = sum(len(a) for a in shuffle_buf_actions)
-            
-            # Once buffer is full, shuffle and yield batches
-            while current_buffer_size >= self.buffer_size:
-                # Concatenate buffered data
-                all_features = np.concatenate(shuffle_buf_features, axis=0)
-                all_actions = np.concatenate(shuffle_buf_actions, axis=0)
-                all_returns = np.concatenate(shuffle_buf_returns, axis=0)
+            # Stream rows into the fixed-size reservoir buffer
+            offset = 0
+            n_rows = len(acts)
+            while offset < n_rows:
+                take = min(self.buffer_size - filled, n_rows - offset)
+                buf_features[filled:filled + take] = feats[offset:offset + take]
+                buf_actions[filled:filled + take] = acts[offset:offset + take]
+                buf_returns[filled:filled + take] = rets[offset:offset + take]
+                filled += take
+                offset += take
                 
-                # Take buffer_size samples
-                n_samples = len(all_actions)
-                take_size = min(self.buffer_size, n_samples)
-                
-                # Shuffle indices if requested
-                if self.shuffle:
-                    indices = np.arange(take_size)
-                    rng.shuffle(indices)
-                    buffer_features = all_features[indices]
-                    buffer_actions = all_actions[indices]
-                    buffer_returns = all_returns[indices]
-                else:
-                    buffer_features = all_features[:take_size]
-                    buffer_actions = all_actions[:take_size]
-                    buffer_returns = all_returns[:take_size]
-                
-                # Yield batches from shuffled buffer
-                for i in range(0, take_size, self.batch_size):
-                    end_idx = min(i + self.batch_size, take_size)
-                    yield {
-                        'features': torch.from_numpy(buffer_features[i:end_idx]),
-                        'actions': torch.from_numpy(buffer_actions[i:end_idx]),
-                        'returns': torch.from_numpy(buffer_returns[i:end_idx]),
-                    }
-                
-                # Keep remaining data in buffer
-                if n_samples > take_size:
-                    shuffle_buf_features = [all_features[take_size:]]
-                    shuffle_buf_actions = [all_actions[take_size:]]
-                    shuffle_buf_returns = [all_returns[take_size:]]
-                else:
-                    shuffle_buf_features = []
-                    shuffle_buf_actions = []
-                    shuffle_buf_returns = []
-                
-                current_buffer_size = sum(len(a) for a in shuffle_buf_actions)
+                # Once buffer is full, (optionally) shuffle and yield batches
+                if filled == self.buffer_size:
+                    if self.shuffle and filled > 1:
+                        perm = rng_np.permutation(filled)
+                        buffer_features = buf_features[perm]
+                        buffer_actions = buf_actions[perm]
+                        buffer_returns = buf_returns[perm]
+                    else:
+                        buffer_features = buf_features[:filled]
+                        buffer_actions = buf_actions[:filled]
+                        buffer_returns = buf_returns[:filled]
+                    
+                    for i in range(0, filled, self.batch_size):
+                        end_idx = min(i + self.batch_size, filled)
+                        yield {
+                            'features': torch.from_numpy(buffer_features[i:end_idx]),
+                            'actions': torch.from_numpy(buffer_actions[i:end_idx]),
+                            'returns': torch.from_numpy(buffer_returns[i:end_idx]),
+                        }
+                    filled = 0
         
         # Process remaining buffer at end
-        if shuffle_buf_features:
-            all_features = np.concatenate(shuffle_buf_features, axis=0)
-            all_actions = np.concatenate(shuffle_buf_actions, axis=0)
-            all_returns = np.concatenate(shuffle_buf_returns, axis=0)
-            
-            n_samples = len(all_actions)
-            
-            # Shuffle if requested
-            if self.shuffle and n_samples > 1:
-                indices = np.arange(n_samples)
-                rng.shuffle(indices)
-                all_features = all_features[indices]
-                all_actions = all_actions[indices]
-                all_returns = all_returns[indices]
+        if filled > 0:
+            if self.shuffle and filled > 1:
+                perm = rng_np.permutation(filled)
+                buffer_features = buf_features[:filled][perm]
+                buffer_actions = buf_actions[:filled][perm]
+                buffer_returns = buf_returns[:filled][perm]
+            else:
+                buffer_features = buf_features[:filled]
+                buffer_actions = buf_actions[:filled]
+                buffer_returns = buf_returns[:filled]
             
             # Yield remaining batches
-            for i in range(0, n_samples, self.batch_size):
-                end_idx = min(i + self.batch_size, n_samples)
+            for i in range(0, filled, self.batch_size):
+                end_idx = min(i + self.batch_size, filled)
                 yield {
-                    'features': torch.from_numpy(all_features[i:end_idx]),
-                    'actions': torch.from_numpy(all_actions[i:end_idx]),
-                    'returns': torch.from_numpy(all_returns[i:end_idx]),
+                    'features': torch.from_numpy(buffer_features[i:end_idx]),
+                    'actions': torch.from_numpy(buffer_actions[i:end_idx]),
+                    'returns': torch.from_numpy(buffer_returns[i:end_idx]),
                 }
     
 
@@ -166,6 +145,7 @@ def create_dataloader(
     max_files: Optional[int] = None,
     split_by_files: bool = True,
     test_size: float = 0.2,
+    prefetch_factor: int = 2,
 ):
     """
     Create a fast PyTorch DataLoader over Parquet files using a PyArrow-backed
@@ -266,8 +246,8 @@ def create_dataloader(
             num_workers=num_workers,
             collate_fn=_unwrap_collate,
             pin_memory=torch.cuda.is_available(),
-            persistent_workers=True,
-            prefetch_factor=2,
+            persistent_workers=False,
+            prefetch_factor=prefetch_factor,
         )
     else:
         loader = DataLoader(
@@ -281,6 +261,14 @@ def create_dataloader(
     print(f"DataLoader ready: batch_size={batch_size}, workers={num_workers}")
     print(f"{'='*60}\n")
     return loader
+
+
+def _read_parquet_num_rows(path: str) -> int:
+    """Helper function to read number of rows from a parquet file.
+    
+    Must be at module level for ProcessPoolExecutor pickling.
+    """
+    return pq.read_metadata(path).num_rows
 
 
 def estimate_steps_per_epoch(
@@ -343,30 +331,30 @@ def estimate_steps_per_epoch(
     # Read metadata to get total rows (in parallel)
     paths = [str(p) for p in selected_files]
     
-    def _read_num_rows(path: str) -> int:
-        # Using read_metadata avoids constructing full ParquetFile objects
-        return pq.read_metadata(path).num_rows
-    
     # Use parallel processing for multiple files
     if len(paths) == 1:
-        total_rows = _read_num_rows(paths[0])
+        total_rows = _read_parquet_num_rows(paths[0])
     else:
         if use_processes:
-            # ProcessPoolExecutor: True multi-core parallelism (each process has own GIL)
-            # Better for CPU-bound work, but has process spawning overhead
             workers = max_workers or os.cpu_count() or 8
             with ProcessPoolExecutor(max_workers=workers) as pool:
-                row_counts = list(pool.map(_read_num_rows, paths))
+                row_counts = list(tqdm(
+                    pool.map(_read_parquet_num_rows, paths),
+                    total=len(paths),
+                    desc=f"Reading metadata to estimate steps per {split} epoch",
+                    unit="file"
+                ))
                 total_rows = sum(row_counts)
-            print(f"Read metadata from {len(paths)} files using {workers} processes")
         else:
-            # ThreadPoolExecutor: Concurrent I/O (releases GIL during I/O operations)
-            # Better for I/O-bound metadata reading from disk
             workers = max_workers or min(32, (os.cpu_count() or 8) * 2)
             with ThreadPoolExecutor(max_workers=workers) as pool:
-                row_counts = list(pool.map(_read_num_rows, paths))
+                row_counts = list(tqdm(
+                    pool.map(_read_parquet_num_rows, paths),
+                    total=len(paths),
+                    desc=f"Reading metadata to estimate steps per {split} epoch",
+                    unit="file"
+                ))
                 total_rows = sum(row_counts)
-            print(f"Read metadata from {len(paths)} files using {workers} threads")
     
     # Calculate steps per epoch
     steps = int(np.ceil(total_rows / batch_size))

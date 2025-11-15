@@ -22,6 +22,7 @@ from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE
 from data import create_dataloader, create_dataloader_from_shards, estimate_steps_per_epoch
 from models import PolicyValueNetwork, HierarchicalPolicyValueNetwork
 from loss_utils import create_loss_computer
+from metrics import PolicyValueMetrics
 
 
 def read_actions_from_parquet(parquet_file: str) -> np.ndarray:
@@ -238,33 +239,23 @@ def train(
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=2, factor=0.5)
     
     # Calculate steps per epoch for progress bars
-    train_steps = estimate_steps_per_epoch(data_dir, 'train', batch_size)
-    val_steps = estimate_steps_per_epoch(data_dir, 'validation', batch_size)
+    train_steps = estimate_steps_per_epoch(data_dir, 'train', batch_size, max_workers=num_workers, use_processes=True)
+    val_steps = estimate_steps_per_epoch(data_dir, 'validation', batch_size, max_workers=num_workers, use_processes=True)
     print(f"Train steps per epoch: {train_steps}")
     print(f"Validation steps per epoch: {val_steps}")
     
-    best_val_acc = 0.0
+    best_val_f1 = 0.0
     best_val_loss = float('inf')
     global_step = 0
+    
+    # Initialize metrics tracker
+    train_metrics = PolicyValueMetrics(num_classes=ACTION_SPACE_SIZE, device=device)
+    val_metrics = PolicyValueMetrics(num_classes=ACTION_SPACE_SIZE, device=device)
     
     for epoch in range(epochs):
         # Training
         model.train()
-        train_policy_loss = 0.0
-        train_value_loss = 0.0
-        train_total_loss = 0.0
-        train_policy_correct = 0
-        train_policy_total = 0
-        train_value_correct = 0
-        train_value_total = 0
-        train_policy_all_preds = []
-        train_policy_all_labels = []
-        train_value_all_pred_signs = []
-        train_value_all_true_signs = []
-        train_action_type_loss = 0.0
-        train_param_loss = 0.0
-        
-        num_train_batches = 0
+        train_metrics.reset()  # Clear metrics from previous epoch
         for batch_idx, batch in enumerate(tqdm(train_loader, total=train_steps, desc=f"Epoch {epoch+1}/{epochs} [Train]", unit="batch")):
             features = batch['features'].to(device, non_blocking=True)
             actions = batch['actions'].to(device, non_blocking=True)
@@ -302,49 +293,30 @@ def train(
             total_loss.backward()
             optimizer.step()
             
-            # Track losses
+            # Extract scalar losses
             batch_policy_loss = policy_loss.item()
             batch_value_loss = value_loss.item()
             batch_total_loss = total_loss.item()
-            batch_action_type_loss = action_type_loss.item() if model_type == 'hierarchical' else 0.0
-            batch_param_loss = param_loss.item() if model_type == 'hierarchical' else 0.0
-            train_policy_loss += batch_policy_loss
-            train_value_loss += batch_value_loss
-            train_total_loss += batch_total_loss
-            train_action_type_loss += batch_action_type_loss
-            train_param_loss += batch_param_loss
-            num_train_batches += 1
+            batch_action_type_loss = action_type_loss.item() if model_type == 'hierarchical' else None
+            batch_param_loss = param_loss.item() if model_type == 'hierarchical' else None
             
-            # Policy accuracy
-            _, predicted = torch.max(policy_logits, 1)
-            batch_policy_correct = (predicted == actions).sum().item()
-            batch_policy_total = actions.size(0)
-            train_policy_correct += batch_policy_correct
-            train_policy_total += batch_policy_total
-            
-            # Store policy predictions and labels for F1 calculation
-            train_policy_all_preds.extend(predicted.cpu().numpy())
-            train_policy_all_labels.extend(actions.cpu().numpy())
-            
-            # Value accuracy (correct winner prediction based on sign)
-            pred_sign = torch.sign(value_pred)
-            true_sign = torch.sign(returns)
-            batch_value_correct = (pred_sign == true_sign).sum().item()
-            train_value_correct += batch_value_correct
-            train_value_total += returns.size(0)
-            
-            # Store value predictions and labels for F1 calculation (convert to binary: 1 for positive, 0 for negative/zero)
-            pred_binary = (pred_sign > 0).cpu().numpy().astype(int)
-            true_binary = (true_sign > 0).cpu().numpy().astype(int)
-            train_value_all_pred_signs.extend(pred_binary)
-            train_value_all_true_signs.extend(true_binary)
+            # Update metrics tracker
+            batch_metrics = train_metrics.update(
+                policy_logits=policy_logits,
+                value_pred=value_pred,
+                actions=actions,
+                returns=returns,
+                policy_loss=batch_policy_loss,
+                value_loss=batch_value_loss,
+                total_loss=batch_total_loss,
+                action_type_loss=batch_action_type_loss,
+                param_loss=batch_param_loss,
+            )
             
             # Log batch metrics to wandb
             if batch_idx % log_batch_freq == 0:
-                batch_policy_acc = 100 * batch_policy_correct / batch_policy_total
-                batch_value_acc = batch_value_correct / batch_policy_total
-                
-                # Compute F1 scores for this batch
+                # Compute F1 for logging (just this batch, not accumulated)
+                _, predicted = torch.max(policy_logits, 1)
                 batch_policy_f1 = f1_score(
                     actions.cpu().numpy(), 
                     predicted.cpu().numpy(), 
@@ -353,48 +325,28 @@ def train(
                 )
                 
                 log_dict = {
-                    'train/batch_policy_loss': batch_policy_loss,
-                    'train/batch_value_loss': batch_value_loss,
-                    'train/batch_total_loss': batch_total_loss,
-                    'train/batch_policy_acc': batch_policy_acc,
+                    'train/batch_policy_loss': batch_metrics['policy_loss'],
+                    'train/batch_value_loss': batch_metrics['value_loss'],
+                    'train/batch_total_loss': batch_metrics['total_loss'],
+                    'train/batch_policy_acc': batch_metrics['policy_acc'],
                     'train/batch_policy_f1': batch_policy_f1,
-                    'train/batch_value_acc': batch_value_acc,
+                    'train/batch_value_acc': batch_metrics['value_acc'] * 100,
                     'train/batch_step': global_step,
                 }
-                if model_type == 'hierarchical':
+                if model_type == 'hierarchical' and batch_action_type_loss is not None:
                     log_dict['train/batch_action_type_loss'] = batch_action_type_loss
                     log_dict['train/batch_param_loss'] = batch_param_loss
                 wandb.log(log_dict, step=global_step)
             
             global_step += 1
         
-        train_policy_loss /= num_train_batches
-        train_value_loss /= num_train_batches
-        train_total_loss /= num_train_batches
-        train_action_type_loss /= num_train_batches
-        train_param_loss /= num_train_batches
-        train_policy_acc = 100 * train_policy_correct / train_policy_total
-        train_value_acc = train_value_correct / train_value_total if train_value_total > 0 else 0.0
-        train_policy_f1 = f1_score(train_policy_all_labels, train_policy_all_preds, average='macro', zero_division=0)
-        train_value_f1 = f1_score(train_value_all_true_signs, train_value_all_pred_signs, average='binary', zero_division=0)
+        # Compute epoch-level metrics from accumulated statistics
+        train_epoch_metrics = train_metrics.compute_epoch_metrics()
         
         # Validation
         model.eval()
-        val_policy_loss = 0.0
-        val_value_loss = 0.0
-        val_total_loss = 0.0
-        val_policy_correct = 0
-        val_policy_total = 0
-        val_value_correct = 0
-        val_value_total = 0
-        val_policy_all_preds = []
-        val_policy_all_labels = []
-        val_value_all_pred_signs = []
-        val_value_all_true_signs = []
-        val_action_type_loss = 0.0
-        val_param_loss = 0.0
+        val_metrics.reset()  # Clear metrics from previous epoch/training
         
-        num_val_batches = 0
         with torch.no_grad():
             for batch in tqdm(val_loader, total=val_steps, desc=f"Epoch {epoch+1}/{epochs} [Val]", unit="batch"):
                 features = batch['features'].to(device, non_blocking=True)
@@ -427,99 +379,87 @@ def train(
                     policy_logits = model.get_flat_action_logits(action_type_logits, param_logits)
                     policy_loss = action_type_loss  # Use action type loss as proxy for policy loss
                 
-                val_policy_loss += policy_loss.item()
-                val_value_loss += value_loss.item()
-                val_total_loss += total_loss.item()
-                val_action_type_loss += action_type_loss.item() if model_type == 'hierarchical' else 0.0
-                val_param_loss += param_loss.item() if model_type == 'hierarchical' else 0.0
-                num_val_batches += 1
+                # Extract scalar losses
+                batch_policy_loss = policy_loss.item()
+                batch_value_loss = value_loss.item()
+                batch_total_loss = total_loss.item()
+                batch_action_type_loss = action_type_loss.item() if model_type == 'hierarchical' else None
+                batch_param_loss = param_loss.item() if model_type == 'hierarchical' else None
                 
-                # Policy accuracy
-                _, predicted = torch.max(policy_logits, 1)
-                val_policy_correct += (predicted == actions).sum().item()
-                val_policy_total += actions.size(0)
-                
-                # Store policy predictions and labels for F1 calculation
-                val_policy_all_preds.extend(predicted.cpu().numpy())
-                val_policy_all_labels.extend(actions.cpu().numpy())
-                
-                # Value accuracy (correct winner prediction based on sign)
-                pred_sign = torch.sign(value_pred)
-                true_sign = torch.sign(returns)
-                val_value_correct += (pred_sign == true_sign).sum().item()
-                val_value_total += returns.size(0)
-                
-                # Store value predictions and labels for F1 calculation (convert to binary: 1 for positive, 0 for negative/zero)
-                pred_binary = (pred_sign > 0).cpu().numpy().astype(int)
-                true_binary = (true_sign > 0).cpu().numpy().astype(int)
-                val_value_all_pred_signs.extend(pred_binary)
-                val_value_all_true_signs.extend(true_binary)
+                # Update metrics tracker
+                val_metrics.update(
+                    policy_logits=policy_logits,
+                    value_pred=value_pred,
+                    actions=actions,
+                    returns=returns,
+                    policy_loss=batch_policy_loss,
+                    value_loss=batch_value_loss,
+                    total_loss=batch_total_loss,
+                    action_type_loss=batch_action_type_loss,
+                    param_loss=batch_param_loss,
+                )
         
-        val_policy_loss /= num_val_batches
-        val_value_loss /= num_val_batches
-        val_total_loss /= num_val_batches
-        val_action_type_loss /= num_val_batches
-        val_param_loss /= num_val_batches
-        val_policy_acc = 100 * val_policy_correct / val_policy_total
-        val_value_acc = val_value_correct / val_value_total if val_value_total > 0 else 0.0
-        val_policy_f1 = f1_score(val_policy_all_labels, val_policy_all_preds, average='macro', zero_division=0)
-        val_value_f1 = f1_score(val_value_all_true_signs, val_value_all_pred_signs, average='binary', zero_division=0)
+        # Compute epoch-level validation metrics from accumulated statistics
+        val_epoch_metrics = val_metrics.compute_epoch_metrics()
         
         # Learning rate scheduling (based on total validation loss)
-        scheduler.step(val_total_loss)
+        scheduler.step(val_epoch_metrics['total_loss'])
         
         # Log epoch metrics to wandb
         log_dict = {
-            'train/policy_loss': train_policy_loss,
-            'train/value_loss': train_value_loss,
-            'train/total_loss': train_total_loss,
-            'train/policy_acc': train_policy_acc,
-            'train/policy_f1': train_policy_f1,
-            'train/value_acc': train_value_acc,
-            'train/value_f1': train_value_f1,
-            'val/policy_loss': val_policy_loss,
-            'val/value_loss': val_value_loss,
-            'val/total_loss': val_total_loss,
-            'val/policy_acc': val_policy_acc,
-            'val/policy_f1': val_policy_f1,
-            'val/value_acc': val_value_acc,
-            'val/value_f1': val_value_f1,
+            'train/policy_loss': train_epoch_metrics['policy_loss'],
+            'train/value_loss': train_epoch_metrics['value_loss'],
+            'train/total_loss': train_epoch_metrics['total_loss'],
+            'train/policy_acc': train_epoch_metrics['policy_acc'],
+            'train/policy_f1': train_epoch_metrics['policy_f1'],
+            'train/value_acc': train_epoch_metrics['value_acc'],
+            'train/value_f1': train_epoch_metrics['value_f1'],
+            'val/policy_loss': val_epoch_metrics['policy_loss'],
+            'val/value_loss': val_epoch_metrics['value_loss'],
+            'val/total_loss': val_epoch_metrics['total_loss'],
+            'val/policy_acc': val_epoch_metrics['policy_acc'],
+            'val/policy_f1': val_epoch_metrics['policy_f1'],
+            'val/value_acc': val_epoch_metrics['value_acc'],
+            'val/value_f1': val_epoch_metrics['value_f1'],
             'learning_rate': optimizer.param_groups[0]['lr'],
             'epoch': epoch + 1
         }
         if model_type == 'hierarchical':
             log_dict.update({
-                'train/action_type_loss': train_action_type_loss,
-                'train/param_loss': train_param_loss,
-                'val/action_type_loss': val_action_type_loss,
-                'val/param_loss': val_param_loss,
+                'train/action_type_loss': train_epoch_metrics.get('action_type_loss', 0.0),
+                'train/param_loss': train_epoch_metrics.get('param_loss', 0.0),
+                'val/action_type_loss': val_epoch_metrics.get('action_type_loss', 0.0),
+                'val/param_loss': val_epoch_metrics.get('param_loss', 0.0),
             })
         wandb.log(log_dict, step=global_step)
         
         print(f"Epoch {epoch+1}/{epochs}")
-        print(f"  Train - Policy Loss: {train_policy_loss:.4f}, Policy Acc: {train_policy_acc:.2f}%, Policy F1: {train_policy_f1:.4f} | "
-              f"Value Loss: {train_value_loss:.6f}, Value Acc: {train_value_acc:.4f}, Value F1: {train_value_f1:.4f} | Total Loss: {train_total_loss:.4f}")
-        print(f"  Val   - Policy Loss: {val_policy_loss:.4f}, Policy Acc: {val_policy_acc:.2f}%, Policy F1: {val_policy_f1:.4f} | "
-              f"Value Loss: {val_value_loss:.6f}, Value Acc: {val_value_acc:.4f}, Value F1: {val_value_f1:.4f} | Total Loss: {val_total_loss:.4f}")
+        print(f"  Train - Policy Loss: {train_epoch_metrics['policy_loss']:.4f}, Policy Acc: {train_epoch_metrics['policy_acc']:.2f}%, Policy F1: {train_epoch_metrics['policy_f1']:.4f} | "
+              f"Value Loss: {train_epoch_metrics['value_loss']:.6f}, Value Acc: {train_epoch_metrics['value_acc']:.4f}, Value F1: {train_epoch_metrics['value_f1']:.4f} | Total Loss: {train_epoch_metrics['total_loss']:.4f}")
+        print(f"  Val   - Policy Loss: {val_epoch_metrics['policy_loss']:.4f}, Policy Acc: {val_epoch_metrics['policy_acc']:.2f}%, Policy F1: {val_epoch_metrics['policy_f1']:.4f} | "
+              f"Value Loss: {val_epoch_metrics['value_loss']:.6f}, Value Acc: {val_epoch_metrics['value_acc']:.4f}, Value F1: {val_epoch_metrics['value_f1']:.4f} | Total Loss: {val_epoch_metrics['total_loss']:.4f}")
         
-        # Save best model based on combined metric (policy accuracy and total loss)
+        # Save best model based on combined metric (policy F1 and total loss)
         is_best = False
-        if val_policy_acc > best_val_acc:
-            best_val_acc = val_policy_acc
+        val_policy_f1 = val_epoch_metrics['policy_f1']
+        val_total_loss = val_epoch_metrics['total_loss']
+        
+        if val_policy_f1 > best_val_f1:
+            best_val_f1 = val_policy_f1
             best_val_loss = val_total_loss
             is_best = True
-        elif val_policy_acc == best_val_acc and val_total_loss < best_val_loss:
+        elif val_policy_f1 == best_val_f1 and val_total_loss < best_val_loss:
             best_val_loss = val_total_loss
             is_best = True
         
         if is_best:
             torch.save(model.state_dict(), save_path)
-            print(f"  → Saved best model (val_policy_acc: {val_policy_acc:.2f}%, val_total_loss: {val_total_loss:.4f})")
+            print(f"  → Saved best model (val_policy_f1: {val_policy_f1:.4f}, val_total_loss: {val_total_loss:.4f})")
             # Log best model metrics to wandb
-            wandb.run.summary['best_val_policy_acc'] = best_val_acc
+            wandb.run.summary['best_val_policy_f1'] = best_val_f1
             wandb.run.summary['best_val_total_loss'] = best_val_loss
     
-    print(f"\nBest validation policy accuracy: {best_val_acc:.2f}%")
+    print(f"\nBest validation policy F1: {best_val_f1:.4f}")
     print(f"Best validation total loss: {best_val_loss:.4f}")
     return model
 
