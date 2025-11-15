@@ -113,9 +113,9 @@ def create_nn_value_player(color, map_template='BASE'):
     
     # Use different model weights based on map type
     model_paths = {
-        'MINI': 'rl/weights/f-f-mini-10k-samp0.1/f-f-mini-10k-samp0.1-joint_policy_value.pt',
-        'BASE': 'rl/weights/f-f-base-10k-samp0.1/f-f-base-10k-samp0.1_value.pt',  # Update with your base map model
-        'TOURNAMENT': 'rl/weights/f-f-tournament-10k-samp0.1/f-f-tournament-10k-samp0.1_value.pt',  # Update with your tournament map model
+        'MINI': 'weights/f-f-mini-10k-samp0.1/f-f-mini-10k-samp0.1-joint_policy_value.pt',
+        'BASE': 'weights/f-f-base-10k-samp0.1/f-f-base-10k-samp0.1_value.pt',  # Update with your base map model
+        'TOURNAMENT': 'weights/f-f-tournament-10k-samp0.1/f-f-tournament-10k-samp0.1_value.pt',  # Update with your tournament map model
     }
     model_path = model_paths.get(map_type, model_paths['BASE'])
     

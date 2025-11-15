@@ -27,9 +27,14 @@ dev = [
     "ruff>=0.0.260",
 ]
 
+[project.scripts]
+train-sl = "catanrl.experiments.train_sl:main"
+train-sarl = "catanrl.experiments.train_sarl:main"
+train-marl = "catanrl.experiments.train_marl:main"
+
 [tool.setuptools.packages.find]
-include = ["rl*"]
-exclude = ["rl.data*", "rl.weights*"]
+where = ["src"]
+include = ["catanrl*"]
 
 [tool.black]
 line-length = 100

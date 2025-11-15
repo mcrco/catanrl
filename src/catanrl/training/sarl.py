@@ -18,7 +18,6 @@ import wandb
 from typing import List, Dict, Tuple
 
 import gymnasium
-import catanatron.gym
 from catanatron.models.player import RandomPlayer, Color
 from catanatron.players.weighted_random import WeightedRandomPlayer
 from catanatron.players.value import ValueFunctionPlayer
@@ -31,7 +30,8 @@ from catanatron.gym.board_tensor_features import create_board_tensor, is_graph_f
 from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE, ACTIONS_ARRAY
 from catanatron.game import Game
 from catanatron.models.map import build_map
-from models import PolicyValueNetwork
+from ..models.models import PolicyValueNetwork
+from catanrl.agents.gym_agent import GymAgent
 
 
 def game_to_features(game, color: Color) -> np.ndarray:
@@ -106,152 +106,6 @@ def create_opponents(opponent_configs: List[str]) -> List:
             opponents.append(RandomPlayer(color))
 
     return opponents
-
-
-class RLAgent:
-    """Agent wrapper for PolicyValueNetwork with action selection."""
-
-    def __init__(self, model: PolicyValueNetwork, device: str):
-        self.model = model
-        self.device = device
-
-    def select_action(
-        self, state: torch.Tensor, valid_actions: np.ndarray, deterministic: bool = False
-    ) -> Tuple[int, float, float]:
-        """
-        Select action using the policy network.
-
-        Returns:
-            action_idx: Index in ACTION_SPACE_SIZE
-            log_prob: Log probability of selected action
-            value: Value estimate
-        """
-        self.model.eval()  # Ensure eval mode for BatchNorm
-        with torch.no_grad():
-            policy_logits, value = self.model(state)  # [1, num_actions], [1]
-
-            # Check for NaN in model outputs
-            if torch.isnan(policy_logits).any() or torch.isnan(value).any():
-                print("WARNING: NaN detected in model output!")
-                # Fallback to random action
-                action_idx = np.random.choice(valid_actions)
-                log_prob = -np.log(len(valid_actions))
-                return action_idx, log_prob, 0.0
-
-            # Mask invalid actions
-            mask = torch.full_like(policy_logits, float("-inf"))
-            mask[0, valid_actions] = 0.0
-            masked_logits = policy_logits + mask
-
-            # Clamp logits to prevent overflow in softmax
-            masked_logits = torch.clamp(masked_logits, min=-100, max=100)
-
-            # Get action probabilities
-            probs = F.softmax(masked_logits, dim=-1)  # [1, num_actions]
-
-            if deterministic:
-                action_idx = torch.argmax(probs[0, valid_actions]).item()
-                action_idx = valid_actions[action_idx]
-            else:
-                # Sample from valid actions only
-                valid_probs = probs[0, valid_actions]
-                valid_probs = valid_probs / valid_probs.sum()  # Renormalize
-                dist = torch.distributions.Categorical(probs=valid_probs)
-                sampled_idx = dist.sample().item()
-                action_idx = valid_actions[sampled_idx]
-
-            # Calculate log probability for the selected action
-            log_probs_all = F.log_softmax(masked_logits, dim=-1)  # [1, num_actions]
-            log_prob = log_probs_all[0, action_idx].item()
-
-        return action_idx, log_prob, value.item()
-
-    def select_actions_batch(
-        self, states: torch.Tensor, valid_actions_batch: List[np.ndarray], deterministic: bool = False
-    ) -> Tuple[List[int], List[float], List[float]]:
-        """
-        Batched action selection for vectorized environments.
-        Args:
-            states: [batch, input_dim]
-            valid_actions_batch: list of np.ndarray of valid action indices per env
-        Returns:
-            actions: list[int] length batch
-            log_probs: list[float] length batch
-            values: list[float] length batch
-        """
-        self.model.eval()
-        actions: List[int] = []
-        log_probs_out: List[float] = []
-        values_out: List[float] = []
-        with torch.no_grad():
-            policy_logits, values = self.model(states)  # [B, A], [B]
-            batch_size, num_actions = policy_logits.shape
-
-            # Build mask
-            masks = torch.full((batch_size, num_actions), float("-inf"), device=self.device)
-            for i, valid_acts in enumerate(valid_actions_batch):
-                masks[i, valid_acts] = 0.0
-
-            masked_logits = policy_logits + masks
-            masked_logits = torch.clamp(masked_logits, min=-100, max=100)
-
-            probs = F.softmax(masked_logits, dim=-1)  # [B, A]
-            log_probs_all = F.log_softmax(masked_logits, dim=-1)  # [B, A]
-
-            for i in range(batch_size):
-                valid_actions = valid_actions_batch[i]
-                if deterministic:
-                    local_idx = torch.argmax(probs[i, valid_actions]).item()
-                    action_idx = int(valid_actions[local_idx])
-                else:
-                    valid_probs = probs[i, valid_actions]
-                    valid_probs = valid_probs / (valid_probs.sum() + 1e-12)
-                    dist = torch.distributions.Categorical(probs=valid_probs)
-                    sampled_idx = dist.sample().item()
-                    action_idx = int(valid_actions[sampled_idx])
-
-                actions.append(action_idx)
-                log_probs_out.append(float(log_probs_all[i, action_idx].item()))
-                values_out.append(float(values[i].item()))
-
-        return actions, log_probs_out, values_out
-
-    def evaluate_actions(
-        self, states: torch.Tensor, actions: torch.Tensor, valid_actions_batch: List[np.ndarray]
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Evaluate actions for PPO update.
-
-        Returns:
-            log_probs: Log probabilities of actions [batch_size]
-            values: Value estimates [batch_size]
-            entropy: Policy entropy [batch_size]
-        """
-        policy_logits, values = self.model(states)  # [batch_size, num_actions], [batch_size]
-
-        # Create masks for each sample in batch
-        batch_size = states.shape[0]
-        num_actions = policy_logits.shape[1]
-        masks = torch.full((batch_size, num_actions), float("-inf"), device=self.device)
-        for i, valid_acts in enumerate(valid_actions_batch):
-            masks[i, valid_acts] = 0.0
-
-        masked_logits = policy_logits + masks
-
-        # Clamp for numerical stability
-        masked_logits = torch.clamp(masked_logits, min=-100, max=100)
-
-        log_probs_all = F.log_softmax(masked_logits, dim=-1)  # [batch_size, num_actions]
-
-        # Get log probs for taken actions
-        log_probs = log_probs_all.gather(1, actions.unsqueeze(1)).squeeze(1)  # [batch_size]
-
-        # Calculate entropy
-        probs = F.softmax(masked_logits, dim=-1)  # [batch_size, num_actions]
-        entropy = -(probs * log_probs_all).sum(dim=-1)  # [batch_size]
-
-        return log_probs, values, entropy
-
 
 class ExperienceBuffer:
     """Buffer for storing and sampling experiences."""
@@ -332,7 +186,7 @@ def compute_gae(
 
 
 def ppo_update(
-    agent: RLAgent,
+    agent: GymAgent,
     optimizer: optim.Optimizer,
     buffer: ExperienceBuffer,
     clip_epsilon: float,
@@ -476,7 +330,7 @@ def train(
     entropy_coef: float = 0.01,
     n_epochs: int = 4,
     batch_size: int = 64,
-    save_path: str = "rl/weights/policy_value_rl_best.pt",
+    save_path: str = "weights/policy_value_rl_best.pt",
     save_freq: int = 100,
     device: str = "cuda" if torch.cuda.is_available() else "cpu",
     wandb_config: dict = None,
@@ -523,7 +377,7 @@ def train(
         print("  ✓ Weights loaded successfully")
 
     # Create agent and optimizer
-    agent = RLAgent(model, device)
+    agent = GymAgent(model, device)
     optimizer = optim.Adam(model.parameters(), lr=lr)
     model.eval()  # Start in eval mode for episode collection
 
@@ -697,207 +551,3 @@ def train(
     
     print(f"\nBest average reward: {best_avg_reward:.2f}")
     return model
-
-
-def main():
-    parser = argparse.ArgumentParser(
-        description="Train Catan Policy-Value Network with Self-Play RL (PPO)",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    parser.add_argument(
-        "--load-weights",
-        type=str,
-        default=None,
-        help="Path to pre-trained weights from supervised learning",
-    )
-    parser.add_argument(
-        "--episodes", type=int, default=1000, help="Number of episodes to train (default: 1000)"
-    )
-    parser.add_argument(
-        "--update-freq", type=int, default=32, help="Update model every N episodes (default: 32)"
-    )
-    parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate (default: 1e-4)")
-    parser.add_argument("--gamma", type=float, default=0.99, help="Discount factor (default: 0.99)")
-    parser.add_argument(
-        "--gae-lambda", type=float, default=0.95, help="GAE lambda parameter (default: 0.95)"
-    )
-    parser.add_argument(
-        "--clip-epsilon", type=float, default=0.2, help="PPO clipping parameter (default: 0.2)"
-    )
-    parser.add_argument(
-        "--value-coef", type=float, default=0.5, help="Value loss coefficient (default: 0.5)"
-    )
-    parser.add_argument(
-        "--entropy-coef", type=float, default=0.01, help="Entropy coefficient (default: 0.01)"
-    )
-    parser.add_argument(
-        "--n-epochs", type=int, default=4, help="Number of PPO epochs per update (default: 4)"
-    )
-    parser.add_argument(
-        "--batch-size", type=int, default=64, help="Mini-batch size for PPO update (default: 64)"
-    )
-    parser.add_argument(
-        "--hidden-dims", type=str, default="512,512", help="Hidden dimensions (default: 512,512)"
-    )
-    parser.add_argument(
-        "--save-path",
-        type=str,
-        default=None,
-        help="Path to save model (default: rl/weights/{wandb-run-name}/best.pt if using wandb, else rl/weights/policy_value_rl_best.pt)",
-    )
-    parser.add_argument(
-        "--save-freq", type=int, default=100, help="Save checkpoint every N episodes (default: 100)"
-    )
-    parser.add_argument(
-        "--map-type",
-        type=str,
-        default="BASE",
-        choices=["BASE", "MINI", "TOURNAMENT"],
-        help="Map type to use (default: BASE)",
-    )
-    parser.add_argument(
-        "--opponents",
-        type=str,
-        nargs="+",
-        default=["random"],
-        help="""Opponent bot types (1-3 opponents for 2-4 player game). Options:
-                - random, R: RandomPlayer
-                - weighted, W: WeightedRandomPlayer  
-                - value, F: ValueFunctionPlayer
-                - victorypoint, VP: VictoryPointPlayer
-                - alphabeta, AB: AlphaBetaPlayer (use AB:depth:prunning for custom params)
-                - sameturnalphabeta, SAB: SameTurnAlphaBetaPlayer
-                - mcts, M: MCTSPlayer (use M:num_sims for custom simulations)
-                - playouts, G: GreedyPlayoutsPlayer (use G:num_playouts for custom playouts)
-                Examples: --opponents random random random
-                          --opponents F W AB
-                          --opponents AB:3:False M:500
-                (default: random)""",
-    )
-    parser.add_argument("--wandb", action="store_true", help="Enable Weights & Biases logging")
-    parser.add_argument(
-        "--wandb-project",
-        type=str,
-        default="catan-rl",
-        help="Wandb project name (default: catan-rl)",
-    )
-    parser.add_argument(
-        "--wandb-run-name", type=str, default=None, help="Wandb run name (default: auto-generated)"
-    )
-    parser.add_argument(
-        "--num-envs",
-        type=int,
-        default=4,
-        help="Number of parallel environments for vectorized training (default: 4)",
-    )
-
-    args = parser.parse_args()
-
-    # Check if weights file exists
-    if args.load_weights and not os.path.exists(args.load_weights):
-        print(f"Error: Weights file '{args.load_weights}' not found!")
-        print("Please train a model with train_joint.py first")
-        return
-
-    # Set default save path
-    if args.save_path is None:
-        if args.wandb and args.wandb_run_name:
-            # Use wandb run name as directory
-            args.save_path = f"rl/weights/{args.wandb_run_name}/best.pt"
-        else:
-            # Default fallback
-            args.save_path = "rl/weights/policy_value_rl_best.pt"
-
-    # Create save directory
-    save_dir = os.path.dirname(args.save_path)
-    if save_dir and not os.path.exists(save_dir):
-        print(f"Creating directory '{save_dir}'")
-        os.makedirs(save_dir, exist_ok=True)
-
-    # Create opponents first to determine number of players
-    if not args.opponents:
-        args.opponents = ["random"]
-    temp_opponents = create_opponents(args.opponents)
-    num_players = len(temp_opponents) + 1  # +1 for the RL agent (BLUE)
-
-    # Calculate input dimension based on actual number of players
-    from catanatron.game import Game
-    from catanatron.models.map import build_map
-
-    # Create dummy players matching the actual game setup
-    colors_list = [Color.RED, Color.BLUE, Color.WHITE, Color.ORANGE]
-    dummy_players = [RandomPlayer(colors_list[i]) for i in range(num_players)]
-    dummy_game = Game(dummy_players, catan_map=build_map(args.map_type))
-    # For vectorized training we use 'mixed' observation: numeric (non-graph) + board tensor
-    all_features = get_feature_ordering(num_players, args.map_type)
-    numeric_len = len([f for f in all_features if not is_graph_feature(f)])
-    board_tensor = create_board_tensor(dummy_game, dummy_game.state.colors[0])
-    input_dim = numeric_len + board_tensor.size
-    print(f"Number of players: {num_players}")
-    print(f"Input dimension: {input_dim}")
-
-    # Parse hidden dimensions
-    hidden_dims = [int(dim) for dim in args.hidden_dims.split(",")]
-
-    # Prepare wandb config
-    wandb_config = None
-    if args.wandb:
-        wandb_config = {
-            "project": args.wandb_project,
-            "name": args.wandb_run_name,
-            "config": {
-                "algorithm": "PPO",
-                "episodes": args.episodes,
-                "update_freq": args.update_freq,
-                "lr": args.lr,
-                "gamma": args.gamma,
-                "gae_lambda": args.gae_lambda,
-                "clip_epsilon": args.clip_epsilon,
-                "value_coef": args.value_coef,
-                "entropy_coef": args.entropy_coef,
-                "n_epochs": args.n_epochs,
-                "batch_size": args.batch_size,
-                "hidden_dims": hidden_dims,
-                "map_type": args.map_type,
-                "load_weights": args.load_weights,
-                "opponents": args.opponents,
-                "num_envs": args.num_envs,
-            },
-        }
-
-    # Train model
-    train(
-        input_dim=input_dim,
-        num_actions=ACTION_SPACE_SIZE,
-        hidden_dims=hidden_dims,
-        load_weights=args.load_weights,
-        n_episodes=args.episodes,
-        update_freq=args.update_freq,
-        lr=args.lr,
-        gamma=args.gamma,
-        gae_lambda=args.gae_lambda,
-        clip_epsilon=args.clip_epsilon,
-        value_coef=args.value_coef,
-        entropy_coef=args.entropy_coef,
-        n_epochs=args.n_epochs,
-        batch_size=args.batch_size,
-        save_path=args.save_path,
-        save_freq=args.save_freq,
-        wandb_config=wandb_config,
-        map_type=args.map_type,
-        opponent_configs=args.opponents,
-        num_envs=args.num_envs,
-    )
-
-    print("\n" + "=" * 60)
-    print("Training Complete!")
-    print("=" * 60)
-    print(f"Model saved: {args.save_path}")
-
-    # Finish wandb
-    if args.wandb:
-        wandb.finish()
-
-
-if __name__ == "__main__":
-    main()

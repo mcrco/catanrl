@@ -24,11 +24,7 @@ class PolicyValueNetwork(nn.Module):
             prev_dim = hidden_dim
         
         self.backbone = nn.Sequential(*backbone_layers)
-        
-        # Policy head (action prediction)
         self.policy_head = nn.Linear(prev_dim, num_actions)
-        
-        # Value head (return prediction)
         self.value_head = nn.Linear(prev_dim, 1)
     
     def forward(self, x):
