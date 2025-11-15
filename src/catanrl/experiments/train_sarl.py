@@ -1,14 +1,15 @@
 import argparse
 import os
 import wandb
-from catanrl.training.sarl import train
 from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE
 from catanatron.game import Game
 from catanatron.models.map import build_map
-from catanatron.features import get_feature_ordering, is_graph_feature
-from catanatron.gym.board_tensor_features import create_board_tensor
+from catanatron.features import get_feature_ordering
+from catanatron.gym.board_tensor_features import create_board_tensor, is_graph_feature
 from catanatron.models.player import RandomPlayer, Color
-from catanatron.cli.cli_players import create_opponents
+
+from ..envs.single_env import create_opponents
+from ..training.sarl import train
 
 def main():
     parser = argparse.ArgumentParser(
@@ -107,7 +108,7 @@ def main():
     # Check if weights file exists
     if args.load_weights and not os.path.exists(args.load_weights):
         print(f"Error: Weights file '{args.load_weights}' not found!")
-        print("Please train a model with train_joint.py first")
+        print("Please train a model first")
         return
 
     # Set default save path
