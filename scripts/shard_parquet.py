@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import List
 import pandas as pd
 import pyarrow.parquet as pq
+import pyarrow as pa
 from concurrent.futures import ProcessPoolExecutor
 from tqdm import tqdm
 import numpy as np
@@ -34,7 +35,11 @@ def shard_file_chunk(
     worker_id: int,
 ) -> int:
     """
-    Process a chunk of files assigned to a worker.
+    Process a chunk of files assigned to a worker using memory-efficient PyArrow Tables.
+    
+    The algorithm keeps at most one partial buffer (< rows_per_shard rows) in memory
+    and streams rows from each file to fill and flush shards. This avoids repeated
+    concatenations and large intermediate pandas DataFrames.
     
     Args:
         files: List of parquet files to process
@@ -46,55 +51,67 @@ def shard_file_chunk(
     Returns:
         Number of shards created by this worker
     """
-    buffer_dfs = []
-    current_rows = 0
     shard_num = shard_offset
     shards_created = 0
     
+    # Partial buffer across files (PyArrow Table or None)
+    buffer_table = None
+    base_schema = None  # Ensure consistent column order
+    
     for file_path in tqdm(files, desc=f"Worker {worker_id}", position=worker_id, leave=False):
         try:
-            # Read parquet file
-            df = pd.read_parquet(file_path)
-            
-            if len(df) == 0:
+            # Read parquet file as Arrow Table (fast, zero-copy when possible)
+            table = pq.read_table(str(file_path), memory_map=True)
+            if table.num_rows == 0:
                 continue
             
-            buffer_dfs.append(df)
-            current_rows += len(df)
+            # Initialize/align schema and column order
+            if base_schema is None:
+                base_schema = table.schema
+            else:
+                # Reorder columns to match base schema (assumes compatible schemas)
+                table = table.select(base_schema.names)
             
-            # Write shard when buffer is full
-            while current_rows >= rows_per_shard:
-                # Concatenate buffered dataframes
-                combined = pd.concat(buffer_dfs, ignore_index=True)
-                
-                # Take rows_per_shard rows
-                shard_df = combined.iloc[:rows_per_shard]
-                remaining_df = combined.iloc[rows_per_shard:]
-                
-                # Write shard
-                output_path = output_dir / f"shard_{shard_num:06d}.parquet"
-                shard_df.to_parquet(output_path, index=False, engine='pyarrow')
-                
-                # Update buffer
-                if len(remaining_df) > 0:
-                    buffer_dfs = [remaining_df]
-                    current_rows = len(remaining_df)
+            # Fast path: if we already have buffered rows, try to fill a shard
+            if buffer_table is not None and buffer_table.num_rows > 0:
+                need = rows_per_shard - buffer_table.num_rows
+                if table.num_rows >= need:
+                    # Complete shard from buffer + slice of current table
+                    shard_table = pa.concat_tables([buffer_table, table.slice(0, need)], promote_options="default")
+                    output_path = output_dir / f"shard_{shard_num:06d}.parquet"
+                    pq.write_table(shard_table, output_path, compression="snappy", data_page_version="2.0", write_statistics=True, row_group_size=rows_per_shard)
+                    shard_num += 1
+                    shards_created += 1
+                    
+                    # Advance current table and clear buffer
+                    table = table.slice(need)
+                    buffer_table = None
                 else:
-                    buffer_dfs = []
-                    current_rows = 0
-                
+                    # Not enough to complete a shard; just extend the buffer and continue
+                    buffer_table = pa.concat_tables([buffer_table, table], promote_options="default")
+                    continue
+            
+            # Now buffer is empty. We may be able to write multiple full shards from 'table'
+            while table.num_rows >= rows_per_shard:
+                shard_table = table.slice(0, rows_per_shard)
+                output_path = output_dir / f"shard_{shard_num:06d}.parquet"
+                pq.write_table(shard_table, output_path, compression="snappy", data_page_version="2.0", write_statistics=True, row_group_size=rows_per_shard)
                 shard_num += 1
                 shards_created += 1
-                
+                table = table.slice(rows_per_shard)
+            
+            # Any remaining rows go into the buffer (less than rows_per_shard)
+            if table.num_rows > 0:
+                buffer_table = table if buffer_table is None else pa.concat_tables([buffer_table, table], promote_options="default")
+        
         except Exception as e:
             print(f"Error processing {file_path}: {e}")
             continue
     
-    # Write final partial shard if any data remains
-    if buffer_dfs and current_rows > 0:
-        combined = pd.concat(buffer_dfs, ignore_index=True)
+    # Write final partial shard if any data remains in buffer
+    if buffer_table is not None and buffer_table.num_rows > 0:
         output_path = output_dir / f"shard_{shard_num:06d}.parquet"
-        combined.to_parquet(output_path, index=False, engine='pyarrow')
+        pq.write_table(buffer_table, output_path, compression="snappy", data_page_version="2.0", write_statistics=True, row_group_size=min(rows_per_shard, buffer_table.num_rows))
         shards_created += 1
     
     return shards_created
