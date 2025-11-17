@@ -11,6 +11,7 @@ from typing import List
 import numpy as np
 import torch
 import torch.optim as optim
+import torch.optim.lr_scheduler as lr_scheduler
 import wandb
 from tqdm import tqdm
 
@@ -46,6 +47,8 @@ def train(
     map_type: str = "BASE",
     opponent_configs: List[str] | None = None,
     num_envs: int = 4,
+    use_lr_scheduler: bool = False,
+    lr_scheduler_kwargs: dict | None = None,
 ):
     """Train PolicyValueNetwork using single-agent PPO."""
 
@@ -88,6 +91,21 @@ def train(
 
     agent = SARLAgent(model, model_type, device)
     optimizer = optim.Adam(model.parameters(), lr=lr)
+    
+    # Create learning rate scheduler
+    scheduler = None
+    if use_lr_scheduler:
+        scheduler_kwargs = lr_scheduler_kwargs or {}
+        start_factor = scheduler_kwargs.get("start_factor", 1.0)
+        end_factor = scheduler_kwargs.get("end_factor", 0.0)
+        total_iters = scheduler_kwargs.get("total_iters", n_episodes)
+        scheduler = lr_scheduler.LinearLR(
+            optimizer, start_factor=start_factor, end_factor=end_factor, total_iters=total_iters
+        )
+        print(f"LR Scheduler: LinearLR (start_factor={start_factor}, end_factor={end_factor}, total_iters={total_iters})")
+    else:
+        print("LR Scheduler: None (constant learning rate)")
+    
     model.eval()
 
     buffer = OnPolicyBuffer()
@@ -226,22 +244,30 @@ def train(
                 buffer.clear()
                 model.eval()
 
+                # Step learning rate scheduler
+                current_lr = optimizer.param_groups[0]["lr"]
+                if scheduler is not None:
+                    scheduler.step()
+                    new_lr = optimizer.param_groups[0]["lr"]
+                    if new_lr != current_lr:
+                        print(f"  → LR updated: {current_lr:.6f} → {new_lr:.6f}")
+
                 print(
                     f"\n  → PPO Update | "
                     f"Policy Loss: {metrics['policy_loss']:.4f} | "
                     f"Value Loss: {metrics['value_loss']:.4f} | "
-                    f"Entropy: {-metrics['entropy_loss']:.4f}"
+                    f"Entropy: {-metrics['entropy_loss']:.4f} | "
+                    f"LR: {current_lr:.6f}"
                 )
 
-                wandb.log(
-                    {
-                        "train/policy_loss": metrics["policy_loss"],
-                        "train/value_loss": metrics["value_loss"],
-                        "train/entropy": -metrics["entropy_loss"],
-                        "train/total_loss": metrics["total_loss"],
-                    },
-                    step=global_step,
-                )
+                log_dict = {
+                    "train/policy_loss": metrics["policy_loss"],
+                    "train/value_loss": metrics["value_loss"],
+                    "train/entropy": -metrics["entropy_loss"],
+                    "train/total_loss": metrics["total_loss"],
+                    "train/learning_rate": current_lr,
+                }
+                wandb.log(log_dict, step=global_step)
 
     envs.close()
     print(f"\nBest average reward: {best_avg_reward:.2f}")

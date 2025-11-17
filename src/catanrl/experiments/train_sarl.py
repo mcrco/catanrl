@@ -109,6 +109,29 @@ def main():
         default=4,
         help="Number of parallel environments for vectorized training (default: 4)",
     )
+    parser.add_argument(
+        "--use-lr-scheduler",
+        action="store_true",
+        help="Enable linear learning rate scheduling (default: False)",
+    )
+    parser.add_argument(
+        "--lr-scheduler-start-factor",
+        type=float,
+        default=1.0,
+        help="Start factor for LinearLR scheduler (default: 1.0)",
+    )
+    parser.add_argument(
+        "--lr-scheduler-end-factor",
+        type=float,
+        default=0.0,
+        help="End factor for LinearLR scheduler (default: 0.0)",
+    )
+    parser.add_argument(
+        "--lr-scheduler-total-iters",
+        type=int,
+        default=None,
+        help="Total iterations for LinearLR scheduler (default: n_episodes)",
+    )
 
     args = parser.parse_args()
 
@@ -156,6 +179,16 @@ def main():
     # Parse hidden dimensions
     hidden_dims = [int(dim) for dim in args.hidden_dims.split(",")]
 
+    # Prepare LR scheduler kwargs
+    lr_scheduler_kwargs = None
+    if args.use_lr_scheduler:
+        lr_scheduler_kwargs = {
+            "start_factor": args.lr_scheduler_start_factor,
+            "end_factor": args.lr_scheduler_end_factor,
+        }
+        if args.lr_scheduler_total_iters is not None:
+            lr_scheduler_kwargs["total_iters"] = args.lr_scheduler_total_iters
+
     # Prepare wandb config
     wandb_config = None
     if args.wandb:
@@ -179,6 +212,8 @@ def main():
                 "load_weights": args.load_weights,
                 "opponents": args.opponents,
                 "num_envs": args.num_envs,
+                "use_lr_scheduler": args.use_lr_scheduler,
+                "lr_scheduler_kwargs": lr_scheduler_kwargs,
             },
         }
 
@@ -205,6 +240,8 @@ def main():
         map_type=args.map_type,
         opponent_configs=args.opponents,
         num_envs=args.num_envs,
+        use_lr_scheduler=args.use_lr_scheduler,
+        lr_scheduler_kwargs=lr_scheduler_kwargs,
     )
 
     print("\n" + "=" * 60)
