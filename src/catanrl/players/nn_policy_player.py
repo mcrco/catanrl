@@ -9,7 +9,9 @@ from catanatron.models.map import build_map
 from catanatron.features import create_sample_vector
 from catanatron.gym.board_tensor_features import create_board_tensor
 from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE, to_action_space, ACTIONS_ARRAY, normalize_action
-from rl.models import PolicyNetwork
+from catanatron.features import get_feature_ordering, is_graph_feature
+
+from ..models.models import PolicyValueNetwork
 
 
 def game_to_features(game: Game, color: int) -> np.ndarray:
@@ -20,11 +22,6 @@ def game_to_features(game: Game, color: int) -> np.ndarray:
     feature_vector = create_sample_vector(game, color)
     board_tensor = create_board_tensor(game, color)
     return np.concatenate([feature_vector, board_tensor.flatten()], axis=0)
-
-
-def _rebuild_nn_policy_player(color, model_path, input_dim, epsilon):
-    """Helper function to rebuild NNPolicyPlayer from pickle."""
-    return NNPolicyPlayer(color, model_path, input_dim, epsilon)
 
 
 class NNPolicyPlayer(Player):
@@ -48,7 +45,7 @@ class NNPolicyPlayer(Player):
         self.input_dim = input_dim
         
         # Load the trained policy network
-        self.policy_net = PolicyNetwork(input_dim, ACTION_SPACE_SIZE).to(self.device)
+        self.policy_net = PolicyValueNetwork(input_dim, ACTION_SPACE_SIZE).to(self.device)
         self.policy_net.load_state_dict(torch.load(model_path, map_location=self.device))
         self.policy_net.eval()
 
@@ -96,15 +93,6 @@ class NNPolicyPlayer(Player):
         # Fallback: should not happen, but return first action if something goes wrong
         return playable_actions[0]
 
-    def __reduce__(self):
-        """Custom pickle method to handle PyTorch model."""
-        # Return a tuple (callable, args) to recreate the object
-        # This avoids pickling the PyTorch model itself
-        return (
-            _rebuild_nn_policy_player,
-            (self.color, self.model_path, self.input_dim, self.epsilon)
-        )
-
     def __repr__(self) -> str:
         return super().__repr__().replace("Player", "NNPolicyPlayer")
 
@@ -131,18 +119,19 @@ def create_nn_policy_player(color, map_template='BASE'):
     
     # Use different model weights based on map type
     model_paths = {
-        'MINI': 'weights/f-f-mini-10k-samp0.1/f-f-mini-10k-samp0.1_policy.pt',
-        'BASE': 'weights/f-f-base-10k-samp0.1/f-f-base-10k-samp0.1_policy.pt',
-        'TOURNAMENT': 'weights/f-f-tournament-10k-samp0.1/f-f-tournament-10k-samp0.1_policy.pt',
+        'MINI': 'weights/ab2-ab2-100k-mini/best.pt',
+        'BASE': 'weights/ab2-ab2-100k/best.pt',
+        'TOURNAMENT': 'weights/ab2-ab2-100k-tournament/best.pt',
     }
     model_path = model_paths.get(map_type, model_paths['BASE'])
     
     # Calculate input dimension by creating a dummy game with dummy players
     dummy_players = [RandomPlayer(Color.RED), RandomPlayer(Color.BLUE)]
     dummy_game = Game(dummy_players, catan_map=build_map(map_type))
-    sample_vec = create_sample_vector(dummy_game, dummy_game.state.colors[0])
+    all_features = get_feature_ordering(2, map_type)
+    numeric_len = len([f for f in all_features if not is_graph_feature(f)])
     board_tensor = create_board_tensor(dummy_game, dummy_game.state.colors[0])
-    input_dim = len(sample_vec) + board_tensor.size
+    input_dim = numeric_len + board_tensor.size
     
     return NNPolicyPlayer(
         color=color,
