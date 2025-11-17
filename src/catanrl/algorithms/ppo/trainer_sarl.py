@@ -36,7 +36,10 @@ def ppo_update(
     agent.model.eval()
     with torch.no_grad():
         next_state = torch.from_numpy(states[-1:]).float().to(device)
-        _, next_value = agent.model(next_state)
+        if agent.model_type == 'flat':
+            _, next_value = agent.model(next_state)
+        elif agent.model_type == 'hierarchical':
+            _, _, next_value = agent.model(next_state)
         next_value = next_value.item()
     agent.model.train()
 

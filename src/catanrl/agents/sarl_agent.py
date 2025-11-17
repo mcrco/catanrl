@@ -6,14 +6,15 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from ..models.models import PolicyValueNetwork
+from ..models.models import PolicyValueNetwork, HierarchicalPolicyValueNetwork
 
 
 class SARLAgent:
     """Agent wrapper around PolicyValueNetwork for single-agent PPO training."""
 
-    def __init__(self, model: PolicyValueNetwork, device: str):
+    def __init__(self, model: PolicyValueNetwork | HierarchicalPolicyValueNetwork, model_type: str, device: str):
         self.model = model
+        self.model_type = model_type
         self.device = device
 
     def select_action(
@@ -32,7 +33,11 @@ class SARLAgent:
         """
         self.model.eval()
         with torch.no_grad():
-            policy_logits, value = self.model(state)
+            if self.model_type == 'flat':
+                policy_logits, value = self.model(state)
+            elif self.model_type == 'hierarchical': 
+                action_type_logits, param_logits, value = self.model(state)
+                policy_logits = self.model.get_flat_action_logits(action_type_logits, param_logits)
 
             if torch.isnan(policy_logits).any() or torch.isnan(value).any():
                 print("WARNING: NaN detected in model output!")
@@ -74,7 +79,11 @@ class SARLAgent:
         values_out: List[float] = []
 
         with torch.no_grad():
-            policy_logits, values = self.model(states)
+            if self.model_type == 'flat':
+                policy_logits, values = self.model(states)
+            elif self.model_type == 'hierarchical':
+                action_type_logits, param_logits, values = self.model(states)
+                policy_logits = self.model.get_flat_action_logits(action_type_logits, param_logits)
             batch_size, num_actions = policy_logits.shape
 
             masks = torch.full((batch_size, num_actions), float("-inf"), device=self.device)
@@ -110,7 +119,11 @@ class SARLAgent:
         valid_actions_batch: List[np.ndarray],
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Evaluate actions for PPO updates."""
-        policy_logits, values = self.model(states)
+        if self.model_type == 'flat':
+            policy_logits, values = self.model(states)
+        elif self.model_type == 'hierarchical':
+            action_type_logits, param_logits, values = self.model(states)
+            policy_logits = self.model.get_flat_action_logits(action_type_logits, param_logits)
 
         batch_size = states.shape[0]
         num_actions = policy_logits.shape[1]
