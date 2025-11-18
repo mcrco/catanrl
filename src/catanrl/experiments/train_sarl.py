@@ -17,6 +17,13 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
+        "--model-type",
+        type=str,
+        choices=['flat', 'hierarchical'],
+        default='flat',
+        help='Model architecture type: flat or hierarchical (default: flat)'
+    )
+    parser.add_argument(
         "--load-weights",
         type=str,
         default=None,
@@ -214,6 +221,7 @@ def main():
     train(
         input_dim=input_dim,
         num_actions=ACTION_SPACE_SIZE,
+        model_type=args.model_type,
         hidden_dims=hidden_dims,
         load_weights=args.load_weights,
         n_episodes=args.episodes,

@@ -1,27 +1,39 @@
 import torch
 import numpy as np
-from typing import Tuple
+from typing import List, Tuple
+from functools import lru_cache
 
 from catanatron.game import Game
 from catanatron.models.player import Player, RandomPlayer, Color
 from catanatron.cli.cli_players import register_cli_player
 from catanatron.models.map import build_map
-from catanatron.features import create_sample_vector
-from catanatron.gym.board_tensor_features import create_board_tensor
-from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE, to_action_space, ACTIONS_ARRAY, normalize_action
-from catanatron.features import get_feature_ordering, is_graph_feature
+from catanatron.features import create_sample, get_feature_ordering
+from catanatron.gym.board_tensor_features import create_board_tensor, is_graph_feature
+from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE, ACTIONS_ARRAY, normalize_action
 
-from ..models.models import PolicyValueNetwork
+from catanrl.models.models import PolicyValueNetwork, HierarchicalPolicyValueNetwork
 
 
-def game_to_features(game: Game, color: int) -> np.ndarray:
+@lru_cache(maxsize=None)
+def _numeric_feature_names(num_players: int, map_type: str) -> Tuple[str, ...]:
+    """Match the supervised-learning feature ordering (non-graph features only)."""
+    all_features = get_feature_ordering(num_players, map_type)
+    numeric_features = tuple(f for f in all_features if not is_graph_feature(f))
+    return numeric_features
+
+
+def game_to_features(game: Game, color: int, numeric_features: List[str]) -> np.ndarray:
     """
-    Extracts features from the game state for the policy network.
+    Extract features exactly like the SL pipeline: numeric (non-graph) + board tensor.
     """
-    # This function creates a fixed-order vector of features from the game state.
-    feature_vector = create_sample_vector(game, color)
-    board_tensor = create_board_tensor(game, color)
-    return np.concatenate([feature_vector, board_tensor.flatten()], axis=0)
+    sample = create_sample(game, color)
+    numeric_vector = np.array(
+        [float(sample.get(name, 0.0)) for name in numeric_features],
+        dtype=np.float32,
+    )
+    board_tensor = create_board_tensor(game, color).astype(np.float32, copy=False)
+    board_flat = board_tensor.reshape(-1)
+    return np.concatenate([numeric_vector, board_flat], axis=0)
 
 
 class NNPolicyPlayer(Player):
@@ -34,7 +46,11 @@ class NNPolicyPlayer(Player):
         color,
         model_path: str,
         input_dim: int,
+        hidden_dims: List[int] = [2048, 2048, 1024],
         epsilon=None,
+        map_type: str = 'BASE',
+        num_players: int = 2,
+        numeric_features: List[str] = None,
         **kwargs
     ):
         super().__init__(color, is_bot=True, **kwargs)
@@ -43,9 +59,14 @@ class NNPolicyPlayer(Player):
         self.epsilon = epsilon
         self.model_path = model_path
         self.input_dim = input_dim
+        self.map_type = map_type
+        self.num_players = num_players
+        if numeric_features is None:
+            numeric_features = list(_numeric_feature_names(num_players, map_type))
+        self.numeric_features = numeric_features
         
         # Load the trained policy network
-        self.policy_net = PolicyValueNetwork(input_dim, ACTION_SPACE_SIZE).to(self.device)
+        self.policy_net = HierarchicalPolicyValueNetwork(input_dim, hidden_dims).to(self.device)
         self.policy_net.load_state_dict(torch.load(model_path, map_location=self.device))
         self.policy_net.eval()
 
@@ -64,11 +85,13 @@ class NNPolicyPlayer(Player):
 
         # Convert game state to features
         game_tensor = torch.from_numpy(
-            game_to_features(game, self.color).reshape(1, -1).astype(np.float32)
+            game_to_features(game, self.color, self.numeric_features).reshape(1, -1)
         ).to(self.device)
         
         # Get policy logits
         with torch.no_grad():
+            action_type_logits, param_logits, value = self.policy_net(game_tensor)
+            
             logits = self.policy_net(game_tensor).squeeze(0).cpu().numpy()  # Shape: [ACTION_SPACE_SIZE]
         
         # Convert playable_actions to their indices in the action space
@@ -120,23 +143,27 @@ def create_nn_policy_player(color, map_template='BASE'):
     # Use different model weights based on map type
     model_paths = {
         'MINI': 'weights/ab2-ab2-100k-mini/best.pt',
-        'BASE': 'weights/ab2-ab2-100k/best.pt',
+        'BASE': 'weights/sl-hiearchical-cont_policy_value.pt',
         'TOURNAMENT': 'weights/ab2-ab2-100k-tournament/best.pt',
     }
     model_path = model_paths.get(map_type, model_paths['BASE'])
     
     # Calculate input dimension by creating a dummy game with dummy players
     dummy_players = [RandomPlayer(Color.RED), RandomPlayer(Color.BLUE)]
+    num_players = 2
     dummy_game = Game(dummy_players, catan_map=build_map(map_type))
-    all_features = get_feature_ordering(2, map_type)
-    numeric_len = len([f for f in all_features if not is_graph_feature(f)])
+    numeric_features = list(_numeric_feature_names(num_players, map_type))
+    numeric_len = len(numeric_features)
     board_tensor = create_board_tensor(dummy_game, dummy_game.state.colors[0])
     input_dim = numeric_len + board_tensor.size
     
     return NNPolicyPlayer(
         color=color,
         model_path=model_path,
-        input_dim=input_dim
+        input_dim=input_dim,
+        map_type=map_type,
+        num_players=num_players,
+        numeric_features=numeric_features,
     )
 
 

@@ -6,7 +6,7 @@ import numpy as np
 
 from catanatron.features import get_feature_ordering
 from catanatron.gym.board_tensor_features import get_channels, is_graph_feature
-from catanatron.zoo.env.catanatron_aec_env import CatanatronAECEnv, aec_env
+from catanatron.zoo.envs.catanatron_aec_env import CatanatronAECEnv, aec_env
 
 
 def build_marl_env(config: Dict) -> CatanatronAECEnv:

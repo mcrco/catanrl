@@ -21,12 +21,13 @@ from ..algorithms.ppo.buffers import OnPolicyBuffer
 from ..algorithms.ppo.trainer_sarl import ppo_update
 from ..agents import SARLAgent
 from ..envs.single_env import create_opponents, make_vectorized_envs
-from ..models.models import PolicyValueNetwork
+from ..models.models import PolicyValueNetwork, HierarchicalPolicyValueNetwork
 
 
 def train(
     input_dim: int,
     num_actions: int = ACTION_SPACE_SIZE,
+    model_type: str = 'flat',
     hidden_dims: List[int] = (512, 512),
     load_weights: str | None = None,
     n_episodes: int = 1000,
@@ -75,7 +76,12 @@ def train(
     else:
         wandb.init(mode="disabled")
 
-    model = PolicyValueNetwork(input_dim, num_actions, list(hidden_dims)).to(device)
+    if model_type == 'flat':
+        model = PolicyValueNetwork(input_dim, num_actions, list(hidden_dims)).to(device)
+    elif model_type == 'hierarchical':
+        model = HierarchicalPolicyValueNetwork(input_dim, list(hidden_dims)).to(device)
+    else:
+        raise ValueError(f"Unknown model_type: {model_type}")
 
     if load_weights and os.path.exists(load_weights):
         print(f"Loading weights from: {load_weights}")
@@ -83,7 +89,7 @@ def train(
         model.load_state_dict(state_dict)
         print("  ✓ Weights loaded successfully")
 
-    agent = SARLAgent(model, device)
+    agent = SARLAgent(model, model_type, device)
     optimizer = optim.Adam(model.parameters(), lr=lr)
     
     # Create learning rate scheduler
