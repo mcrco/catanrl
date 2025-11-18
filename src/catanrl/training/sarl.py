@@ -24,6 +24,9 @@ from ..envs.single_env import create_opponents, make_vectorized_envs
 from ..models.models import PolicyValueNetwork, HierarchicalPolicyValueNetwork
 
 
+ESTIMATED_STEPS_PER_EPISODE = 100
+
+
 def train(
     input_dim: int,
     num_actions: int = ACTION_SPACE_SIZE,
@@ -226,8 +229,7 @@ def train(
 
             observations = next_observations
 
-            min_samples = max(batch_size * 2, 4)
-            if len(buffer) >= max(update_freq * 50, min_samples):
+            if len(buffer) >= update_freq * ESTIMATED_STEPS_PER_EPISODE:
                 metrics = ppo_update(
                     agent=agent,
                     optimizer=optimizer,
