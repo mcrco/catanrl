@@ -1,39 +1,17 @@
 import torch
 import numpy as np
-from typing import List, Tuple
-from functools import lru_cache
+from typing import List
 
-from catanatron.game import Game
-from catanatron.models.player import Player, RandomPlayer, Color
+from catanatron.models.player import Player, Color
 from catanatron.cli.cli_players import register_cli_player
-from catanatron.models.map import build_map
-from catanatron.features import create_sample, get_feature_ordering
-from catanatron.gym.board_tensor_features import create_board_tensor, is_graph_feature
 from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE, ACTIONS_ARRAY, normalize_action
 
-from catanrl.models.models import PolicyValueNetwork, HierarchicalPolicyValueNetwork
-
-
-@lru_cache(maxsize=None)
-def _numeric_feature_names(num_players: int, map_type: str) -> Tuple[str, ...]:
-    """Match the supervised-learning feature ordering (non-graph features only)."""
-    all_features = get_feature_ordering(num_players, map_type)
-    numeric_features = tuple(f for f in all_features if not is_graph_feature(f))
-    return numeric_features
-
-
-def game_to_features(game: Game, color: int, numeric_features: List[str]) -> np.ndarray:
-    """
-    Extract features exactly like the SL pipeline: numeric (non-graph) + board tensor.
-    """
-    sample = create_sample(game, color)
-    numeric_vector = np.array(
-        [float(sample.get(name, 0.0)) for name in numeric_features],
-        dtype=np.float32,
-    )
-    board_tensor = create_board_tensor(game, color).astype(np.float32, copy=False)
-    board_flat = board_tensor.reshape(-1)
-    return np.concatenate([numeric_vector, board_flat], axis=0)
+from catanrl.data.data_utils import (
+    compute_feature_vector_dim,
+    game_to_features,
+    get_numeric_feature_names,
+)
+from catanrl.models.models import HierarchicalPolicyValueNetwork
 
 
 class NNPolicyPlayer(Player):
@@ -62,7 +40,7 @@ class NNPolicyPlayer(Player):
         self.map_type = map_type
         self.num_players = num_players
         if numeric_features is None:
-            numeric_features = list(_numeric_feature_names(num_players, map_type))
+            numeric_features = list(get_numeric_feature_names(num_players, map_type))
         self.numeric_features = numeric_features
         
         # Load the trained policy network
@@ -149,13 +127,9 @@ def create_nn_policy_player(color, map_template='BASE'):
     model_path = model_paths.get(map_type, model_paths['BASE'])
     
     # Calculate input dimension by creating a dummy game with dummy players
-    dummy_players = [RandomPlayer(Color.RED), RandomPlayer(Color.BLUE)]
     num_players = 2
-    dummy_game = Game(dummy_players, catan_map=build_map(map_type))
-    numeric_features = list(_numeric_feature_names(num_players, map_type))
-    numeric_len = len(numeric_features)
-    board_tensor = create_board_tensor(dummy_game, dummy_game.state.colors[0])
-    input_dim = numeric_len + board_tensor.size
+    numeric_features = list(get_numeric_feature_names(num_players, map_type))
+    input_dim = compute_feature_vector_dim(num_players, map_type)
     
     return NNPolicyPlayer(
         color=color,

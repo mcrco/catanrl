@@ -17,13 +17,13 @@ import torch
 import torch.multiprocessing as mp
 from tqdm import tqdm
 
-from catanatron.features import create_sample_vector, get_feature_ordering
 from catanatron.game import Game
 from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE, to_action_space
 from catanatron.models.enums import Action
 from catanatron.models.map import build_map
 from catanatron.models.player import Color
 
+from ...data.data_utils import game_to_features, get_numeric_feature_names
 from .mcts import NeuralMCTS
 from .trainer import (
     AlphaZeroConfig,
@@ -221,8 +221,8 @@ class _InferenceServer(threading.Thread):
             states = torch.from_numpy(features).float().to(self.trainer.device)
             self.trainer.model.eval()
             with torch.no_grad():
-                logits, values = self.trainer.model(states)
-                probs = torch.softmax(logits, dim=-1).cpu().numpy()
+                log_probs, values = self.trainer._model_forward(states)
+                probs = torch.exp(log_probs).cpu().numpy()
                 values_np = values.view(-1).cpu().numpy()
 
             for entry, policy, value in zip(batch, probs, values_np):
@@ -264,7 +264,7 @@ class _SelfPlayWorkerController:
     ) -> None:
         self.worker_id = worker_id
         self.config = config
-        self.feature_order = get_feature_ordering(config.num_players, config.map_type)
+        self.numeric_features = list(get_numeric_feature_names(config.num_players, config.map_type))
         self.colors = AlphaZeroTrainer.COLOR_ORDER[: config.num_players]
         self._inference_client = _RemoteInferenceClient(worker_id, inference_queue, response_queue)
         self._current_game_samples: List[tuple[Color, np.ndarray, np.ndarray]] = []
@@ -347,8 +347,7 @@ class _SelfPlayWorkerController:
             self._current_game_samples.clear()
 
     def _extract_features(self, game: Game, color: Color) -> np.ndarray:
-        vec = np.asarray(create_sample_vector(game, color, self.feature_order), dtype=np.float32)
-        return vec
+        return game_to_features(game, color, self.numeric_features)
 
     def _record_sample(self, color: Color, state: np.ndarray, policy: np.ndarray) -> None:
         self._current_game_samples.append((color, state.copy(), policy.copy()))

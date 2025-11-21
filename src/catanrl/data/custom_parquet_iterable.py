@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 from datasets import load_dataset
 from tqdm import tqdm
 
-from .data_utils import is_non_graph_feature
+from .data_utils import is_non_graph_feature_parquet
 
 
 class ParquetBatchIterable(IterableDataset):
@@ -210,7 +210,7 @@ def create_dataloader(
     schema_names = list(sample_pf.schema_arrow.names)
     # Keep BT_* and non-graph F_* only (exclude F_NODE*, F_EDGE*, F_TILE*, F_PORT*)
     feature_cols: List[str] = [
-        c for c in schema_names if c.startswith('BT_') or is_non_graph_feature(c)
+        c for c in schema_names if c.startswith('BT_') or is_non_graph_feature_parquet(c)
     ]
     return_col = value_type if value_type != 'RETURN' else 'RETURN'
     required_cols = feature_cols + ['ACTION', return_col]

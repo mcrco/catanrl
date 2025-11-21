@@ -11,7 +11,7 @@ from torch.utils.data import DataLoader
 from torchdata.datapipes import iter as dp_iter
 from tqdm import tqdm
 
-from .data_utils import is_non_graph_feature
+from .data_utils import is_non_graph_feature_parquet
 
 
 def _gather_files(data_dir: Path, max_files: Optional[int]) -> List[Path]:
@@ -51,7 +51,7 @@ def _split_files(
 def _infer_feature_columns(sample_file: Path) -> List[str]:
     sample_pf = ParquetFile(str(sample_file))
     schema_names = list(sample_pf.schema_arrow.names)
-    return [c for c in schema_names if c.startswith('BT_') or is_non_graph_feature(c)]
+    return [c for c in schema_names if c.startswith('BT_') or is_non_graph_feature_parquet(c)]
 
 
 def _iter_rows_from_file(

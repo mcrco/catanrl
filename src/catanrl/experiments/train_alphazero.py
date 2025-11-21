@@ -17,14 +17,14 @@ import torch
 import wandb
 from tqdm import tqdm
 
-from catanatron.features import get_feature_ordering
 from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE
 from catanatron.players.minimax import AlphaBetaPlayer
 from catanatron.players.value import ValueFunctionPlayer
 
 from catanrl.algorithms.alphazero.trainer import AlphaZeroConfig, AlphaZeroTrainer
 from catanrl.algorithms.alphazero.parallel_trainer import ParallelAlphaZeroTrainer
-from catanrl.models.models import PolicyValueNetwork
+from catanrl.data.data_utils import compute_feature_vector_dim
+from catanrl.models.models import HierarchicalPolicyValueNetwork, PolicyValueNetwork
 
 
 def parse_args() -> argparse.Namespace:
@@ -43,9 +43,16 @@ def parse_args() -> argparse.Namespace:
         default=1,
         help="Number of parallel self-play workers (1 keeps the single-process trainer)",
     )
+    parser.add_argument(
+        "--model-type",
+        type=str,
+        default="hierarchical",
+        choices=["standard", "hierarchical"],
+        help="Which policy/value network architecture to use.",
+    )
 
     # Model + config knobs (mirrors AlphaZeroConfig)
-    parser.add_argument("--num-players", type=int, default=4, choices=[2, 3, 4], help="Number of players in self-play")
+    parser.add_argument("--num-players", type=int, default=2, choices=[2, 3, 4], help="Number of players in self-play")
     parser.add_argument("--map-type", type=str, default="BASE", choices=["BASE", "MINI", "TOURNAMENT"], help="Map layout")
     parser.add_argument("--vps-to-win", type=int, default=10, help="Victory points to win the game")
     parser.add_argument("--simulations", type=int, default=64, help="MCTS simulations per move")
@@ -217,36 +224,36 @@ def run_training(args: argparse.Namespace, trainer: AlphaZeroTrainer, wandb_enab
 
             iteration_metrics: List[Dict[str, float]] = []
             skipped_steps = 0
-        with tqdm(
-            range(1, args.optimizer_steps + 1),
-            desc="Training",
-            leave=False,
-        ) as train_bar:
-            for step in train_bar:
-                metrics = trainer.update_weights()
-                if metrics is None:
-                    skipped_steps += 1
-                    train_bar.set_postfix({"skipped": skipped_steps})
-                    continue
-                iteration_metrics.append(metrics)
-                global_step += 1
-                train_bar.set_postfix(
-                    {
-                        "loss": f"{metrics['loss']:.3f}",
-                        "policy": f"{metrics['policy_loss']:.3f}",
-                        "value": f"{metrics['value_loss']:.3f}",
-                    }
-                )
-                wandb.log(
-                    {
-                        "train/loss": metrics["loss"],
-                        "train/policy_loss": metrics["policy_loss"],
-                        "train/value_loss": metrics["value_loss"],
-                        "iteration": iteration,
-                        "optimizer_step": step,
-                    },
-                    step=global_step,
-                )
+            with tqdm(
+                range(1, args.optimizer_steps + 1),
+                desc="Training",
+                leave=False,
+            ) as train_bar:
+                for step in train_bar:
+                    metrics = trainer.update_weights()
+                    if metrics is None:
+                        skipped_steps += 1
+                        train_bar.set_postfix({"skipped": skipped_steps})
+                        continue
+                    iteration_metrics.append(metrics)
+                    global_step += 1
+                    train_bar.set_postfix(
+                        {
+                            "loss": f"{metrics['loss']:.3f}",
+                            "policy": f"{metrics['policy_loss']:.3f}",
+                            "value": f"{metrics['value_loss']:.3f}",
+                        }
+                    )
+                    wandb.log(
+                        {
+                            "train/loss": metrics["loss"],
+                            "train/policy_loss": metrics["policy_loss"],
+                            "train/value_loss": metrics["value_loss"],
+                            "iteration": iteration,
+                            "optimizer_step": step,
+                        },
+                        step=global_step,
+                    )
 
             if skipped_steps:
                 print(f"  Skipped {skipped_steps} optimizer steps (buffer warming up).")
@@ -277,36 +284,36 @@ def run_training(args: argparse.Namespace, trainer: AlphaZeroTrainer, wandb_enab
             else:
                 print("  No optimizer metrics collected this iteration.")
 
-        if args.checkpoint_every and iteration % args.checkpoint_every == 0:
+            if args.checkpoint_every and iteration % args.checkpoint_every == 0:
                 os.makedirs(checkpoint_dir, exist_ok=True)
                 checkpoint_path = os.path.join(checkpoint_dir, f"alphazero_iter{iteration:04d}.pt")
                 trainer.save(checkpoint_path)
                 print(f"  → Saved checkpoint to {checkpoint_path}")
 
-        value_eval_stats = trainer.evaluate_against(
-            opponent_factory=lambda color: ValueFunctionPlayer(color),
-            num_games=50,
-            desc="Eval vs ValueFunctionPlayer",
-        )
-        alphabeta_eval_stats = trainer.evaluate_against(
-            opponent_factory=lambda color: AlphaBetaPlayer(color, depth=2, prunning=True),
-            num_games=25,
-            desc="Eval vs AlphaBetaPlayer",
-        )
-        log_eval_stats("ValueFunctionPlayer", value_eval_stats)
-        log_eval_stats("AlphaBetaPlayer", alphabeta_eval_stats)
-        wandb.log(
-            {
-                "eval/value_function/win_rate": _eval_win_rate(value_eval_stats),
-                "eval/value_function/agent_wins": value_eval_stats.get("agent_wins", 0),
-                "eval/value_function/draws": value_eval_stats.get("draws", 0),
-                "eval/alphabeta/win_rate": _eval_win_rate(alphabeta_eval_stats),
-                "eval/alphabeta/agent_wins": alphabeta_eval_stats.get("agent_wins", 0),
-                "eval/alphabeta/draws": alphabeta_eval_stats.get("draws", 0),
-                "iteration": iteration,
-            },
-            step=global_step,
-        )
+            value_eval_stats = trainer.evaluate_against(
+                opponent_factory=lambda color: ValueFunctionPlayer(color),
+                num_games=50,
+                desc="Eval vs ValueFunctionPlayer",
+            )
+            alphabeta_eval_stats = trainer.evaluate_against(
+                opponent_factory=lambda color: AlphaBetaPlayer(color, depth=2, prunning=True),
+                num_games=25,
+                desc="Eval vs AlphaBetaPlayer",
+            )
+            log_eval_stats("ValueFunctionPlayer", value_eval_stats)
+            log_eval_stats("AlphaBetaPlayer", alphabeta_eval_stats)
+            wandb.log(
+                {
+                    "eval/value_function/win_rate": _eval_win_rate(value_eval_stats),
+                    "eval/value_function/agent_wins": value_eval_stats.get("agent_wins", 0),
+                    "eval/value_function/draws": value_eval_stats.get("draws", 0),
+                    "eval/alphabeta/win_rate": _eval_win_rate(alphabeta_eval_stats),
+                    "eval/alphabeta/agent_wins": alphabeta_eval_stats.get("agent_wins", 0),
+                    "eval/alphabeta/draws": alphabeta_eval_stats.get("draws", 0),
+                    "iteration": iteration,
+                },
+                step=global_step,
+            )
 
         if best_loss == float("inf"):
             trainer.save(args.save_path)
@@ -344,13 +351,18 @@ def main() -> None:
         seed=None if args.seed < 0 else args.seed,
     )
 
-    feature_order = get_feature_ordering(config.num_players, config.map_type)
-    input_dim = len(feature_order)
-    model = PolicyValueNetwork(
-        input_dim=input_dim,
-        num_actions=ACTION_SPACE_SIZE,
-        hidden_dims=hidden_dims,
-    )
+    input_dim = compute_feature_vector_dim(config.num_players, config.map_type)
+    if args.model_type == "hierarchical":
+        model = HierarchicalPolicyValueNetwork(
+            input_dim=input_dim,
+            hidden_dims=hidden_dims,
+        )
+    else:
+        model = PolicyValueNetwork(
+            input_dim=input_dim,
+            num_actions=ACTION_SPACE_SIZE,
+            hidden_dims=hidden_dims,
+        )
 
     if args.num_workers <= 1:
         trainer = AlphaZeroTrainer(config=config, model=model)
@@ -365,6 +377,7 @@ def main() -> None:
     print(f"  Hidden dims: {hidden_dims}")
     print(f"  Save path: {args.save_path}")
     print(f"  Num workers: {args.num_workers}")
+    print(f"  Model type: {args.model_type}")
 
     run_training(args, trainer, wandb_enabled)
 

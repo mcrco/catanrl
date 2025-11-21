@@ -1,25 +1,17 @@
 import torch
 import numpy as np
-from typing import Tuple
+from typing import Tuple, List
 
 from catanatron.game import Game
-from catanatron.models.player import RandomPlayer, Color
 from catanatron.players.value import ValueFunctionPlayer
 from catanatron.cli.cli_players import register_cli_player
-from catanatron.models.map import build_map
-from catanatron.features import create_sample_vector
-from catanatron.gym.board_tensor_features import create_board_tensor
-from rl.models import ValueNetwork
 
-
-def game_to_features(game: Game, color: int) -> np.ndarray:
-    """
-    Extracts features from the game state for the value network.
-    """
-    # This function creates a fixed-order vector of features from the game state.
-    feature_vector = create_sample_vector(game, color)
-    board_tensor = create_board_tensor(game, color)
-    return np.concatenate([feature_vector, board_tensor.flatten()], axis=0)
+from catanrl.data.data_utils import (
+    compute_feature_vector_dim,
+    game_to_features,
+    get_numeric_feature_names,
+)
+from rl.models import ValueNetwork  # type: ignore
 
 
 class NNValuePlayer(ValueFunctionPlayer):
@@ -34,13 +26,19 @@ class NNValuePlayer(ValueFunctionPlayer):
         input_dim: int,
         output_range: Tuple[float, float] = (-1, 1),
         epsilon=None,
-        **kwargs
+        map_type: str = "BASE",
+        num_players: int = 2,
+        numeric_features: List[str] | None = None,
+        **kwargs,
     ):
         # Initialize with a dummy value_fn_builder_name since we'll override decide
         super().__init__(color, value_fn_builder_name="base_fn", is_bot=True, epsilon=epsilon, **kwargs)
         
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.output_range = output_range
+        if numeric_features is None:
+            numeric_features = list(get_numeric_feature_names(num_players, map_type))
+        self.numeric_features = numeric_features
         
         # Load the trained value network
         self.value_net = ValueNetwork(input_dim).to(self.device)
@@ -51,9 +49,8 @@ class NNValuePlayer(ValueFunctionPlayer):
         """
         Neural network value function that evaluates a game state.
         """
-        game_tensor = torch.from_numpy(
-            game_to_features(game, p0_color).reshape(1, -1).astype(np.float32)
-        ).to(self.device)
+        features = game_to_features(game, p0_color, self.numeric_features)
+        game_tensor = torch.from_numpy(features.reshape(1, -1).astype(np.float32)).to(self.device)
         with torch.no_grad():
             value = self.value_net(game_tensor).item()
 
@@ -119,17 +116,18 @@ def create_nn_value_player(color, map_template='BASE'):
     }
     model_path = model_paths.get(map_type, model_paths['BASE'])
     
-    # Calculate input dimension by creating a dummy game with dummy players
-    dummy_players = [RandomPlayer(Color.RED), RandomPlayer(Color.BLUE)]
-    dummy_game = Game(dummy_players, catan_map=build_map(map_type))
-    sample_vec = create_sample_vector(dummy_game, dummy_game.state.colors[0])
-    board_tensor = create_board_tensor(dummy_game, dummy_game.state.colors[0])
-    input_dim = len(sample_vec) + board_tensor.size
+    # Calculate input dimension and numeric feature list
+    num_players = 2
+    numeric_features = list(get_numeric_feature_names(num_players, map_type))
+    input_dim = compute_feature_vector_dim(num_players, map_type)
     
     return NNValuePlayer(
         color=color,
         model_path=model_path,
-        input_dim=input_dim
+        input_dim=input_dim,
+        map_type=map_type,
+        num_players=num_players,
+        numeric_features=numeric_features,
     )
 
 

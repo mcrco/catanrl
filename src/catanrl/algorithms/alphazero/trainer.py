@@ -20,14 +20,14 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 
-from catanatron.features import create_sample_vector, get_feature_ordering
 from catanatron.game import Game
 from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE, to_action_space
 from catanatron.models.enums import Action
 from catanatron.models.map import build_map
 from catanatron.models.player import Color, Player
 
-from ...models.models import PolicyValueNetwork
+from ...data.data_utils import compute_feature_vector_dim, game_to_features, get_numeric_feature_names
+from ...models.models import HierarchicalPolicyValueNetwork, PolicyValueNetwork
 from .mcts import NeuralMCTS
 
 
@@ -89,13 +89,16 @@ class AlphaZeroTrainer:
         self.device = self.config.device or ("cuda" if torch.cuda.is_available() else "cpu")
         self._set_seed(self.config.seed)
 
-        self.feature_order = get_feature_ordering(
-            num_players=self.config.num_players, map_type=self.config.map_type
+        self.numeric_features = list(
+            get_numeric_feature_names(self.config.num_players, self.config.map_type)
         )
-        input_dim = len(self.feature_order)
+        input_dim = compute_feature_vector_dim(self.config.num_players, self.config.map_type)
 
         self.model = model or PolicyValueNetwork(input_dim, ACTION_SPACE_SIZE)
         self.model.to(self.device)
+        self._hierarchical_model = isinstance(self.model, HierarchicalPolicyValueNetwork) or hasattr(
+            self.model, "get_flat_action_logits"
+        )
         self.optimizer = torch.optim.Adam(
             self.model.parameters(), lr=self.config.lr, weight_decay=self.config.weight_decay
         )
@@ -163,10 +166,9 @@ class AlphaZeroTrainer:
         )
 
         self.model.train()
-        logits, values = self.model(states)
-        log_probs = torch.log_softmax(logits, dim=-1)
+        log_probs, values = self._model_forward(states)
         policy_loss = -(policy_targets * log_probs).sum(dim=1).mean()
-        value_loss = F.mse_loss(values.squeeze(-1), value_targets)
+        value_loss = F.mse_loss(values, value_targets)
         loss = (
             self.config.policy_loss_weight * policy_loss
             + self.config.value_loss_weight * value_loss
@@ -247,8 +249,7 @@ class AlphaZeroTrainer:
         return action
 
     def _extract_features(self, game: Game, color: Color) -> np.ndarray:
-        vec = np.asarray(create_sample_vector(game, color, self.feature_order), dtype=np.float32)
-        return vec
+        return game_to_features(game, color, self.numeric_features)
 
     def _policy_value(
         self,
@@ -261,8 +262,8 @@ class AlphaZeroTrainer:
         state_tensor = torch.from_numpy(features).float().unsqueeze(0).to(self.device)
         self.model.eval()
         with torch.no_grad():
-            logits, value = self.model(state_tensor)
-            probs = torch.softmax(logits, dim=-1).cpu().numpy().squeeze(0)
+            log_probs, value = self._model_forward(state_tensor)
+            probs = torch.exp(log_probs).cpu().numpy().squeeze(0)
             value_scalar = float(value.squeeze(0).item())
 
         valid_actions = game.state.playable_actions
@@ -293,6 +294,19 @@ class AlphaZeroTrainer:
                 value = 1.0 if color == winner else -1.0
             self.replay_buffer.append(AlphaZeroExperience(state=state, policy=policy, value=value))
         self._current_game_samples.clear()
+
+    def _model_forward(self, states: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Returns log-probabilities over the flat action space and value predictions.
+        """
+        outputs = self.model(states)
+        if self._hierarchical_model:
+            action_type_logits, param_logits, values = outputs
+            log_probs = self.model.get_flat_action_logits(action_type_logits, param_logits)
+        else:
+            logits, values = outputs
+            log_probs = torch.log_softmax(logits, dim=-1)
+        return log_probs, values.view(-1)
 
 
 class AlphaZeroSelfPlayPlayer(Player):

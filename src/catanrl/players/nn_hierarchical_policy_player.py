@@ -2,15 +2,16 @@ import torch
 import numpy as np
 from typing import List
 
-from catanatron.game import Game
-from catanatron.models.player import Player, RandomPlayer, Color
+from catanatron.models.player import Player
 from catanatron.cli.cli_players import register_cli_player
-from catanatron.models.map import build_map
-from catanatron.gym.board_tensor_features import create_board_tensor
 from catanatron.gym.envs.catanatron_env import ACTIONS_ARRAY, normalize_action
 
+from catanrl.data.data_utils import (
+    compute_feature_vector_dim,
+    game_to_features,
+    get_numeric_feature_names,
+)
 from catanrl.models.models import HierarchicalPolicyValueNetwork
-from catanrl.players.nn_policy_player import game_to_features, _numeric_feature_names
 
 
 class NNHierarchicalPolicyPlayer(Player):
@@ -38,7 +39,7 @@ class NNHierarchicalPolicyPlayer(Player):
         self.input_dim = input_dim
 
         if numeric_features is None:
-            numeric_features = list(_numeric_feature_names(num_players, map_type))
+            numeric_features = list(get_numeric_feature_names(num_players, map_type))
         self.numeric_features = numeric_features
 
         self.policy_net = HierarchicalPolicyValueNetwork(
@@ -104,11 +105,8 @@ def create_nn_hierarchical_policy_player(color, map_template='BASE', hidden_dims
     model_path = model_paths.get(normalized_map, model_paths['BASE'])
     hidden_dims_list = [int(dim) for dim in hidden_dims.split(',')] if isinstance(hidden_dims, str) else hidden_dims
 
-    numeric_features = list(_numeric_feature_names(2, normalized_map))
-    dummy_players = [RandomPlayer(Color.RED), RandomPlayer(Color.BLUE)]
-    dummy_game = Game(dummy_players, catan_map=build_map(normalized_map))
-    board_tensor = create_board_tensor(dummy_game, dummy_game.state.colors[0])
-    input_dim = len(numeric_features) + board_tensor.size
+    numeric_features = list(get_numeric_feature_names(2, normalized_map))
+    input_dim = compute_feature_vector_dim(2, normalized_map)
 
     player = NNHierarchicalPolicyPlayer(
         color=color,

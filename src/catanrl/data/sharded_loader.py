@@ -5,7 +5,7 @@ from torch.utils.data import DataLoader
 from pathlib import Path
 from datasets import load_dataset
 
-from .data_utils import is_non_graph_feature
+from .data_utils import is_non_graph_feature_parquet
 
 def create_dataloader_from_shards(
     data_dir: str,
@@ -89,7 +89,7 @@ def create_dataloader_from_shards(
     print("Identifying feature columns...")
     first_sample = next(iter(dataset))
     # Keep BT_* and non-graph F_* only (exclude F_NODE*, F_EDGE*, F_TILE*, F_PORT*)
-    feature_cols = [c for c in first_sample.keys() if c.startswith('BT_') or is_non_graph_feature(c)]
+    feature_cols = [c for c in first_sample.keys() if c.startswith('BT_') or is_non_graph_feature_parquet(c)]
     return_col = value_type
     print(f"Features: {len(feature_cols)} columns")
     
