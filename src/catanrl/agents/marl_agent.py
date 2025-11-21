@@ -10,7 +10,7 @@ from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE
 from ..models.models import PolicyValueNetwork
 
 
-class MultiAgentRLAgent:
+class MARLAgent:
     """Shared policy/value agent for multi-agent self-play training."""
 
     def __init__(self, model: PolicyValueNetwork, device: str):
