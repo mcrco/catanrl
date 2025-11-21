@@ -13,11 +13,12 @@ import math
 import random
 from collections import Counter, deque
 from dataclasses import dataclass
-from typing import Deque, Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Deque, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
 import torch.nn.functional as F
+from tqdm import tqdm
 
 from catanatron.features import create_sample_vector, get_feature_ordering
 from catanatron.game import Game
@@ -107,12 +108,46 @@ class AlphaZeroTrainer:
     def self_play(self, num_games: int) -> Dict[str, float]:
         """Generate data via self-play games."""
         stats: Counter[str] = Counter()
-        for game_idx in range(num_games):
+        for game_idx in tqdm(range(num_games), desc="Self-play", leave=False):
             stats["games"] += 1
             result = self._play_game(seed=None if self.config.seed is None else self.config.seed + game_idx)
             winner = result.get("winner")
             if winner is not None:
                 stats[f"wins_{winner.value}"] += 1
+        return dict(stats)
+
+    def evaluate_against(
+        self,
+        opponent_factory: Callable[[Color], Player],
+        num_games: int,
+        desc: str,
+    ) -> Dict[str, float]:
+        """Run evaluation games against a fixed opponent factory."""
+        if num_games <= 0:
+            return {}
+
+        stats: Counter[str] = Counter()
+        seed_offset = 100_000
+        for game_idx in tqdm(range(num_games), desc=desc, leave=False):
+            agent_color = self.colors[game_idx % len(self.colors)]
+            players: List[Player] = []
+            for color in self.colors:
+                if color == agent_color:
+                    players.append(AlphaZeroSelfPlayPlayer(color, self, record_data=False))
+                else:
+                    players.append(opponent_factory(color))
+
+            catan_map = build_map(self.config.map_type)
+            seed = None if self.config.seed is None else self.config.seed + seed_offset + game_idx
+            game = Game(players=players, seed=seed, catan_map=catan_map, vps_to_win=self.config.vps_to_win)
+            winner = game.play()
+            stats["games"] += 1
+            if winner is None:
+                stats["draws"] += 1
+            else:
+                stats[f"wins_{winner.value}"] += 1
+                if winner == agent_color:
+                    stats["agent_wins"] += 1
         return dict(stats)
 
     def update_weights(self) -> Optional[Dict[str, float]]:
@@ -190,7 +225,7 @@ class AlphaZeroTrainer:
         finally:
             self._finalize_game_samples(winner)
 
-    def select_action(self, game: Game) -> Action:
+    def select_action(self, game: Game, collect_data: bool = True) -> Action:
         """Called by AlphaZeroSelfPlayPlayer to pick the next move."""
         color = game.state.current_color()
         state_vec = self._extract_features(game, color)
@@ -207,7 +242,8 @@ class AlphaZeroTrainer:
             temperature=max(temperature, 1e-3),
             add_noise=add_noise,
         )
-        self._record_sample(color, state_vec, policy)
+        if collect_data:
+            self._record_sample(color, state_vec, policy)
         return action
 
     def _extract_features(self, game: Game, color: Color) -> np.ndarray:
@@ -262,11 +298,12 @@ class AlphaZeroTrainer:
 class AlphaZeroSelfPlayPlayer(Player):
     """Thin wrapper that delegates decisions back to the trainer."""
 
-    def __init__(self, color: Color, controller: AlphaZeroTrainer):
+    def __init__(self, color: Color, controller: AlphaZeroTrainer, record_data: bool = True):
         super().__init__(color, is_bot=True)
         self.controller = controller
+        self._record_data = record_data
 
     def decide(self, game: Game, playable_actions: Sequence[Action]):
         del playable_actions  # unused
-        return self.controller.select_action(game)
+        return self.controller.select_action(game, collect_data=self._record_data)
 

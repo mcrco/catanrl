@@ -1,12 +1,26 @@
+from __future__ import annotations
+
 from catanatron.game import Game
 from catanatron.models.player import Color
 from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE, to_action_space
-from typing import Optional, Dict, Tuple, List
-from catanatron.models.enums import Action
+from typing import Optional, Dict, Tuple, List, TYPE_CHECKING
+from catanatron.models.enums import Action, ActionType
+from catanatron.models.map import number_probability
 import numpy as np
 import math
 
-from .trainer import AlphaZeroTrainer
+if TYPE_CHECKING:
+    # Imported only for type checking to avoid circular import at runtime
+    from .trainer import AlphaZeroTrainer
+
+DICE_TOTALS: List[int] = list(range(2, 13))
+
+
+def _canonical_dice_tuple(total: int) -> Tuple[int, int]:
+    """Map a dice total to a deterministic pair representation."""
+    lower = total // 2
+    upper = total - lower
+    return lower, upper
 
 class MCTSNode:
     """Single node in the neural-guided Monte Carlo Tree Search."""
@@ -27,6 +41,8 @@ class MCTSNode:
         self.priors: Dict[int, float] = {}
         self.action_map: Dict[int, Action] = {}
         self.children: Dict[int, "MCTSNode"] = {}
+        self.chance_children: Dict[int, "MCTSNode"] = {}
+        self.chance_priors: Dict[int, float] = {}
 
     def value(self) -> float:
         return self.value_sum / self.visit_count if self.visit_count else 0.0
@@ -36,6 +52,13 @@ class MCTSNode:
 
     def expanded(self) -> bool:
         return len(self.priors) > 0
+
+    def is_dice_roll_only(self) -> bool:
+        actions = self.game.state.playable_actions
+        return (
+            len(actions) == 1
+            and actions[0].action_type == ActionType.ROLL
+        )
 
     def expand(self, action_priors: np.ndarray) -> None:
         if self.expanded():
@@ -130,7 +153,15 @@ class NeuralMCTS:
         for _ in range(self.trainer.config.simulations):
             node = root
             search_path = [node]
-            while node.expanded() and not node.is_terminal():
+            while not node.is_terminal():
+                if self._is_chance_node(node):
+                    node = self._sample_chance_child(node)
+                    search_path.append(node)
+                    continue
+
+                if not node.expanded():
+                    break
+
                 _, node = node.select_child(self.trainer.config.c_puct)
                 search_path.append(node)
 
@@ -154,10 +185,12 @@ class NeuralMCTS:
         return value
 
     def _backpropagate(self, search_path: List[MCTSNode], value: float) -> None:
-        for node in reversed(search_path):
+        for idx in range(len(search_path) - 1, -1, -1):
+            node = search_path[idx]
             node.visit_count += 1
             node.value_sum += value
-            value = -value
+            if idx > 0 and search_path[idx - 1].to_play != node.to_play:
+                value = -value
 
     def _build_policy_vector(self, root: MCTSNode, temperature: float) -> np.ndarray:
         policy = np.zeros(ACTION_SPACE_SIZE, dtype=np.float32)
@@ -203,3 +236,39 @@ class NeuralMCTS:
 
         choice = int(np.random.choice(candidates, p=probs))
         return choice
+
+    def _is_chance_node(self, node: MCTSNode) -> bool:
+        return node.is_dice_roll_only()
+
+    def _expand_chance_children(self, node: MCTSNode) -> None:
+        if node.chance_children:
+            return
+
+        for total in DICE_TOTALS:
+            probability = number_probability(total)
+            dice_pair = _canonical_dice_tuple(total)
+            next_game = node.game.copy()
+            next_game.execute(
+                Action(node.to_play, ActionType.ROLL, dice_pair), validate_action=False
+            )
+            next_player = next_game.state.current_color()
+            child = MCTSNode(
+                game=next_game,
+                to_play=next_player,
+                parent=node,
+                prior=probability,
+            )
+            node.chance_children[total] = child
+            node.chance_priors[total] = probability
+
+    def _sample_chance_child(self, node: MCTSNode) -> MCTSNode:
+        self._expand_chance_children(node)
+        outcomes = list(node.chance_children.keys())
+        probs = np.array([node.chance_priors[outcome] for outcome in outcomes], dtype=np.float64)
+        if probs.sum() <= 0:
+            probs = np.ones_like(probs) / len(probs)
+        else:
+            probs /= probs.sum()
+        index = int(np.random.choice(len(outcomes), p=probs))
+        outcome = outcomes[index]
+        return node.chance_children[outcome]
