@@ -32,6 +32,7 @@ dev = [
 train-sl = "catanrl.experiments.train_sl:main"
 train-sarl = "catanrl.experiments.train_sarl:main"
 train-marl = "catanrl.experiments.train_marl:main"
+train-alphazero = "catanrl.experiments.train_alphazero:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

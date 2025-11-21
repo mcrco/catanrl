@@ -19,12 +19,12 @@ from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor
 import pyarrow.parquet as pq
 from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE
-from ..data.custom_parquet_iterable import (
+from ...data.custom_parquet_iterable import (
     create_dataloader,
     create_dataloader_from_shards,
     estimate_steps_per_epoch,
 )
-from ..models.models import PolicyValueNetwork, HierarchicalPolicyValueNetwork
+from ...models.models import PolicyValueNetwork, HierarchicalPolicyValueNetwork
 from .loss_utils import create_loss_computer
 from .metrics import PolicyValueMetrics
 

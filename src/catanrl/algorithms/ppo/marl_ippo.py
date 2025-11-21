@@ -21,16 +21,16 @@ from tqdm import tqdm
 
 from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE
 
-from ..agents import MultiAgentRLAgent
-from ..algorithms.ppo.buffers import MultiAgentExperienceBuffer
-from ..algorithms.ppo.trainer_marl import ppo_update
-from ..envs.multi_env import (
+from ...agents import MultiAgentRLAgent
+from .buffers import MultiAgentExperienceBuffer
+from .trainer_marl import ppo_update
+from ...envs.multi_env import (
     build_marl_env,
     compute_multiagent_input_dim,
     flatten_marl_observation,
     get_valid_actions,
 )
-from ..models.models import PolicyValueNetwork
+from ...models.models import PolicyValueNetwork
 
 
 @dataclass

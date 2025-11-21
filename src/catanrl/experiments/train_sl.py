@@ -1,7 +1,7 @@
 import argparse
 import os
 import wandb
-from catanrl.training.sl import train
+from catanrl.algorithms.supervised.sl import train
 from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE
 
 def main():

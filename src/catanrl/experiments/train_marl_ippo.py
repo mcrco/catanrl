@@ -1,7 +1,7 @@
 import argparse
 import os
 import wandb
-from catanrl.training.marl import train
+from catanrl.algorithms.ppo.marl_ippo import train
 
 
 def main():

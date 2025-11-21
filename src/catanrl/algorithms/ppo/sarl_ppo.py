@@ -17,11 +17,11 @@ from tqdm import tqdm
 
 from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE
 
-from ..algorithms.ppo.buffers import OnPolicyBuffer
-from ..algorithms.ppo.trainer_sarl import ppo_update
-from ..agents import SARLAgent
-from ..envs.single_env import create_opponents, make_vectorized_envs
-from ..models.models import PolicyValueNetwork, HierarchicalPolicyValueNetwork
+from .buffers import OnPolicyBuffer
+from .trainer_sarl import ppo_update
+from ...agents import SARLAgent
+from ...envs.single_env import create_opponents, make_vectorized_envs
+from ...models.models import PolicyValueNetwork, HierarchicalPolicyValueNetwork
 
 
 ESTIMATED_STEPS_PER_EPISODE = 100

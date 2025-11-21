@@ -9,7 +9,7 @@ from catanatron.gym.board_tensor_features import create_board_tensor, is_graph_f
 from catanatron.models.player import RandomPlayer, Color
 
 from ..envs.single_env import create_opponents
-from ..training.sarl import train
+from ..algorithms.ppo.sarl_ppo import train
 
 def main():
     parser = argparse.ArgumentParser(
