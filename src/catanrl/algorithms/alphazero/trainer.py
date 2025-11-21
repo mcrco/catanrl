@@ -27,6 +27,7 @@ from catanatron.models.map import build_map
 from catanatron.models.player import Color, Player
 
 from ...models.models import PolicyValueNetwork
+from .mcts import NeuralMCTS
 
 
 @dataclass
@@ -103,9 +104,6 @@ class AlphaZeroTrainer:
         self.colors = self.COLOR_ORDER[: self.config.num_players]
         self.mcts = NeuralMCTS(self)
 
-    # ------------------------------------------------------------------ #
-    # Public high-level API
-    # ------------------------------------------------------------------ #
     def self_play(self, num_games: int) -> Dict[str, float]:
         """Generate data via self-play games."""
         stats: Counter[str] = Counter()
