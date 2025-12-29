@@ -1,0 +1,1 @@
+This folder contains scripts that profile the different components of the AlphaZero-based approach. The results help us optimize the wait time of the inference server and number of workers/threads/games to spawn at once during the training phase.
