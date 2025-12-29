@@ -5,7 +5,7 @@ from torch.utils.data import DataLoader
 from pathlib import Path
 from datasets import load_dataset
 
-from .data_utils import is_non_graph_feature_parquet
+from ..features.catanatron_utils import is_non_graph_feature_parquet
 
 def create_dataloader_from_shards(
     data_dir: str,

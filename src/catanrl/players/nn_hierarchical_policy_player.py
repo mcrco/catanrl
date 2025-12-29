@@ -6,7 +6,7 @@ from catanatron.models.player import Player
 from catanatron.cli.cli_players import register_cli_player
 from catanatron.gym.envs.catanatron_env import ACTIONS_ARRAY, normalize_action
 
-from catanrl.data.data_utils import (
+from catanrl.features.catanatron_utils import (
     compute_feature_vector_dim,
     game_to_features,
     get_numeric_feature_names,
@@ -56,7 +56,7 @@ class NNHierarchicalPolicyPlayer(Player):
         if self.epsilon is not None and np.random.random() < self.epsilon:
             return np.random.choice(playable_actions)
 
-        features = game_to_features(game, self.color, self.numeric_features)
+        features = game_to_features(game, self.color, self.num_players, self.map_type)
         game_tensor = torch.from_numpy(features.reshape(1, -1)).to(self.device)
 
         with torch.no_grad():

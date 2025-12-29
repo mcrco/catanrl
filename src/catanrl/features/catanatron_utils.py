@@ -52,13 +52,15 @@ def compute_feature_vector_dim(num_players: int, map_type: str) -> int:
     numeric_len = len(get_numeric_feature_names(num_players, map_type))
     return numeric_len + _board_tensor_size(num_players, map_type)
 
-
+    
 def game_to_features(
     game: Game,
     color: Color,
-    numeric_feature_names: Sequence[str],
+    num_players: int,
+    map_type: str,
 ) -> np.ndarray:
     """Convert a game state into the flattened feature vector used across players."""
+    numeric_feature_names = get_numeric_feature_names(num_players, map_type)
     sample = create_sample(game, color)
     numeric_vector = np.array([float(sample.get(name, 0.0)) for name in numeric_feature_names], dtype=np.float32)
     board_tensor = create_board_tensor(game, color).astype(np.float32, copy=False).reshape(-1)

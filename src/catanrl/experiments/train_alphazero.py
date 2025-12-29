@@ -23,7 +23,7 @@ from catanatron.players.value import ValueFunctionPlayer
 
 from catanrl.algorithms.alphazero.trainer import AlphaZeroConfig, AlphaZeroTrainer
 from catanrl.algorithms.alphazero.parallel_trainer import ParallelAlphaZeroTrainer
-from catanrl.data.data_utils import compute_feature_vector_dim
+from catanrl.features.catanatron_utils import compute_feature_vector_dim
 from catanrl.models.models import HierarchicalPolicyValueNetwork, PolicyValueNetwork
 
 
@@ -34,9 +34,15 @@ def parse_args() -> argparse.Namespace:
     )
 
     # Training loop
-    parser.add_argument("--iterations", type=int, default=50, help="Outer self-play / SGD iterations")
-    parser.add_argument("--games-per-iteration", type=int, default=16, help="Self-play games per iteration")
-    parser.add_argument("--optimizer-steps", type=int, default=64, help="SGD mini-batches per iteration")
+    parser.add_argument(
+        "--iterations", type=int, default=50, help="Outer self-play / SGD iterations"
+    )
+    parser.add_argument(
+        "--games-per-iteration", type=int, default=16, help="Self-play games per iteration"
+    )
+    parser.add_argument(
+        "--optimizer-steps", type=int, default=64, help="SGD mini-batches per iteration"
+    )
     parser.add_argument(
         "--num-workers",
         type=int,
@@ -52,30 +58,73 @@ def parse_args() -> argparse.Namespace:
     )
 
     # Model + config knobs (mirrors AlphaZeroConfig)
-    parser.add_argument("--num-players", type=int, default=2, choices=[2, 3, 4], help="Number of players in self-play")
-    parser.add_argument("--map-type", type=str, default="BASE", choices=["BASE", "MINI", "TOURNAMENT"], help="Map layout")
+    parser.add_argument(
+        "--num-players",
+        type=int,
+        default=2,
+        choices=[2, 3, 4],
+        help="Number of players in self-play",
+    )
+    parser.add_argument(
+        "--map-type",
+        type=str,
+        default="BASE",
+        choices=["BASE", "MINI", "TOURNAMENT"],
+        help="Map layout",
+    )
     parser.add_argument("--vps-to-win", type=int, default=10, help="Victory points to win the game")
     parser.add_argument("--simulations", type=int, default=64, help="MCTS simulations per move")
     parser.add_argument("--c-puct", type=float, default=1.5, help="PUCT exploration constant")
-    parser.add_argument("--temperature", type=float, default=1.0, help="Sampling temperature for early moves")
-    parser.add_argument("--final-temperature", type=float, default=0.1, help="Temperature after the drop move")
-    parser.add_argument("--temperature-drop-move", type=int, default=30, help="Move index to drop exploration temperature")
-    parser.add_argument("--noise-turns", type=int, default=20, help="Turns to inject Dirichlet noise at the root")
-    parser.add_argument("--dirichlet-alpha", type=float, default=0.3, help="Dirichlet alpha for root exploration noise")
-    parser.add_argument("--dirichlet-frac", type=float, default=0.25, help="Mixing fraction for exploration noise")
+    parser.add_argument(
+        "--temperature", type=float, default=1.0, help="Sampling temperature for early moves"
+    )
+    parser.add_argument(
+        "--final-temperature", type=float, default=0.1, help="Temperature after the drop move"
+    )
+    parser.add_argument(
+        "--temperature-drop-move",
+        type=int,
+        default=30,
+        help="Move index to drop exploration temperature",
+    )
+    parser.add_argument(
+        "--noise-turns", type=int, default=20, help="Turns to inject Dirichlet noise at the root"
+    )
+    parser.add_argument(
+        "--dirichlet-alpha",
+        type=float,
+        default=0.3,
+        help="Dirichlet alpha for root exploration noise",
+    )
+    parser.add_argument(
+        "--dirichlet-frac", type=float, default=0.25, help="Mixing fraction for exploration noise"
+    )
     parser.add_argument("--buffer-size", type=int, default=50_000, help="Replay buffer size")
     parser.add_argument("--batch-size", type=int, default=256, help="Mini-batch size for SGD")
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
     parser.add_argument("--weight-decay", type=float, default=0.0, help="Optimizer weight decay")
-    parser.add_argument("--policy-loss-weight", type=float, default=1.0, help="Policy loss multiplier")
-    parser.add_argument("--value-loss-weight", type=float, default=1.0, help="Value loss multiplier")
+    parser.add_argument(
+        "--policy-loss-weight", type=float, default=1.0, help="Policy loss multiplier"
+    )
+    parser.add_argument(
+        "--value-loss-weight", type=float, default=1.0, help="Value loss multiplier"
+    )
     parser.add_argument("--max-grad-norm", type=float, default=1.0, help="Gradient clipping norm")
-    parser.add_argument("--hidden-dims", type=str, default="512,512", help="Comma-separated hidden layer sizes")
-    parser.add_argument("--device", type=str, default=None, help="Device override (cpu, cuda, cuda:0, ...)")
+    parser.add_argument(
+        "--hidden-dims", type=str, default="512,512", help="Comma-separated hidden layer sizes"
+    )
+    parser.add_argument(
+        "--device", type=str, default=None, help="Device override (cpu, cuda, cuda:0, ...)"
+    )
     parser.add_argument("--seed", type=int, default=42, help="Random seed (set <0 for random)")
 
     # I/O
-    parser.add_argument("--save-path", type=str, default="weights/alphazero/best.pt", help="Path to save the best model")
+    parser.add_argument(
+        "--save-path",
+        type=str,
+        default="weights/alphazero/best.pt",
+        help="Path to save the best model",
+    )
     parser.add_argument(
         "--checkpoint-every",
         type=int,
@@ -88,13 +137,21 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Directory for periodic checkpoints (defaults to save-path directory)",
     )
-    parser.add_argument("--load-weights", type=str, default=None, help="Optional path to initialize model weights")
+    parser.add_argument(
+        "--load-weights", type=str, default=None, help="Optional path to initialize model weights"
+    )
 
     # Logging
     parser.add_argument("--wandb", action="store_true", help="Enable Weights & Biases logging")
-    parser.add_argument("--wandb-project", type=str, default="catan-rl", help="Weights & Biases project name")
-    parser.add_argument("--wandb-run-name", type=str, default=None, help="Weights & Biases run name")
-    parser.add_argument("--wandb-entity", type=str, default=None, help="Weights & Biases entity / team")
+    parser.add_argument(
+        "--wandb-project", type=str, default="catan-rl", help="Weights & Biases project name"
+    )
+    parser.add_argument(
+        "--wandb-run-name", type=str, default=None, help="Weights & Biases run name"
+    )
+    parser.add_argument(
+        "--wandb-entity", type=str, default=None, help="Weights & Biases entity / team"
+    )
 
     return parser.parse_args()
 
@@ -292,24 +349,24 @@ def run_training(args: argparse.Namespace, trainer: AlphaZeroTrainer, wandb_enab
 
             value_eval_stats = trainer.evaluate_against(
                 opponent_factory=lambda color: ValueFunctionPlayer(color),
-                num_games=50,
+                num_games=100,
                 desc="Eval vs ValueFunctionPlayer",
             )
-            alphabeta_eval_stats = trainer.evaluate_against(
-                opponent_factory=lambda color: AlphaBetaPlayer(color, depth=2, prunning=True),
-                num_games=25,
-                desc="Eval vs AlphaBetaPlayer",
-            )
+            # alphabeta_eval_stats = trainer.evaluate_against(
+            #     opponent_factory=lambda color: AlphaBetaPlayer(color, depth=2, prunning=True),
+            #     num_games=25,
+            #     desc="Eval vs AlphaBetaPlayer",
+            # )
             log_eval_stats("ValueFunctionPlayer", value_eval_stats)
-            log_eval_stats("AlphaBetaPlayer", alphabeta_eval_stats)
+            # log_eval_stats("AlphaBetaPlayer", alphabeta_eval_stats)
             wandb.log(
                 {
                     "eval/value_function/win_rate": _eval_win_rate(value_eval_stats),
                     "eval/value_function/agent_wins": value_eval_stats.get("agent_wins", 0),
                     "eval/value_function/draws": value_eval_stats.get("draws", 0),
-                    "eval/alphabeta/win_rate": _eval_win_rate(alphabeta_eval_stats),
-                    "eval/alphabeta/agent_wins": alphabeta_eval_stats.get("agent_wins", 0),
-                    "eval/alphabeta/draws": alphabeta_eval_stats.get("draws", 0),
+                    # "eval/alphabeta/win_rate": _eval_win_rate(alphabeta_eval_stats),
+                    # "eval/alphabeta/agent_wins": alphabeta_eval_stats.get("agent_wins", 0),
+                    # "eval/alphabeta/draws": alphabeta_eval_stats.get("draws", 0),
                     "iteration": iteration,
                 },
                 step=global_step,
@@ -391,4 +448,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

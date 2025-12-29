@@ -23,7 +23,7 @@ from catanatron.models.enums import Action
 from catanatron.models.map import build_map
 from catanatron.models.player import Color
 
-from ...data.data_utils import game_to_features, get_numeric_feature_names
+from ...features.catanatron_utils import game_to_features
 from .mcts import NeuralMCTS
 from .trainer import (
     AlphaZeroConfig,
@@ -75,9 +75,7 @@ class ParallelAlphaZeroTrainer(AlphaZeroTrainer):
             return {}
 
         assignments = self._assign_games(num_games)
-        active_workers = [
-            worker_id for worker_id, seeds in enumerate(assignments) if seeds
-        ]
+        active_workers = [worker_id for worker_id, seeds in enumerate(assignments) if seeds]
         if not active_workers:
             return {}
 
@@ -264,14 +262,15 @@ class _SelfPlayWorkerController:
     ) -> None:
         self.worker_id = worker_id
         self.config = config
-        self.numeric_features = list(get_numeric_feature_names(config.num_players, config.map_type))
         self.colors = AlphaZeroTrainer.COLOR_ORDER[: config.num_players]
         self._inference_client = _RemoteInferenceClient(worker_id, inference_queue, response_queue)
         self._current_game_samples: List[tuple[Color, np.ndarray, np.ndarray]] = []
         self.mcts = NeuralMCTS(self)
         self._set_seed(self.config.seed)
 
-    def self_play(self, seeds: Sequence[Optional[int]]) -> tuple[Counter, List[AlphaZeroExperience]]:
+    def self_play(
+        self, seeds: Sequence[Optional[int]]
+    ) -> tuple[Counter, List[AlphaZeroExperience]]:
         stats: Counter[str] = Counter()
         experiences: List[AlphaZeroExperience] = []
 
@@ -303,7 +302,8 @@ class _SelfPlayWorkerController:
             temperature=max(temperature, 1e-3),
             add_noise=add_noise,
         )
-        if collect_data:
+        # ignore single action steps
+        if collect_data and len(game.state.playable_actions) > 1:
             self._record_sample(color, state_vec, policy)
         return action
 
@@ -313,7 +313,9 @@ class _SelfPlayWorkerController:
         color: Color,
         cached_features: Optional[np.ndarray] = None,
     ) -> tuple[np.ndarray, float]:
-        features = cached_features if cached_features is not None else self._extract_features(game, color)
+        features = (
+            cached_features if cached_features is not None else self._extract_features(game, color)
+        )
         policy, value_scalar = self._inference_client.evaluate(features)
 
         valid_actions = game.state.playable_actions
@@ -336,7 +338,9 @@ class _SelfPlayWorkerController:
     def _play_game(self, seed: Optional[int]) -> Dict[str, Optional[Color]]:
         players = [AlphaZeroSelfPlayPlayer(color, self) for color in self.colors]
         catan_map = build_map(self.config.map_type)
-        game = Game(players=players, seed=seed, catan_map=catan_map, vps_to_win=self.config.vps_to_win)
+        game = Game(
+            players=players, seed=seed, catan_map=catan_map, vps_to_win=self.config.vps_to_win
+        )
         self._current_game_samples.clear()
         winner = None
         try:
@@ -347,7 +351,7 @@ class _SelfPlayWorkerController:
             self._current_game_samples.clear()
 
     def _extract_features(self, game: Game, color: Color) -> np.ndarray:
-        return game_to_features(game, color, self.numeric_features)
+        return game_to_features(game, color, len(self.colors), self.config.map_type)
 
     def _record_sample(self, color: Color, state: np.ndarray, policy: np.ndarray) -> None:
         self._current_game_samples.append((color, state.copy(), policy.copy()))
@@ -405,4 +409,3 @@ def _self_play_worker_main(
             "experiences": experiences,
         }
         result_queue.put(message)
-

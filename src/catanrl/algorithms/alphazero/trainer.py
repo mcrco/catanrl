@@ -26,7 +26,11 @@ from catanatron.models.enums import Action
 from catanatron.models.map import build_map
 from catanatron.models.player import Color, Player
 
-from ...data.data_utils import compute_feature_vector_dim, game_to_features, get_numeric_feature_names
+from ...features.catanatron_utils import (
+    compute_feature_vector_dim,
+    game_to_features,
+    get_numeric_feature_names,
+)
 from ...models.models import HierarchicalPolicyValueNetwork, PolicyValueNetwork
 from .mcts import NeuralMCTS
 
@@ -89,16 +93,13 @@ class AlphaZeroTrainer:
         self.device = self.config.device or ("cuda" if torch.cuda.is_available() else "cpu")
         self._set_seed(self.config.seed)
 
-        self.numeric_features = list(
-            get_numeric_feature_names(self.config.num_players, self.config.map_type)
-        )
         input_dim = compute_feature_vector_dim(self.config.num_players, self.config.map_type)
 
         self.model = model or PolicyValueNetwork(input_dim, ACTION_SPACE_SIZE)
         self.model.to(self.device)
-        self._hierarchical_model = isinstance(self.model, HierarchicalPolicyValueNetwork) or hasattr(
-            self.model, "get_flat_action_logits"
-        )
+        self._hierarchical_model = isinstance(
+            self.model, HierarchicalPolicyValueNetwork
+        ) or hasattr(self.model, "get_flat_action_logits")
         self.optimizer = torch.optim.Adam(
             self.model.parameters(), lr=self.config.lr, weight_decay=self.config.weight_decay
         )
@@ -113,7 +114,9 @@ class AlphaZeroTrainer:
         stats: Counter[str] = Counter()
         for game_idx in tqdm(range(num_games), desc="Self-play", leave=False):
             stats["games"] += 1
-            result = self._play_game(seed=None if self.config.seed is None else self.config.seed + game_idx)
+            result = self._play_game(
+                seed=None if self.config.seed is None else self.config.seed + game_idx
+            )
             winner = result.get("winner")
             if winner is not None:
                 stats[f"wins_{winner.value}"] += 1
@@ -142,7 +145,9 @@ class AlphaZeroTrainer:
 
             catan_map = build_map(self.config.map_type)
             seed = None if self.config.seed is None else self.config.seed + seed_offset + game_idx
-            game = Game(players=players, seed=seed, catan_map=catan_map, vps_to_win=self.config.vps_to_win)
+            game = Game(
+                players=players, seed=seed, catan_map=catan_map, vps_to_win=self.config.vps_to_win
+            )
             winner = game.play()
             stats["games"] += 1
             if winner is None:
@@ -160,10 +165,12 @@ class AlphaZeroTrainer:
 
         batch = random.sample(self.replay_buffer, self.config.batch_size)
         states = torch.from_numpy(np.stack([exp.state for exp in batch])).float().to(self.device)
-        policy_targets = torch.from_numpy(np.stack([exp.policy for exp in batch])).float().to(self.device)
-        value_targets = torch.from_numpy(np.array([exp.value for exp in batch], dtype=np.float32)).to(
-            self.device
+        policy_targets = (
+            torch.from_numpy(np.stack([exp.policy for exp in batch])).float().to(self.device)
         )
+        value_targets = torch.from_numpy(
+            np.array([exp.value for exp in batch], dtype=np.float32)
+        ).to(self.device)
 
         self.model.train()
         log_probs, values = self._model_forward(states)
@@ -218,7 +225,9 @@ class AlphaZeroTrainer:
     def _play_game(self, seed: Optional[int] = None) -> Dict[str, Optional[Color]]:
         players = [AlphaZeroSelfPlayPlayer(color, self) for color in self.colors]
         catan_map = build_map(self.config.map_type)
-        game = Game(players=players, seed=seed, catan_map=catan_map, vps_to_win=self.config.vps_to_win)
+        game = Game(
+            players=players, seed=seed, catan_map=catan_map, vps_to_win=self.config.vps_to_win
+        )
         self._current_game_samples.clear()
         winner = None
         try:
@@ -244,12 +253,13 @@ class AlphaZeroTrainer:
             temperature=max(temperature, 1e-3),
             add_noise=add_noise,
         )
-        if collect_data:
+        # ignore sample if single action
+        if collect_data and len(game.state.playable_actions) > 1:
             self._record_sample(color, state_vec, policy)
         return action
 
     def _extract_features(self, game: Game, color: Color) -> np.ndarray:
-        return game_to_features(game, color, self.numeric_features)
+        return game_to_features(game, color, len(self.colors), self.config.map_type)
 
     def _policy_value(
         self,
@@ -258,7 +268,9 @@ class AlphaZeroTrainer:
         cached_features: Optional[np.ndarray] = None,
     ) -> Tuple[np.ndarray, float]:
         """Run the neural network on the given state and mask invalid actions."""
-        features = cached_features if cached_features is not None else self._extract_features(game, color)
+        features = (
+            cached_features if cached_features is not None else self._extract_features(game, color)
+        )
         state_tensor = torch.from_numpy(features).float().unsqueeze(0).to(self.device)
         self.model.eval()
         with torch.no_grad():
@@ -320,4 +332,3 @@ class AlphaZeroSelfPlayPlayer(Player):
     def decide(self, game: Game, playable_actions: Sequence[Action]):
         del playable_actions  # unused
         return self.controller.select_action(game, collect_data=self._record_data)
-

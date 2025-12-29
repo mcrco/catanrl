@@ -6,7 +6,7 @@ from catanatron.game import Game
 from catanatron.players.minimax import AlphaBetaPlayer
 from catanatron.cli.cli_players import register_cli_player
 
-from catanrl.data.data_utils import (
+from catanrl.features.catanatron_utils import (
     compute_feature_vector_dim,
     game_to_features,
     get_numeric_feature_names,
@@ -34,9 +34,6 @@ class NNAlphaBetaPlayer(AlphaBetaPlayer):
         
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.output_range = output_range
-        if numeric_features is None:
-            numeric_features = list(get_numeric_feature_names(num_players, map_type))
-        self.numeric_features = numeric_features
         
         # Load the trained value network
         self.value_net = ValueNetwork(input_dim).to(self.device)
@@ -50,7 +47,7 @@ class NNAlphaBetaPlayer(AlphaBetaPlayer):
         """
         Overrides the heuristic value function to use the neural network.
         """
-        features = game_to_features(game, p0_color, self.numeric_features)
+        features = game_to_features(game, p0_color, self.num_players, self.map_type)
         game_tensor = torch.from_numpy(features.reshape(1, -1).astype(np.float32)).to(self.device)
         with torch.no_grad():
             value = self.value_net(game_tensor).item()

@@ -155,20 +155,6 @@ class HierarchicalPolicyValueNetwork(nn.Module):
         self.num_nodes = max(len(nodes_settlement), len(nodes_city))  # Should be the same
         self.num_year_of_plenty_combos = len(year_of_plenty_combos)
         self.num_maritime_trades = len(maritime_trades)
-        
-        # Sanity check
-        assert len(nodes_settlement) == len(nodes_city), \
-            f"Settlement and city nodes should be the same, got {len(nodes_settlement)} vs {len(nodes_city)}"
-        
-        # Store for reference
-        self.map_type = 'BASE' if self.num_nodes == 54 else 'MINI' if self.num_nodes == 24 else 'UNKNOWN'
-        
-        print(f"Detected map type: {self.map_type}")
-        print(f"  - Tiles: {self.num_tiles}")
-        print(f"  - Edges: {self.num_edges}")
-        print(f"  - Nodes: {self.num_nodes}")
-        print(f"  - Year of Plenty combos: {self.num_year_of_plenty_combos}")
-        print(f"  - Maritime trades: {self.num_maritime_trades}")
     
     def _build_action_mappings(self):
         """Build mappings between flat action indices and (action_type, action_value)."""

@@ -11,7 +11,7 @@ from torch.utils.data import DataLoader
 from torchdata.datapipes import iter as dp_iter
 from tqdm import tqdm
 
-from .data_utils import is_non_graph_feature_parquet
+from ..features.catanatron_utils import is_non_graph_feature_parquet
 
 
 def _gather_files(data_dir: Path, max_files: Optional[int]) -> List[Path]:

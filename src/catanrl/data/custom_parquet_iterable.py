@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 from datasets import load_dataset
 from tqdm import tqdm
 
-from .data_utils import is_non_graph_feature_parquet
+from ..features.catanatron_utils import is_non_graph_feature_parquet
 
 
 class ParquetBatchIterable(IterableDataset):

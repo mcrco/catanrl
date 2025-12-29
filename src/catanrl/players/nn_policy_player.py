@@ -6,7 +6,7 @@ from catanatron.models.player import Player, Color
 from catanatron.cli.cli_players import register_cli_player
 from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE, ACTIONS_ARRAY, normalize_action
 
-from catanrl.data.data_utils import (
+from catanrl.features.catanatron_utils import (
     compute_feature_vector_dim,
     game_to_features,
     get_numeric_feature_names,
@@ -39,9 +39,6 @@ class NNPolicyPlayer(Player):
         self.input_dim = input_dim
         self.map_type = map_type
         self.num_players = num_players
-        if numeric_features is None:
-            numeric_features = list(get_numeric_feature_names(num_players, map_type))
-        self.numeric_features = numeric_features
         
         # Load the trained policy network
         self.policy_net = HierarchicalPolicyValueNetwork(input_dim, hidden_dims).to(self.device)
@@ -63,7 +60,7 @@ class NNPolicyPlayer(Player):
 
         # Convert game state to features
         game_tensor = torch.from_numpy(
-            game_to_features(game, self.color, self.numeric_features).reshape(1, -1)
+            game_to_features(game, self.color, self.num_players, self.map_type).reshape(1, -1)
         ).to(self.device)
         
         # Get policy logits
