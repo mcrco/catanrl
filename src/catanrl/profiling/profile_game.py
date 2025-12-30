@@ -1,6 +1,5 @@
 import argparse
-import random
-from typing import List, Literal
+from typing import List, Literal, Dict, Union
 import time
 
 from catanatron.game import Game
@@ -17,8 +16,7 @@ def bench_game_step(
     num_players: int,
     turns_limit: int,
     seed: int,
-) -> float:
-    rng = random.Random(seed)
+) -> Dict[str, Union[float, List[int]]]:
     players = [RandomPlayer(c) for c in COLOR_ORDER[:num_players]]
     game = Game(players, seed=seed, catan_map=build_map(map_type))
     times: List[float] = []
@@ -26,11 +24,40 @@ def bench_game_step(
         if game.winning_color() is not None or game.state.num_turns >= turns_limit:
             seed += 1
             game = Game(players, seed=seed, catan_map=build_map(map_type))
-        action = rng.choice(game.state.playable_actions)
         t0 = time.perf_counter()
-        game.execute(action)
+        game.play_tick()
         times.append(time.perf_counter() - t0)
-    return float(mean(times))
+    return {
+        "min_time": min(times),
+        "average_time": float(mean(times)),
+        "max_time": max(times),
+    }
+
+
+def bench_games(
+    map_type: Literal["BASE", "TOURNAMENT", "MINI"],
+    games: int,
+    num_players: int,
+    seed: int,
+) -> Dict[str, Union[float, List[int]]]:
+    """Benchmarks the time it takes to initialize and play games."""
+    players = [RandomPlayer(c) for c in COLOR_ORDER[:num_players]]
+    game = Game(players, seed=seed, catan_map=build_map(map_type))
+    times: List[float] = []
+    turns: List[int] = []
+    for _ in range(games):
+        t0 = time.perf_counter()
+        game = Game(players, seed=seed, catan_map=build_map(map_type))
+        game.play()
+        times.append(time.perf_counter() - t0)
+        turns.append(game.state.num_turns)
+        seed += 1
+    return {
+        "min_time": min(times),
+        "average_time": float(mean(times)),
+        "max_time": max(times),
+        "turns": turns,
+    }
 
 
 if __name__ == "__main__":
@@ -46,12 +73,29 @@ if __name__ == "__main__":
     parser.add_argument("--num-players", type=int, default=2, help="Number of players")
     parser.add_argument("--turns-limit", type=int, default=1000, help="Turns limit")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument("--num-games", type=int, default=1000, help="Number of games to play")
     args = parser.parse_args()
-    average_time = bench_game_step(
+
+    step_results = bench_game_step(
         map_type=args.map_type,
         steps=args.num_steps,
         num_players=args.num_players,
         turns_limit=args.turns_limit,
         seed=args.seed,
     )
-    print(f"Average time per step: {average_time * 1000:.4f} ms")
+    print(f"Average time per step: {step_results['average_time'] * 1000:.4f} ms")
+    print(f"Min time per step: {step_results['min_time'] * 1000:.4f} ms")
+    print(f"Max time per step: {step_results['max_time'] * 1000:.4f} ms")
+
+    game_results = bench_games(
+        map_type=args.map_type,
+        games=args.num_games,
+        num_players=args.num_players,
+        seed=args.seed,
+    )
+    print(f"Average time per game: {game_results['average_time'] * 1000:.4f} ms")
+    print(f"Min time per game: {game_results['min_time'] * 1000:.4f} ms")
+    print(f"Max time per game: {game_results['max_time'] * 1000:.4f} ms")
+    print(f"Average turns per game: {float(mean(game_results['turns']))}")
+    print(f"Min turns per game: {int(min(game_results['turns']))}")
+    print(f"Max turns per game: {int(max(game_results['turns']))}")
