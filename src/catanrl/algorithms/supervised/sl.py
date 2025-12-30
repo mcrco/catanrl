@@ -22,6 +22,7 @@ from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE
 from ...data.sharded_loader import create_dataloader_from_shards
 from ...data.custom_parquet_iterable import create_dataloader, estimate_steps_per_epoch
 from ...models.models import PolicyValueNetwork, HierarchicalPolicyValueNetwork
+from ...models.backbone import BackboneConfig, MLPBackboneConfig
 from .loss_utils import create_loss_computer
 from .metrics import PolicyValueMetrics
 
@@ -80,7 +81,7 @@ def collect_train_actions_fast(
     if sample_fraction < 1.0:
         n_sample = max(1, int(len(train_files) * sample_fraction))
         train_files = train_files[:n_sample]
-        print(f"Sampling {n_sample} files ({sample_fraction*100:.1f}% of training data)")
+        print(f"Sampling {n_sample} files ({sample_fraction * 100:.1f}% of training data)")
 
     print(f"Reading actions from {len(train_files)} training files...")
 
@@ -125,9 +126,9 @@ def train(
 ):
     """Train the joint policy-value network (flat or hierarchical) with shared backbone."""
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"Training Joint Policy-Value Network ({model_type.upper()})")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     print(f"Device: {device}")
     print(f"Model type: {model_type}")
     print(f"Policy loss weight: {policy_loss_weight}")
@@ -177,7 +178,7 @@ def train(
         print("\nCollecting training actions for class weight computation...")
         print("Using fast parallel parquet reading (ACTION column only)...")
         if weight_sample_fraction < 1.0:
-            print(f"  Sampling {weight_sample_fraction*100:.1f}% of data for faster collection")
+            print(f"  Sampling {weight_sample_fraction * 100:.1f}% of data for faster collection")
 
         # Fast collection: read only ACTION column in parallel from parquet files
         train_actions = collect_train_actions_fast(
@@ -203,11 +204,18 @@ def train(
     # Create model based on type
     if model_type == "flat":
         num_actions = ACTION_SPACE_SIZE
-        model = PolicyValueNetwork(input_dim, num_actions, hidden_dims).to(device)
+        backbone_config = BackboneConfig(
+            architecture="mlp", args=MLPBackboneConfig(input_dim=input_dim, hidden_dims=hidden_dims)
+        )
+        model = PolicyValueNetwork(backbone_config, num_actions).to(device)
         print(f"Created flat PolicyValueNetwork")
         print(f"  - Action space size: {num_actions}")
     elif model_type == "hierarchical":
-        model = HierarchicalPolicyValueNetwork(input_dim, hidden_dims).to(device)
+        num_actions = ACTION_SPACE_SIZE
+        backbone_config = BackboneConfig(
+            architecture="mlp", args=MLPBackboneConfig(input_dim=input_dim, hidden_dims=hidden_dims)
+        )
+        model = HierarchicalPolicyValueNetwork(backbone_config, num_actions).to(device)
         print(f"Created HierarchicalPolicyValueNetwork")
         print(f"  - Action types: {model.NUM_ACTION_TYPES}")
         print(f"  - Total action space size: {model.action_space_size}")
@@ -268,7 +276,7 @@ def train(
             tqdm(
                 train_loader,
                 total=train_steps,
-                desc=f"Epoch {epoch+1}/{epochs} [Train]",
+                desc=f"Epoch {epoch + 1}/{epochs} [Train]",
                 unit="batch",
             )
         ):
@@ -369,7 +377,7 @@ def train(
 
         with torch.no_grad():
             for batch in tqdm(
-                val_loader, total=val_steps, desc=f"Epoch {epoch+1}/{epochs} [Val]", unit="batch"
+                val_loader, total=val_steps, desc=f"Epoch {epoch + 1}/{epochs} [Val]", unit="batch"
             ):
                 features = batch["features"].to(device, non_blocking=True)
                 actions = batch["actions"].to(device, non_blocking=True)
@@ -465,7 +473,7 @@ def train(
             )
         wandb.log(log_dict, step=global_step)
 
-        print(f"Epoch {epoch+1}/{epochs}")
+        print(f"Epoch {epoch + 1}/{epochs}")
         print(
             f"  Train - Policy Loss: {train_epoch_metrics['policy_loss']:.4f}, Policy Acc: {train_epoch_metrics['policy_acc']:.2f}%, Policy F1: {train_epoch_metrics['policy_f1']:.4f} | "
             f"Value Loss: {train_epoch_metrics['value_loss']:.6f}, Value Acc: {train_epoch_metrics['value_acc']:.4f}, Value F1: {train_epoch_metrics['value_f1']:.4f} | Total Loss: {train_epoch_metrics['total_loss']:.4f}"
