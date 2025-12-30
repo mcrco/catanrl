@@ -21,6 +21,7 @@ from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE
 from .buffers import OnPolicyBuffer
 from ...envs.single_env import create_opponents, make_vectorized_envs
 from ...models.models import PolicyValueNetwork, HierarchicalPolicyValueNetwork
+from ...models.backbone import BackboneConfig, MLPBackboneConfig
 from .utils import compute_gae
 
 
@@ -324,9 +325,15 @@ def train(
         wandb.init(mode="disabled")
 
     if model_type == "flat":
-        model = PolicyValueNetwork(input_dim, num_actions, list(hidden_dims)).to(device)
+        backbone_config = BackboneConfig(
+            architecture="mlp", args=MLPBackboneConfig(input_dim=input_dim, hidden_dims=hidden_dims)
+        )
+        model = PolicyValueNetwork(backbone_config, num_actions).to(device)
     elif model_type == "hierarchical":
-        model = HierarchicalPolicyValueNetwork(input_dim, list(hidden_dims)).to(device)
+        backbone_config = BackboneConfig(
+            architecture="mlp", args=MLPBackboneConfig(input_dim=input_dim, hidden_dims=hidden_dims)
+        )
+        model = HierarchicalPolicyValueNetwork(backbone_config, num_actions).to(device)
     else:
         raise ValueError(f"Unknown model_type: {model_type}")
 
