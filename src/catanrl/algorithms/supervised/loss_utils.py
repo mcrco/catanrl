@@ -133,7 +133,7 @@ class PolicyValueLoss:
         Initialize loss computer.
 
         Args:
-            model_type: 'flat' for PolicyValueNetwork, 'hierarchical' for HierarchicalPolicyValueNetwork
+            model_type: 'flat' for standard policy/value wrappers, 'hierarchical' otherwise
             policy_weight: Weight for policy loss in total loss
             value_weight: Weight for value loss in total loss
             action_weights: Class weights for action distribution (for flat model)
@@ -318,7 +318,7 @@ def create_loss_computer(
     Factory function to create appropriate loss computer for a model.
 
     Args:
-        model: The policy-value network (PolicyValueNetwork or HierarchicalPolicyValueNetwork)
+        model: The policy-value network wrapper (flat or hierarchical)
         train_actions: Training action indices for computing class weights (optional)
         policy_weight: Weight for policy loss
         value_weight: Weight for value loss
@@ -333,11 +333,11 @@ def create_loss_computer(
     """
     model_type = None
 
-    # Detect model type
-    if hasattr(model, "policy_head") and hasattr(model, "value_head"):
-        model_type = "flat"
-    elif hasattr(model, "action_type_head") and hasattr(model, "tile_head"):
+    # Detect model type (hierarchical models expose flat_to_hierarchical mapping)
+    if hasattr(model, "flat_to_hierarchical"):
         model_type = "hierarchical"
+    elif hasattr(model, "policy_head") and hasattr(model, "value_head"):
+        model_type = "flat"
     else:
         raise ValueError("Unable to detect model type")
 

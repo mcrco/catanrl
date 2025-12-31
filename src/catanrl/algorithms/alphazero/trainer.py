@@ -17,6 +17,7 @@ from typing import Callable, Deque, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
 
@@ -31,7 +32,7 @@ from ...features.catanatron_utils import (
     game_to_features,
     get_numeric_feature_names,
 )
-from ...models.models import HierarchicalPolicyValueNetwork, PolicyValueNetwork
+from ...models.models import build_flat_policy_value_network
 from .mcts import NeuralMCTS
 
 
@@ -83,23 +84,25 @@ class AlphaZeroTrainer:
     def __init__(
         self,
         config: Optional[AlphaZeroConfig] = None,
-        model: Optional[PolicyValueNetwork] = None,
+        model: Optional[nn.Module] = None,
     ):
         self.config = config or AlphaZeroConfig()
-        assert (
-            2 <= self.config.num_players <= len(self.COLOR_ORDER)
-        ), "AlphaZero currently supports between 2 and 4 players."
+        assert 2 <= self.config.num_players <= len(self.COLOR_ORDER), (
+            "AlphaZero currently supports between 2 and 4 players."
+        )
 
         self.device = self.config.device or ("cuda" if torch.cuda.is_available() else "cpu")
         self._set_seed(self.config.seed)
 
         input_dim = compute_feature_vector_dim(self.config.num_players, self.config.map_type)
 
-        self.model = model or PolicyValueNetwork(input_dim, ACTION_SPACE_SIZE)
+        self.model = model or build_flat_policy_value_network(
+            input_dim=input_dim, num_actions=ACTION_SPACE_SIZE
+        )
         self.model.to(self.device)
-        self._hierarchical_model = isinstance(
-            self.model, HierarchicalPolicyValueNetwork
-        ) or hasattr(self.model, "get_flat_action_logits")
+        self._hierarchical_model = hasattr(self.model, "flat_to_hierarchical") or hasattr(
+            self.model, "get_flat_action_logits"
+        )
         self.optimizer = torch.optim.Adam(
             self.model.parameters(), lr=self.config.lr, weight_decay=self.config.weight_decay
         )

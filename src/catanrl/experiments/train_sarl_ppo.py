@@ -1,15 +1,15 @@
 import argparse
 import os
 import wandb
-from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE
+from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE, COLOR_ORDER
 from catanatron.game import Game
 from catanatron.models.map import build_map
-from catanatron.features import get_feature_ordering
-from catanatron.gym.board_tensor_features import create_board_tensor, is_graph_feature
 from catanatron.models.player import RandomPlayer, Color
 
+from ..features.catanatron_utils import game_to_features
 from ..envs.single_env import create_opponents
 from ..algorithms.ppo.sarl_ppo import train
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -19,9 +19,9 @@ def main():
     parser.add_argument(
         "--model-type",
         type=str,
-        choices=['flat', 'hierarchical'],
-        default='flat',
-        help='Model architecture type: flat or hierarchical (default: flat)'
+        choices=["flat", "hierarchical"],
+        default="flat",
+        help="Model architecture type: flat or hierarchical (default: flat)",
     )
     parser.add_argument(
         "--load-weights",
@@ -165,14 +165,10 @@ def main():
     # Calculate input dimension based on actual number of players
 
     # Create dummy players matching the actual game setup
-    colors_list = [Color.RED, Color.BLUE, Color.WHITE, Color.ORANGE]
-    dummy_players = [RandomPlayer(colors_list[i]) for i in range(num_players)]
+    dummy_players = [RandomPlayer(color) for color in COLOR_ORDER[:num_players]]
     dummy_game = Game(dummy_players, catan_map=build_map(args.map_type))
-    # For vectorized training we use 'mixed' observation: numeric (non-graph) + board tensor
-    all_features = get_feature_ordering(num_players, args.map_type)
-    numeric_len = len([f for f in all_features if not is_graph_feature(f)])
-    board_tensor = create_board_tensor(dummy_game, dummy_game.state.colors[0])
-    input_dim = numeric_len + board_tensor.size
+    dummy_tensor = game_to_features(dummy_game, Color.RED, num_players, args.map_type)
+    input_dim = dummy_tensor.shape[0]
     print(f"Number of players: {num_players}")
     print(f"Input dimension: {input_dim}")
 
@@ -252,6 +248,7 @@ def main():
     # Finish wandb
     if args.wandb:
         wandb.finish()
+
 
 if __name__ == "__main__":
     main()

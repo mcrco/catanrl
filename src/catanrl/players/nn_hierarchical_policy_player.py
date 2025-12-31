@@ -11,12 +11,12 @@ from catanrl.features.catanatron_utils import (
     game_to_features,
     get_numeric_feature_names,
 )
-from catanrl.models.models import HierarchicalPolicyValueNetwork
+from catanrl.models.models import build_hierarchical_policy_value_network
 
 
 class NNHierarchicalPolicyPlayer(Player):
     """
-    Player that loads a HierarchicalPolicyValueNetwork and selects the highest-probability action.
+    Player that loads the hierarchical policy/value wrapper and selects the highest-probability action.
     """
 
     def __init__(
@@ -42,7 +42,7 @@ class NNHierarchicalPolicyPlayer(Player):
             numeric_features = list(get_numeric_feature_names(num_players, map_type))
         self.numeric_features = numeric_features
 
-        self.policy_net = HierarchicalPolicyValueNetwork(
+        self.policy_net = build_hierarchical_policy_value_network(
             input_dim=input_dim,
             hidden_dims=hidden_dims,
         ).to(self.device)

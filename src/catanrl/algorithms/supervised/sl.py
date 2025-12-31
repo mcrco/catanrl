@@ -6,9 +6,7 @@ Run: python train_joint.py --data-dir <path> --model-type [flat|hierarchical]
 """
 
 import os
-import argparse
 import torch
-import torch.nn as nn
 import torch.optim as optim
 from tqdm import tqdm
 import wandb
@@ -21,8 +19,9 @@ import pyarrow.parquet as pq
 from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE
 from ...data.sharded_loader import create_dataloader_from_shards
 from ...data.custom_parquet_iterable import create_dataloader, estimate_steps_per_epoch
-from ...models.models import PolicyValueNetwork, HierarchicalPolicyValueNetwork
-from ...models.backbone import BackboneConfig, MLPBackboneConfig
+from ...models.backbones import BackboneConfig, MLPBackboneConfig, create_backbone
+from ...models.heads import FlatPolicyHead, HierarchicalPolicyHead, ValueHead
+from ...models.wrappers import PolicyValueNetworkWrapper
 from .loss_utils import create_loss_computer
 from .metrics import PolicyValueMetrics
 
@@ -101,6 +100,41 @@ def collect_train_actions_fast(
     return all_actions
 
 
+def _build_sl_model(
+    model_type: str,
+    backbone_config: BackboneConfig,
+    num_actions: int,
+    device: torch.device | str,
+) -> PolicyValueNetworkWrapper:
+    """Construct a policy/value network using wrappers for SL training."""
+
+    backbone, feature_dim = create_backbone(backbone_config)
+    value_head = ValueHead(feature_dim)
+
+    if model_type == "flat":
+        policy_head = FlatPolicyHead(feature_dim, num_actions)
+        model = PolicyValueNetworkWrapper(backbone, policy_head, value_head)
+        model.action_space_size = num_actions
+    elif model_type == "hierarchical":
+        policy_head = HierarchicalPolicyHead(feature_dim)
+        model = PolicyValueNetworkWrapper(backbone, policy_head, value_head)
+        model.flat_to_hierarchical = policy_head.flat_to_hierarchical
+        model.hierarchical_to_flat = policy_head.hierarchical_to_flat
+        model.action_space_size = policy_head.action_space_size
+        model.NUM_ACTION_TYPES = policy_head.NUM_ACTION_TYPES
+        model.NUM_RESOURCES = policy_head.NUM_RESOURCES
+        model.num_tiles = policy_head.num_tiles
+        model.num_edges = policy_head.num_edges
+        model.num_nodes = policy_head.num_nodes
+        model.num_year_of_plenty_combos = policy_head.num_year_of_plenty_combos
+        model.num_maritime_trades = policy_head.num_maritime_trades
+        model.num_discard_combinations = policy_head.num_discard_combinations
+    else:
+        raise ValueError(f"Unknown model_type '{model_type}'")
+
+    return model.to(device)
+
+
 def train(
     data_dir: str,
     epochs: int = 10,
@@ -143,7 +177,7 @@ def train(
     # Detect if using sharded data
     use_sharded_loader = "_sharded" in data_dir
     if use_sharded_loader:
-        print(f"Detected sharded data directory, using HF Datasets loader")
+        print("Detected sharded data directory, using HF Datasets loader")
 
     # Create data loaders
     loader_fn = create_dataloader_from_shards if use_sharded_loader else create_dataloader
@@ -190,7 +224,7 @@ def train(
         )
 
         print(f"✓ Collected {len(train_actions)} training actions")
-        print(f"  Action distribution will be computed for class weighting\n")
+        print("  Action distribution will be computed for class weighting\n")
 
     # Initialize wandb after dataloaders are ready
     if wandb_config:
@@ -201,22 +235,16 @@ def train(
     else:
         wandb.init(mode="disabled")
 
-    # Create model based on type
+    num_actions = ACTION_SPACE_SIZE
+    backbone_config = BackboneConfig(
+        architecture="mlp", args=MLPBackboneConfig(input_dim=input_dim, hidden_dims=hidden_dims)
+    )
+    model = _build_sl_model(model_type, backbone_config, num_actions, device)
     if model_type == "flat":
-        num_actions = ACTION_SPACE_SIZE
-        backbone_config = BackboneConfig(
-            architecture="mlp", args=MLPBackboneConfig(input_dim=input_dim, hidden_dims=hidden_dims)
-        )
-        model = PolicyValueNetwork(backbone_config, num_actions).to(device)
-        print(f"Created flat PolicyValueNetwork")
+        print("Created flat policy/value wrapper")
         print(f"  - Action space size: {num_actions}")
     elif model_type == "hierarchical":
-        num_actions = ACTION_SPACE_SIZE
-        backbone_config = BackboneConfig(
-            architecture="mlp", args=MLPBackboneConfig(input_dim=input_dim, hidden_dims=hidden_dims)
-        )
-        model = HierarchicalPolicyValueNetwork(backbone_config, num_actions).to(device)
-        print(f"Created HierarchicalPolicyValueNetwork")
+        print("Created hierarchical policy/value wrapper")
         print(f"  - Action types: {model.NUM_ACTION_TYPES}")
         print(f"  - Total action space size: {model.action_space_size}")
     else:

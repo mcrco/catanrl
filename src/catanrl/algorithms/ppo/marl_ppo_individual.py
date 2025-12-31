@@ -15,6 +15,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import wandb
@@ -29,8 +30,11 @@ from ...envs.multi_env import (
     flatten_marl_observation,
     get_valid_actions,
 )
-from ...models.models import PolicyValueNetwork, HierarchicalPolicyValueNetwork
-from ...models.backbone import BackboneConfig, MLPBackboneConfig
+from ...models.models import (
+    build_flat_policy_value_network,
+    build_hierarchical_policy_value_network,
+)
+from ...models.backbones import BackboneConfig, MLPBackboneConfig
 from .utils import compute_gae
 
 
@@ -39,7 +43,7 @@ class MARLAgent:
 
     def __init__(
         self,
-        model: PolicyValueNetwork | HierarchicalPolicyValueNetwork,
+        model: nn.Module,
         model_type: str,
         device: str,
     ):
@@ -269,7 +273,7 @@ def train(
     seed: Optional[int] = 42,
     max_grad_norm: float = 0.5,
     deterministic_policy: bool = False,
-) -> PolicyValueNetwork:
+) -> nn.Module:
     """Run PPO-based self-play training."""
 
     assert 2 <= num_players <= 4, "num_players must be between 2 and 4"
@@ -314,9 +318,11 @@ def train(
         architecture="mlp", args=MLPBackboneConfig(input_dim=input_dim, hidden_dims=hidden_dims)
     )
     if model_type == "flat":
-        model = PolicyValueNetwork(backbone_config, ACTION_SPACE_SIZE).to(device)
+        model = build_flat_policy_value_network(
+            backbone_config=backbone_config, num_actions=ACTION_SPACE_SIZE
+        ).to(device)
     elif model_type == "hierarchical":
-        model = HierarchicalPolicyValueNetwork(backbone_config, ACTION_SPACE_SIZE).to(device)
+        model = build_hierarchical_policy_value_network(backbone_config=backbone_config).to(device)
     if load_weights:
         if os.path.exists(load_weights):
             print(f"Loading weights from {load_weights}")

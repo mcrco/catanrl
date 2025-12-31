@@ -12,6 +12,7 @@ import numpy as np
 import torch
 import torch.optim as optim
 import torch.optim.lr_scheduler as lr_scheduler
+import torch.nn as nn
 import torch.nn.functional as F
 import wandb
 from tqdm import tqdm
@@ -20,8 +21,11 @@ from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE
 
 from .buffers import OnPolicyBuffer
 from ...envs.single_env import create_opponents, make_vectorized_envs
-from ...models.models import PolicyValueNetwork, HierarchicalPolicyValueNetwork
-from ...models.backbone import BackboneConfig, MLPBackboneConfig
+from ...models.models import (
+    build_flat_policy_value_network,
+    build_hierarchical_policy_value_network,
+)
+from ...models.backbones import BackboneConfig, MLPBackboneConfig
 from .utils import compute_gae
 
 
@@ -29,11 +33,11 @@ ESTIMATED_STEPS_PER_EPISODE = 100
 
 
 class SARLAgent:
-    """Agent wrapper around PolicyValueNetwork for single-agent PPO training."""
+    """Agent wrapper around a policy/value network for single-agent PPO training."""
 
     def __init__(
         self,
-        model: PolicyValueNetwork | HierarchicalPolicyValueNetwork,
+        model: nn.Module,
         model_type: str,
         device: str,
     ):
@@ -298,7 +302,7 @@ def train(
     use_lr_scheduler: bool = False,
     lr_scheduler_kwargs: dict | None = None,
 ):
-    """Train PolicyValueNetwork using single-agent PPO."""
+    """Train the shared policy/value network using single-agent PPO."""
 
     print(f"\n{'=' * 60}")
     print("Training Policy-Value Network with Single Agent Reinforcement Learning (PPO)")
@@ -324,16 +328,15 @@ def train(
     else:
         wandb.init(mode="disabled")
 
+    backbone_config = BackboneConfig(
+        architecture="mlp", args=MLPBackboneConfig(input_dim=input_dim, hidden_dims=hidden_dims)
+    )
     if model_type == "flat":
-        backbone_config = BackboneConfig(
-            architecture="mlp", args=MLPBackboneConfig(input_dim=input_dim, hidden_dims=hidden_dims)
-        )
-        model = PolicyValueNetwork(backbone_config, num_actions).to(device)
+        model = build_flat_policy_value_network(
+            backbone_config=backbone_config, num_actions=num_actions
+        ).to(device)
     elif model_type == "hierarchical":
-        backbone_config = BackboneConfig(
-            architecture="mlp", args=MLPBackboneConfig(input_dim=input_dim, hidden_dims=hidden_dims)
-        )
-        model = HierarchicalPolicyValueNetwork(backbone_config, num_actions).to(device)
+        model = build_hierarchical_policy_value_network(backbone_config=backbone_config).to(device)
     else:
         raise ValueError(f"Unknown model_type: {model_type}")
 

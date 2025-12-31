@@ -1,325 +1,90 @@
-import torch
-import torch.nn as nn
-from typing import Tuple
+from __future__ import annotations
 
-from catanrl.models.backbone import BackboneConfig, create_backbone
+from typing import Sequence
 
-from catanatron.gym.envs.catanatron_env import ACTIONS_ARRAY
-from catanatron.models.enums import ActionType
+from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE
 
+from .backbones import BackboneConfig, MLPBackboneConfig, create_backbone
+from .heads import FlatPolicyHead, HierarchicalPolicyHead, ValueHead
+from .wrappers import PolicyValueNetworkWrapper
 
-class PolicyValueNetwork(nn.Module):
-    """MLP with shared backbone and separate heads for policy and value prediction."""
-
-    def __init__(self, config: BackboneConfig, num_actions: int):
-        super().__init__()
-
-        # Shared backbone
-        self.backbone, input_dim = create_backbone(config)
-        self.policy_head = nn.Linear(input_dim, num_actions)
-        self.value_head = nn.Linear(input_dim, 1)
-
-    def forward(self, x):
-        """Returns both policy logits and value prediction."""
-        features = self.backbone(x)
-        policy_logits = self.policy_head(features)
-        value = self.value_head(features).squeeze(-1)
-        return policy_logits, value
+DEFAULT_HIDDEN_DIMS: Sequence[int] = (512, 512)
 
 
-class HierarchicalPolicyValueNetwork(nn.Module):
-    """
-    Hierarchical policy-value network that predicts action type first,
-    then action parameters, plus value estimation.
+def _resolve_backbone_config(
+    backbone_config: BackboneConfig | None,
+    input_dim: int | None,
+    hidden_dims: Sequence[int] | None,
+) -> BackboneConfig:
+    if backbone_config is not None:
+        return backbone_config
 
-    Action types in Catanatron:
-    0. ROLL (no params)
-    1. MOVE_ROBBER (tiles: 19 for BASE, 7 for MINI)
-    2. DISCARD (5 resources)
-    3. BUILD_ROAD (edges: 72 for BASE, 30 for MINI)
-    4. BUILD_SETTLEMENT (nodes: 54 for BASE, 24 for MINI)
-    5. BUILD_CITY (nodes: 54 for BASE, 24 for MINI)
-    6. BUY_DEVELOPMENT_CARD (no params)
-    7. PLAY_KNIGHT_CARD (no params)
-    8. PLAY_YEAR_OF_PLENTY (20 resource combinations)
-    9. PLAY_ROAD_BUILDING (no params)
-    10. PLAY_MONOPOLY (5 resources)
-    11. MARITIME_TRADE (60 trade combinations)
-    12. END_TURN (no params)
-    """
+    if input_dim is None:
+        raise ValueError("input_dim must be provided when backbone_config is None")
 
-    # Action type indices (order matches ACTIONS_ARRAY in catanatron_env.py)
-    ROLL = 0
-    MOVE_ROBBER = 1
-    DISCARD = 2
-    BUILD_ROAD = 3
-    BUILD_SETTLEMENT = 4
-    BUILD_CITY = 5
-    BUY_DEVELOPMENT_CARD = 6
-    PLAY_KNIGHT_CARD = 7
-    PLAY_YEAR_OF_PLENTY = 8
-    PLAY_ROAD_BUILDING = 9
-    PLAY_MONOPOLY = 10
-    MARITIME_TRADE = 11
-    END_TURN = 12
+    dims = list(hidden_dims) if hidden_dims is not None else list(DEFAULT_HIDDEN_DIMS)
+    if not dims:
+        raise ValueError("hidden_dims must include at least one dimension")
 
-    NUM_ACTION_TYPES = 13
-    NUM_RESOURCES = 5
+    return BackboneConfig(
+        architecture="mlp",
+        args=MLPBackboneConfig(input_dim=input_dim, hidden_dims=list(dims)),
+    )
 
-    def __init__(self, backbone_config: BackboneConfig, num_actions: int):
-        super().__init__()
 
-        self.backbone, input_dim = create_backbone(backbone_config)
+def _attach_hierarchical_metadata(
+    model: PolicyValueNetworkWrapper, policy_head: HierarchicalPolicyHead
+) -> None:
+    model.flat_to_hierarchical = policy_head.flat_to_hierarchical
+    model.hierarchical_to_flat = policy_head.hierarchical_to_flat
+    model.action_space_size = policy_head.action_space_size
+    model.NUM_ACTION_TYPES = policy_head.NUM_ACTION_TYPES
+    model.NUM_RESOURCES = policy_head.NUM_RESOURCES
+    model.num_tiles = policy_head.num_tiles
+    model.num_edges = policy_head.num_edges
+    model.num_nodes = policy_head.num_nodes
+    model.num_year_of_plenty_combos = policy_head.num_year_of_plenty_combos
+    model.num_maritime_trades = policy_head.num_maritime_trades
+    model.num_discard_combinations = policy_head.num_discard_combinations
 
-        # Action type head (13 action types)
-        self.action_type_head = nn.Linear(input_dim, self.NUM_ACTION_TYPES)
 
-        self._analyze_action_space()
+def build_flat_policy_value_network(
+    backbone_config: BackboneConfig | None = None,
+    num_actions: int | None = None,
+    *,
+    input_dim: int | None = None,
+    hidden_dims: Sequence[int] | None = None,
+) -> PolicyValueNetworkWrapper:
+    """Create a flat policy-value network wrapper with a shared backbone."""
 
-        # Parameter heads for each action type that needs them
-        self.tile_head = nn.Linear(input_dim, self.num_tiles)  # MOVE_ROBBER
-        self.edge_head = nn.Linear(input_dim, self.num_edges)  # BUILD_ROAD
-        self.settlement_node_head = nn.Linear(input_dim, self.num_nodes)  # BUILD_SETTLEMENT
-        self.city_node_head = nn.Linear(input_dim, self.num_nodes)  # BUILD_CITY
+    resolved_config = _resolve_backbone_config(backbone_config, input_dim, hidden_dims)
+    action_dim = num_actions or ACTION_SPACE_SIZE
 
-        # These are constant across map types
-        self.year_of_plenty_head = nn.Linear(input_dim, self.num_year_of_plenty_combos)
-        self.monopoly_head = nn.Linear(input_dim, self.NUM_RESOURCES)
-        self.maritime_trade_head = nn.Linear(input_dim, self.num_maritime_trades)
-        self.discard_head = nn.Linear(input_dim, self.num_discard_combinations)
+    backbone, feature_dim = create_backbone(resolved_config)
+    policy_head = FlatPolicyHead(feature_dim, action_dim)
+    value_head = ValueHead(feature_dim)
 
-        # Value head (return prediction)
-        self.value_head = nn.Linear(input_dim, 1)
+    model = PolicyValueNetworkWrapper(backbone, policy_head, value_head)
+    model.backbone_config = resolved_config
+    model.action_space_size = action_dim
+    return model
 
-        # Build action space mappings
-        self._build_action_mappings()
 
-    def _analyze_action_space(self):
-        # Count unique parameter values for each action type
-        tiles = set()
-        edges = set()
-        nodes_settlement = set()
-        nodes_city = set()
-        year_of_plenty_combos = set()
-        monopoly_resources = set()
-        maritime_trades = set()
-        discard_combinations = set()
+def build_hierarchical_policy_value_network(
+    backbone_config: BackboneConfig | None = None,
+    *,
+    input_dim: int | None = None,
+    hidden_dims: Sequence[int] | None = None,
+) -> PolicyValueNetworkWrapper:
+    """Create a hierarchical policy-value network wrapper with a shared backbone."""
 
-        for action_type, value in ACTIONS_ARRAY:
-            if action_type == ActionType.MOVE_ROBBER:
-                tiles.add(value)
-            elif action_type == ActionType.BUILD_ROAD:
-                edges.add(value)
-            elif action_type == ActionType.BUILD_SETTLEMENT:
-                nodes_settlement.add(value)
-            elif action_type == ActionType.BUILD_CITY:
-                nodes_city.add(value)
-            elif action_type == ActionType.PLAY_YEAR_OF_PLENTY:
-                year_of_plenty_combos.add(value)
-            elif action_type == ActionType.PLAY_MONOPOLY:
-                monopoly_resources.add(value)
-            elif action_type == ActionType.MARITIME_TRADE:
-                maritime_trades.add(value)
-            elif action_type == ActionType.DISCARD:
-                discard_combinations.add(value)
+    resolved_config = _resolve_backbone_config(backbone_config, input_dim, hidden_dims)
 
-        # Store dimensions
-        self.num_tiles = len(tiles)
-        self.num_edges = len(edges)
-        self.num_nodes = max(len(nodes_settlement), len(nodes_city))  # Should be the same
-        self.num_year_of_plenty_combos = len(year_of_plenty_combos)
-        self.num_maritime_trades = len(maritime_trades)
-        self.num_discard_combinations = len(discard_combinations)
+    backbone, feature_dim = create_backbone(resolved_config)
+    policy_head = HierarchicalPolicyHead(feature_dim)
+    value_head = ValueHead(feature_dim)
 
-    def _build_action_mappings(self):
-        """Build mappings between flat action indices and (action_type, action_value)."""
-
-        self.actions_array = ACTIONS_ARRAY
-        self.action_space_size = len(ACTIONS_ARRAY)
-
-        # Map ActionType enum to our integer indices
-        self.action_type_to_idx = {
-            ActionType.ROLL: self.ROLL,
-            ActionType.MOVE_ROBBER: self.MOVE_ROBBER,
-            ActionType.DISCARD: self.DISCARD,
-            ActionType.BUILD_ROAD: self.BUILD_ROAD,
-            ActionType.BUILD_SETTLEMENT: self.BUILD_SETTLEMENT,
-            ActionType.BUILD_CITY: self.BUILD_CITY,
-            ActionType.BUY_DEVELOPMENT_CARD: self.BUY_DEVELOPMENT_CARD,
-            ActionType.PLAY_KNIGHT_CARD: self.PLAY_KNIGHT_CARD,
-            ActionType.PLAY_YEAR_OF_PLENTY: self.PLAY_YEAR_OF_PLENTY,
-            ActionType.PLAY_ROAD_BUILDING: self.PLAY_ROAD_BUILDING,
-            ActionType.PLAY_MONOPOLY: self.PLAY_MONOPOLY,
-            ActionType.MARITIME_TRADE: self.MARITIME_TRADE,
-            ActionType.END_TURN: self.END_TURN,
-        }
-
-        # Build index to (action_type_idx, param_idx) mapping
-        self.flat_to_hierarchical = {}
-        self.hierarchical_to_flat = {}
-
-        # Build per-action-type parameter lists
-        self.action_type_params = {i: [] for i in range(self.NUM_ACTION_TYPES)}
-
-        for flat_idx, (action_type, value) in enumerate(ACTIONS_ARRAY):
-            action_type_idx = self.action_type_to_idx[action_type]
-
-            # Get parameter index within action type
-            param_idx = len(self.action_type_params[action_type_idx])
-            self.action_type_params[action_type_idx].append(value)
-
-            # Store bidirectional mappings
-            self.flat_to_hierarchical[flat_idx] = (action_type_idx, param_idx)
-            self.hierarchical_to_flat[(action_type_idx, param_idx)] = flat_idx
-
-    def forward(self, x):
-        """
-        Forward pass returns action type logits, parameter logits for all heads, and value.
-
-        Returns:
-            action_type_logits: [batch_size, 13]
-            param_logits: Dict with keys matching action types
-            value: [batch_size]
-        """
-        features = self.backbone(x)
-
-        # Predict action type
-        action_type_logits = self.action_type_head(features)
-
-        # Predict parameters for all action types
-        param_logits = {
-            self.MOVE_ROBBER: self.tile_head(features),
-            self.BUILD_ROAD: self.edge_head(features),
-            self.BUILD_SETTLEMENT: self.settlement_node_head(features),
-            self.BUILD_CITY: self.city_node_head(features),
-            self.PLAY_YEAR_OF_PLENTY: self.year_of_plenty_head(features),
-            self.PLAY_MONOPOLY: self.monopoly_head(features),
-            self.MARITIME_TRADE: self.maritime_trade_head(features),
-        }
-
-        # Predict value
-        value = self.value_head(features).squeeze(-1)
-
-        return action_type_logits, param_logits, value
-
-    def get_flat_action_logits(self, action_type_logits, param_logits):
-        """
-        Convert hierarchical logits to flat action space logits.
-
-        Args:
-            action_type_logits: [batch_size, 13]
-            param_logits: Dict of parameter logits
-
-        Returns:
-            flat_logits: [batch_size, action_space_size]
-        """
-        batch_size = action_type_logits.shape[0]
-        device = action_type_logits.device
-        flat_logits = torch.zeros(batch_size, self.action_space_size, device=device)
-
-        # For each flat action, compute its log probability as:
-        # log P(flat_action) = log P(action_type) + log P(param | action_type)
-        action_type_log_probs = torch.log_softmax(action_type_logits, dim=-1)
-
-        for flat_idx in range(self.action_space_size):
-            action_type_idx, param_idx = self.flat_to_hierarchical[flat_idx]
-
-            # Start with action type log prob
-            logit = action_type_log_probs[:, action_type_idx]
-
-            # Add parameter log prob if this action type has parameters
-            if action_type_idx in param_logits:
-                param_log_probs = torch.log_softmax(param_logits[action_type_idx], dim=-1)
-                logit = logit + param_log_probs[:, param_idx]
-
-            flat_logits[:, flat_idx] = logit
-
-        return flat_logits
-
-    def compute_loss(
-        self,
-        action_type_logits,
-        param_logits,
-        value_pred,
-        target_actions,
-        target_values,
-        action_type_weight: float = 1.0,
-        param_weight: float = 1.0,
-        value_weight: float = 1.0,
-    ):
-        """
-        Compute hierarchical loss.
-
-        Args:
-            action_type_logits: [batch_size, 13]
-            param_logits: Dict of parameter logits
-            value_pred: [batch_size]
-            target_actions: [batch_size] flat action indices
-            target_values: [batch_size] target values
-            action_type_weight: Weight for action type loss
-            param_weight: Weight for parameter loss
-            value_weight: Weight for value loss
-
-        Returns:
-            total_loss, action_type_loss, param_loss, value_loss
-        """
-        batch_size = target_actions.shape[0]
-        device = action_type_logits.device
-
-        # Convert flat actions to hierarchical (action_type, param_idx)
-        target_action_types = torch.zeros(batch_size, dtype=torch.long, device=device)
-        target_param_indices = {}
-
-        for i in range(batch_size):
-            flat_idx = target_actions[i].item()
-            action_type_idx, param_idx = self.flat_to_hierarchical[flat_idx]
-            target_action_types[i] = action_type_idx
-
-            # Group by action type for efficient loss computation
-            if action_type_idx not in target_param_indices:
-                target_param_indices[action_type_idx] = []
-            target_param_indices[action_type_idx].append((i, param_idx))
-
-        # Action type loss
-        action_type_loss = nn.functional.cross_entropy(action_type_logits, target_action_types)
-
-        # Parameter loss (only for samples with parameterized actions)
-        param_loss = 0.0
-        num_param_samples = 0
-
-        for action_type_idx, samples in target_param_indices.items():
-            if action_type_idx in param_logits:
-                batch_indices = [s[0] for s in samples]
-                param_targets = torch.tensor(
-                    [s[1] for s in samples], dtype=torch.long, device=device
-                )
-
-                # Extract logits for these samples
-                logits_for_type = param_logits[action_type_idx][batch_indices]
-                param_loss += nn.functional.cross_entropy(
-                    logits_for_type, param_targets, reduction="sum"
-                )
-                num_param_samples += len(samples)
-
-        if num_param_samples > 0:
-            param_loss = param_loss / num_param_samples
-
-        # Value loss (MSE)
-        value_loss = nn.functional.mse_loss(value_pred, target_values)
-
-        # Total loss
-        total_loss = (
-            action_type_weight * action_type_loss
-            + param_weight * param_loss
-            + value_weight * value_loss
-        )
-
-        return total_loss, action_type_loss, param_loss, value_loss
-
-    def flat_to_hierarchical_action(self, flat_action_idx: int) -> Tuple[int, int]:
-        """Convert flat action index to (action_type_idx, param_idx)."""
-        return self.flat_to_hierarchical[flat_action_idx]
-
-    def hierarchical_to_flat_action(self, action_type_idx: int, param_idx: int) -> int:
-        """Convert (action_type_idx, param_idx) to flat action index."""
-        return self.hierarchical_to_flat[(action_type_idx, param_idx)]
+    model = PolicyValueNetworkWrapper(backbone, policy_head, value_head)
+    model.backbone_config = resolved_config
+    _attach_hierarchical_metadata(model, policy_head)
+    return model

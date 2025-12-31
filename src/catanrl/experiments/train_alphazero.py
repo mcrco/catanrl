@@ -24,7 +24,10 @@ from catanatron.players.value import ValueFunctionPlayer
 from catanrl.algorithms.alphazero.trainer import AlphaZeroConfig, AlphaZeroTrainer
 from catanrl.algorithms.alphazero.parallel_trainer import ParallelAlphaZeroTrainer
 from catanrl.features.catanatron_utils import compute_feature_vector_dim
-from catanrl.models.models import HierarchicalPolicyValueNetwork, PolicyValueNetwork
+from catanrl.models.models import (
+    build_flat_policy_value_network,
+    build_hierarchical_policy_value_network,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -410,12 +413,12 @@ def main() -> None:
 
     input_dim = compute_feature_vector_dim(config.num_players, config.map_type)
     if args.model_type == "hierarchical":
-        model = HierarchicalPolicyValueNetwork(
+        model = build_hierarchical_policy_value_network(
             input_dim=input_dim,
             hidden_dims=hidden_dims,
         )
     else:
-        model = PolicyValueNetwork(
+        model = build_flat_policy_value_network(
             input_dim=input_dim,
             num_actions=ACTION_SPACE_SIZE,
             hidden_dims=hidden_dims,
