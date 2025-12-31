@@ -22,7 +22,7 @@ from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE
 from catanrl.algorithms.alphazero import parallel_trainer as parallel_mod
 from catanrl.algorithms.alphazero.trainer import AlphaZeroConfig
 from catanrl.features.catanatron_utils import compute_feature_vector_dim
-from catanrl.models.models import HierarchicalPolicyValueNetwork
+from catanrl.models.models import build_hierarchical_policy_value_network
 
 ParallelAlphaZeroTrainer = parallel_mod.ParallelAlphaZeroTrainer
 _BaseInferenceServer = parallel_mod._InferenceServer
@@ -210,7 +210,9 @@ def run_benchmark(
                 print(f"\nSkipping workers={workers}: requires >= 2 workers.")
                 continue
             stats = InferenceQueueStats()
-            model = HierarchicalPolicyValueNetwork(input_dim=input_dim, hidden_dims=list(hidden_dims))
+            model = build_hierarchical_policy_value_network(
+                input_dim=input_dim, hidden_dims=list(hidden_dims)
+            )
             trainer: ParallelAlphaZeroTrainer | None = None
             with patched_inference_server(stats, mock_inference):
                 try:
