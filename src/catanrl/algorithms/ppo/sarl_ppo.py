@@ -198,6 +198,7 @@ def ppo_update(
     Run PPO updates over the collected on-policy buffer for SARL training.
     """
     if len(buffer) == 0:
+        print("No experiences found for PPO update. Skipping update.")
         return {"policy_loss": 0.0, "value_loss": 0.0, "entropy_loss": 0.0, "total_loss": 0.0}
 
     (

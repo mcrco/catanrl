@@ -188,6 +188,7 @@ def ppo_update(
     n_epochs: int,
     batch_size: int,
     device: str,
+    last_critic_states: np.ndarray,
     gamma: float,
     gae_lambda: float,
     max_grad_norm: float,
@@ -210,7 +211,7 @@ def ppo_update(
 
     critic_model.eval()
     with torch.no_grad():
-        next_critic_state = torch.from_numpy(critic_states_tmj[-1]).float().to(device)
+        next_critic_state = torch.from_numpy(last_critic_states).float().to(device)
         next_values = critic_model(next_critic_state).squeeze(-1).detach().cpu().numpy()
     critic_model.train()
 
@@ -563,6 +564,7 @@ def train(
                 observations = next_observations
 
                 if len(buffer) >= max(batch_size * 2, rollout_steps):
+                    _, bootstrap_critic_batch, _ = decode_observations(observations)
                     # Evaluate policy against catanatron bots
                     policy_agent.model.eval()
                     with torch.no_grad():
@@ -623,6 +625,7 @@ def train(
                         n_epochs=ppo_epochs,
                         batch_size=batch_size,
                         device=device,
+                        last_critic_states=bootstrap_critic_batch,
                         gamma=gamma,
                         gae_lambda=gae_lambda,
                         max_grad_norm=max_grad_norm,
