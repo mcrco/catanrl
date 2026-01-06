@@ -1,35 +1,10 @@
 from __future__ import annotations
 
-from typing import Sequence
-
 from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE
 
-from .backbones import BackboneConfig, MLPBackboneConfig, create_backbone
+from .backbones import BackboneConfig, create_backbone
 from .heads import FlatPolicyHead, HierarchicalPolicyHead, ValueHead
-from .wrappers import PolicyValueNetworkWrapper
-
-DEFAULT_HIDDEN_DIMS: Sequence[int] = (512, 512)
-
-
-def _resolve_backbone_config(
-    backbone_config: BackboneConfig | None,
-    input_dim: int | None,
-    hidden_dims: Sequence[int] | None,
-) -> BackboneConfig:
-    if backbone_config is not None:
-        return backbone_config
-
-    if input_dim is None:
-        raise ValueError("input_dim must be provided when backbone_config is None")
-
-    dims = list(hidden_dims) if hidden_dims is not None else list(DEFAULT_HIDDEN_DIMS)
-    if not dims:
-        raise ValueError("hidden_dims must include at least one dimension")
-
-    return BackboneConfig(
-        architecture="mlp",
-        args=MLPBackboneConfig(input_dim=input_dim, hidden_dims=list(dims)),
-    )
+from .wrappers import PolicyNetworkWrapper, PolicyValueNetworkWrapper, ValueNetworkWrapper
 
 
 def _attach_hierarchical_metadata(
@@ -49,42 +24,64 @@ def _attach_hierarchical_metadata(
 
 
 def build_flat_policy_value_network(
-    backbone_config: BackboneConfig | None = None,
+    backbone_config: BackboneConfig,
     num_actions: int | None = None,
-    *,
-    input_dim: int | None = None,
-    hidden_dims: Sequence[int] | None = None,
 ) -> PolicyValueNetworkWrapper:
     """Create a flat policy-value network wrapper with a shared backbone."""
-
-    resolved_config = _resolve_backbone_config(backbone_config, input_dim, hidden_dims)
     action_dim = num_actions or ACTION_SPACE_SIZE
-
-    backbone, feature_dim = create_backbone(resolved_config)
+    backbone, feature_dim = create_backbone(backbone_config)
     policy_head = FlatPolicyHead(feature_dim, action_dim)
     value_head = ValueHead(feature_dim)
-
     model = PolicyValueNetworkWrapper(backbone, policy_head, value_head)
-    model.backbone_config = resolved_config
+    model.backbone_config = backbone_config
     model.action_space_size = action_dim
     return model
 
 
+def build_flat_policy_network(
+    backbone_config: BackboneConfig,
+    num_actions: int | None = None,
+) -> PolicyNetworkWrapper:
+    action_dim = num_actions or ACTION_SPACE_SIZE
+    backbone, feature_dim = create_backbone(backbone_config)
+    policy_head = FlatPolicyHead(feature_dim, action_dim)
+    model = PolicyNetworkWrapper(backbone, policy_head)
+    model.backbone_config = backbone_config
+    model.action_space_size = action_dim
+    return model
+
+
+def build_hierarchical_policy_network(
+    backbone_config: BackboneConfig,
+) -> PolicyNetworkWrapper:
+    backbone, feature_dim = create_backbone(backbone_config)
+    policy_head = HierarchicalPolicyHead(feature_dim)
+    model = PolicyNetworkWrapper(backbone, policy_head)
+    model.backbone_config = backbone_config
+    _attach_hierarchical_metadata(model, policy_head)
+    return model
+
+
 def build_hierarchical_policy_value_network(
-    backbone_config: BackboneConfig | None = None,
-    *,
-    input_dim: int | None = None,
-    hidden_dims: Sequence[int] | None = None,
+    backbone_config: BackboneConfig,
 ) -> PolicyValueNetworkWrapper:
     """Create a hierarchical policy-value network wrapper with a shared backbone."""
 
-    resolved_config = _resolve_backbone_config(backbone_config, input_dim, hidden_dims)
-
-    backbone, feature_dim = create_backbone(resolved_config)
+    backbone, feature_dim = create_backbone(backbone_config)
     policy_head = HierarchicalPolicyHead(feature_dim)
     value_head = ValueHead(feature_dim)
 
     model = PolicyValueNetworkWrapper(backbone, policy_head, value_head)
-    model.backbone_config = resolved_config
+    model.backbone_config = backbone_config
     _attach_hierarchical_metadata(model, policy_head)
+    return model
+
+
+def build_value_network(
+    backbone_config: BackboneConfig,
+) -> ValueNetworkWrapper:
+    backbone, feature_dim = create_backbone(backbone_config)
+    value_head = ValueHead(feature_dim)
+    model = ValueNetworkWrapper(backbone, value_head)
+    model.backbone_config = backbone_config
     return model

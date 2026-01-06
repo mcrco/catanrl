@@ -32,7 +32,7 @@ from catanatron.players.search import VictoryPointPlayer
 from catanatron.players.value import ValueFunctionPlayer
 from catanatron.players.weighted_random import WeightedRandomPlayer
 
-from ...envs.single_env import create_opponents
+from ...envs.gym.single_env import create_opponents
 from ...models.backbones import BackboneConfig, MLPBackboneConfig
 from ...models.models import (
     build_flat_policy_value_network,

@@ -2,13 +2,12 @@
 Shared PPO helpers for both single-agent and multi-agent training regimes.
 """
 
-from . import buffers, utils, central_critic, sarl_ppo, marl_ippo
+from . import buffers, gae, sarl_ppo, marl_ppo_individual, marl_ppo_central_critic
 
 __all__ = [
     "buffers",
-    "utils",
-    "central_critic",
+    "gae",
     "sarl_ppo",
-    "marl_ippo",
+    "marl_ppo_individual",
+    "marl_ppo_central_critic",
 ]
-

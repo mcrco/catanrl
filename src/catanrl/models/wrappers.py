@@ -55,3 +55,9 @@ class PolicyValueNetworkWrapper(nn.Module):
         if hasattr(self.policy_head, "get_flat_action_logits"):
             return self.policy_head.get_flat_action_logits(action_type_logits, param_logits)
         raise AttributeError("Policy head does not expose get_flat_action_logits")
+
+
+def policy_value_to_policy_only(
+    policy_value_network: PolicyValueNetworkWrapper,
+) -> PolicyNetworkWrapper:
+    return PolicyNetworkWrapper(policy_value_network.backbone, policy_value_network.policy_head)

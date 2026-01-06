@@ -9,9 +9,12 @@ from catanatron.models.enums import ActionType
 class ValueHead(nn.Module):
     """Value head for value network."""
 
-    def __init__(self, input_dim: int):
+    def __init__(self, input_dim: int, output_sigmoid: bool = False):
         super().__init__()
-        self.value_head = nn.Sequential(nn.Linear(input_dim, 1), nn.Tanh())
+        if output_sigmoid:
+            self.value_head = nn.Sequential(nn.Linear(input_dim, 1), nn.Sigmoid())
+        else:
+            self.value_head = nn.Linear(input_dim, 1)
 
     def forward(self, x):
         return self.value_head(x).squeeze(-1)

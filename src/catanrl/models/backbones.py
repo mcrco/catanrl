@@ -19,12 +19,14 @@ class BackboneConfig:
 class MLPBackbone(nn.Module):
     def __init__(self, config: MLPBackboneConfig):
         super().__init__()
-        self.layers = nn.Sequential(
-            nn.Linear(config.input_dim, config.hidden_dims[0]),
-            nn.ReLU(),
-            nn.BatchNorm1d(config.hidden_dims[0]),
-            nn.Dropout(0.2),
-        )
+        layers = []
+        in_dim = config.input_dim
+        for hidden_dim in config.hidden_dims:
+            layers.append(nn.Linear(in_dim, hidden_dim))
+            layers.append(nn.LayerNorm(hidden_dim))
+            layers.append(nn.ReLU())
+            in_dim = hidden_dim
+        self.layers = nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.layers(x)

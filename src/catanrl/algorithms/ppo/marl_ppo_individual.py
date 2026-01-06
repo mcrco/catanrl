@@ -23,9 +23,10 @@ from tqdm import tqdm
 
 from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE
 
-from .buffers import MultiAgentExperienceBuffer
-from ...envs.multi_env import (
-    build_marl_env,
+from catanrl.envs import AecCatanatronEnv
+
+from .buffers import ExperienceBuffer
+from ...envs.zoo.multi_env import (
     compute_multiagent_input_dim,
     flatten_marl_observation,
     get_valid_actions,
@@ -35,7 +36,7 @@ from ...models.models import (
     build_hierarchical_policy_value_network,
 )
 from ...models.backbones import BackboneConfig, MLPBackboneConfig
-from .utils import compute_gae
+from .gae import compute_gae_batched
 
 
 class MARLAgent:
@@ -143,7 +144,7 @@ def set_global_seeds(seed: Optional[int]):
 def ppo_update(
     agent: MARLAgent,
     optimizer: torch.optim.Optimizer,
-    buffer: MultiAgentExperienceBuffer,
+    buffer: ExperienceBuffer,
     clip_epsilon: float,
     value_coef: float,
     entropy_coef: float,
@@ -158,20 +159,57 @@ def ppo_update(
     if len(buffer) == 0:
         return {"policy_loss": 0.0, "value_loss": 0.0, "entropy_loss": 0.0, "total_loss": 0.0}
 
-    states, actions, rewards, old_values, old_log_probs, valid_actions, dones = buffer.get()
+    (
+        states_tmj,
+        actions_tmj,
+        rewards_tmj,
+        old_values_tmj,
+        old_log_probs_tmj,
+        valid_actions_tmj,
+        dones_tmj,
+    ) = buffer.get()
+    time_steps, num_envs = actions_tmj.shape
 
     agent.model.eval()
     with torch.no_grad():
-        last_state = torch.from_numpy(states[-1:]).float().to(device)
+        last_state = torch.from_numpy(states_tmj[-1]).float().to(device)  # [num_envs, state_dim]
         if agent.model_type == "flat":
             _, next_value_tensor = agent.model(last_state)
         elif agent.model_type == "hierarchical":
             action_type_logits, param_logits, next_value_tensor = agent.model(last_state)
             next_value_tensor = agent.model.get_flat_action_logits(action_type_logits, param_logits)
-        next_value = float(next_value_tensor.item())
+        next_values = next_value_tensor.squeeze(-1).detach().cpu().numpy()
     agent.model.train()
 
-    advantages, returns = compute_gae(rewards, old_values, dones, next_value, gamma, gae_lambda)
+    advantages_tmj, returns_tmj = compute_gae_batched(
+        rewards_tmj,
+        old_values_tmj,
+        dones_tmj,
+        next_values,
+        gamma,
+        gae_lambda,
+    )
+
+    # experiences start time-major (T, E, ...); flatten to (T*E, ...) for batching
+    states = states_tmj.reshape(time_steps * num_envs, -1)
+    actions = actions_tmj.reshape(-1)
+    old_log_probs = old_log_probs_tmj.reshape(-1)
+    advantages = advantages_tmj.reshape(-1)
+    returns = returns_tmj.reshape(-1)
+    valid_actions = valid_actions_tmj.reshape(time_steps * num_envs, -1)
+
+    # Filter out experiences with only one available action
+    multi_action_mask = np.array([va.sum() > 1 for va in valid_actions], dtype=bool)
+    states = states[multi_action_mask]
+    actions = actions[multi_action_mask]
+    old_log_probs = old_log_probs[multi_action_mask]
+    advantages = advantages[multi_action_mask]
+    returns = returns[multi_action_mask]
+    valid_actions = valid_actions[multi_action_mask]
+
+    if len(advantages) == 0:
+        return {"policy_loss": 0.0, "value_loss": 0.0, "entropy_loss": 0.0, "total_loss": 0.0}
+
     advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
     states_t = torch.from_numpy(states).float().to(device)
@@ -304,7 +342,7 @@ def train(
         "invalid_action_reward": invalid_action_reward,
         "max_invalid_actions": max_invalid_actions,
     }
-    env = build_marl_env(env_config)
+    env = AecCatanatronEnv(env_config)
 
     if wandb_config:
         wandb.init(**wandb_config)
@@ -334,7 +372,12 @@ def train(
     agent = MARLAgent(model, model_type, device)
     optimizer = optim.Adam(model.parameters(), lr=lr)
 
-    buffer = MultiAgentExperienceBuffer()
+    buffer = ExperienceBuffer(
+        num_rollouts=rollout_steps,
+        state_dim=input_dim,
+        action_space_size=ACTION_SPACE_SIZE,
+        num_envs=1,
+    )
     recent_rewards = deque(maxlen=100)
     recent_wins = deque(maxlen=100)
     best_win_rate = -float("inf")
@@ -375,7 +418,7 @@ def train(
                     continue
 
                 obs_vector = flatten_marl_observation(observation, representation)
-                valid_actions = get_valid_actions(info)
+                valid_actions = get_valid_actions(info, observation)
                 action, log_prob, value = agent.select_action(
                     obs_vector, valid_actions, deterministic=deterministic_policy
                 )

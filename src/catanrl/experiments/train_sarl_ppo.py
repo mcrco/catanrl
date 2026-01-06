@@ -7,7 +7,7 @@ from catanatron.models.map import build_map
 from catanatron.models.player import RandomPlayer, Color
 
 from ..features.catanatron_utils import game_to_features
-from ..envs.single_env import create_opponents
+from ..envs.gym.single_env import create_opponents
 from ..algorithms.ppo.sarl_ppo import train
 
 
@@ -20,7 +20,7 @@ def main():
         "--model-type",
         type=str,
         choices=["flat", "hierarchical"],
-        default="flat",
+        default="hierarchical",
         help="Model architecture type: flat or hierarchical (default: flat)",
     )
     parser.add_argument(
@@ -33,7 +33,10 @@ def main():
         "--episodes", type=int, default=1000, help="Number of episodes to train (default: 1000)"
     )
     parser.add_argument(
-        "--update-freq", type=int, default=32, help="Update model every N episodes (default: 32)"
+        "--rollout-steps",
+        type=int,
+        default=4096,
+        help="Update model every N rollout steps (default: 32)",
     )
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate (default: 1e-4)")
     parser.add_argument("--gamma", type=float, default=0.99, help="Discount factor (default: 0.99)")
@@ -50,7 +53,7 @@ def main():
         "--entropy-coef", type=float, default=0.01, help="Entropy coefficient (default: 0.01)"
     )
     parser.add_argument(
-        "--n-epochs", type=int, default=4, help="Number of PPO epochs per update (default: 4)"
+        "--n-epochs", type=int, default=10, help="Number of PPO epochs per update (default: 10)"
     )
     parser.add_argument(
         "--batch-size", type=int, default=64, help="Mini-batch size for PPO update (default: 64)"
@@ -93,6 +96,13 @@ def main():
                             --opponents AB:3:False M:500
                 (default: random)""",
     )
+    parser.add_argument(
+        "--reward",
+        type=str,
+        default="shaped",
+        choices=["shaped", "simple"],
+        help="Reward function type (default: shaped)",
+    )
     parser.add_argument("--wandb", action="store_true", help="Enable Weights & Biases logging")
     parser.add_argument(
         "--wandb-project",
@@ -131,6 +141,12 @@ def main():
         type=int,
         default=None,
         help="Total iterations for LinearLR scheduler (default: n_episodes)",
+    )
+    parser.add_argument(
+        "--metric-window",
+        type=int,
+        default=200,
+        help="Window size for metrics (avg reward and length), also used for best model saving (default: 200)",
     )
 
     args = parser.parse_args()
@@ -194,7 +210,8 @@ def main():
             "config": {
                 "algorithm": "PPO",
                 "episodes": args.episodes,
-                "update_freq": args.update_freq,
+                "rollout_steps": args.rollout_steps,
+                "reward_function": args.reward,
                 "lr": args.lr,
                 "gamma": args.gamma,
                 "gae_lambda": args.gae_lambda,
@@ -221,7 +238,7 @@ def main():
         hidden_dims=hidden_dims,
         load_weights=args.load_weights,
         n_episodes=args.episodes,
-        update_freq=args.update_freq,
+        rollout_steps=args.rollout_steps,
         lr=args.lr,
         gamma=args.gamma,
         gae_lambda=args.gae_lambda,
@@ -235,9 +252,11 @@ def main():
         wandb_config=wandb_config,
         map_type=args.map_type,
         opponent_configs=args.opponents,
+        reward_function=args.reward,
         num_envs=args.num_envs,
         use_lr_scheduler=args.use_lr_scheduler,
         lr_scheduler_kwargs=lr_scheduler_kwargs,
+        metric_window=args.metric_window,
     )
 
     print("\n" + "=" * 60)

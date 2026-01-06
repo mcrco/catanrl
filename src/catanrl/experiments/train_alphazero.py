@@ -24,7 +24,9 @@ from catanatron.players.value import ValueFunctionPlayer
 from catanrl.algorithms.alphazero.trainer import AlphaZeroConfig, AlphaZeroTrainer
 from catanrl.algorithms.alphazero.parallel_trainer import ParallelAlphaZeroTrainer
 from catanrl.features.catanatron_utils import compute_feature_vector_dim
-from catanrl.models.models import (
+from catanrl.models import (
+    BackboneConfig,
+    MLPBackboneConfig,
     build_flat_policy_value_network,
     build_hierarchical_policy_value_network,
 )
@@ -412,16 +414,16 @@ def main() -> None:
     )
 
     input_dim = compute_feature_vector_dim(config.num_players, config.map_type)
+    backbone_config = BackboneConfig(
+        architecture="mlp",
+        args=MLPBackboneConfig(input_dim=input_dim, hidden_dims=hidden_dims),
+    )
     if args.model_type == "hierarchical":
-        model = build_hierarchical_policy_value_network(
-            input_dim=input_dim,
-            hidden_dims=hidden_dims,
-        )
+        model = build_hierarchical_policy_value_network(backbone_config=backbone_config)
     else:
         model = build_flat_policy_value_network(
-            input_dim=input_dim,
+            backbone_config=backbone_config,
             num_actions=ACTION_SPACE_SIZE,
-            hidden_dims=hidden_dims,
         )
 
     if args.num_workers <= 1:

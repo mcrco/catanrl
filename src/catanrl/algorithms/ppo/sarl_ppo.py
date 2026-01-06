@@ -6,7 +6,7 @@ Uses the Catanatron gym environment for training with PPO.
 
 import os
 from collections import deque
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Literal
 
 import numpy as np
 import torch
@@ -17,16 +17,21 @@ import torch.nn.functional as F
 import wandb
 from tqdm import tqdm
 
+from catanatron.players.value import ValueFunctionPlayer
+from catanatron.models.player import RandomPlayer
 from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE
-
-from .buffers import OnPolicyBuffer
-from ...envs.single_env import create_opponents, make_vectorized_envs
-from ...models.models import (
+from catanrl.players.nn_policy_player import NNPolicyPlayer
+from .buffers import ExperienceBuffer
+from ...envs.gym.single_env import create_opponents, make_vectorized_envs
+from ...models import (
+    policy_value_to_policy_only,
     build_flat_policy_value_network,
     build_hierarchical_policy_value_network,
 )
 from ...models.backbones import BackboneConfig, MLPBackboneConfig
-from .utils import compute_gae
+from ...features.catanatron_utils import COLOR_ORDER
+from .gae import compute_gae_batched
+from ...eval.eval_nn_vs_catanatron import eval
 
 
 ESTIMATED_STEPS_PER_EPISODE = 100
@@ -39,7 +44,7 @@ class SARLAgent:
         self,
         model: nn.Module,
         model_type: str,
-        device: str,
+        device: str | torch.device,
     ):
         self.model = model
         self.model_type = model_type
@@ -73,9 +78,12 @@ class SARLAgent:
                 log_prob = -np.log(len(valid_actions))
                 return action_idx, log_prob, 0.0
 
-            mask = torch.full_like(policy_logits, float("-inf"))
-            mask[0, valid_actions] = 0.0
-            masked_logits = torch.clamp(policy_logits + mask, min=-100, max=100)
+            mask = torch.as_tensor(valid_actions, dtype=torch.bool, device=policy_logits.device)
+            masked_logits = torch.clamp(
+                torch.where(mask, policy_logits, torch.full_like(policy_logits, float("-inf"))),
+                min=-100,
+                max=100,
+            )
 
             probs = F.softmax(masked_logits, dim=-1)
             log_probs_all = F.log_softmax(masked_logits, dim=-1)
@@ -97,7 +105,7 @@ class SARLAgent:
     def select_actions_batch(
         self,
         states: torch.Tensor,
-        valid_actions_batch: List[np.ndarray],
+        valid_action_masks: np.ndarray,
         deterministic: bool = False,
     ) -> Tuple[List[int], List[float], List[float]]:
         """Vectorized action selection for multiple parallel environments."""
@@ -114,16 +122,19 @@ class SARLAgent:
                 policy_logits = self.model.get_flat_action_logits(action_type_logits, param_logits)
             batch_size, num_actions = policy_logits.shape
 
-            masks = torch.full((batch_size, num_actions), float("-inf"), device=self.device)
-            for i, valid_acts in enumerate(valid_actions_batch):
-                masks[i, valid_acts] = 0.0
-
-            masked_logits = torch.clamp(policy_logits + masks, min=-100, max=100)
+            mask = torch.as_tensor(
+                valid_action_masks, dtype=torch.bool, device=policy_logits.device
+            )
+            masked_logits = torch.clamp(
+                torch.where(mask, policy_logits, torch.full_like(policy_logits, float("-inf"))),
+                min=-100,
+                max=100,
+            )
             probs = F.softmax(masked_logits, dim=-1)
             log_probs_all = F.log_softmax(masked_logits, dim=-1)
 
             for i in range(batch_size):
-                valid_actions = valid_actions_batch[i]
+                valid_actions = valid_action_masks[i].nonzero()[0]
                 if deterministic:
                     local_idx = torch.argmax(probs[i, valid_actions]).item()
                     action_idx = int(valid_actions[local_idx])
@@ -144,7 +155,7 @@ class SARLAgent:
         self,
         states: torch.Tensor,
         actions: torch.Tensor,
-        valid_actions_batch: List[np.ndarray],
+        valid_action_masks: np.ndarray,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Evaluate actions for PPO updates."""
         if self.model_type == "flat":
@@ -153,13 +164,12 @@ class SARLAgent:
             action_type_logits, param_logits, values = self.model(states)
             policy_logits = self.model.get_flat_action_logits(action_type_logits, param_logits)
 
-        batch_size = states.shape[0]
-        num_actions = policy_logits.shape[1]
-        masks = torch.full((batch_size, num_actions), float("-inf"), device=self.device)
-        for i, valid_acts in enumerate(valid_actions_batch):
-            masks[i, valid_acts] = 0.0
-
-        masked_logits = torch.clamp(policy_logits + masks, min=-100, max=100)
+        mask = torch.as_tensor(valid_action_masks, dtype=torch.bool, device=policy_logits.device)
+        masked_logits = torch.clamp(
+            torch.where(mask, policy_logits, torch.full_like(policy_logits, float("-inf"))),
+            min=-100,
+            max=100,
+        )
         log_probs_all = F.log_softmax(masked_logits, dim=-1)
         probs = F.softmax(masked_logits, dim=-1)
 
@@ -172,13 +182,14 @@ class SARLAgent:
 def ppo_update(
     agent: SARLAgent,
     optimizer: torch.optim.Optimizer,
-    buffer: OnPolicyBuffer,
+    buffer: ExperienceBuffer,
     clip_epsilon: float,
     value_coef: float,
     entropy_coef: float,
     n_epochs: int,
     batch_size: int,
-    device: str,
+    device: str | torch.device,
+    last_states: np.ndarray,
     gamma: float = 0.99,
     gae_lambda: float = 0.95,
     max_grad_norm: float = 0.5,
@@ -189,19 +200,54 @@ def ppo_update(
     if len(buffer) == 0:
         return {"policy_loss": 0.0, "value_loss": 0.0, "entropy_loss": 0.0, "total_loss": 0.0}
 
-    states, actions, rewards, old_values, old_log_probs, valid_actions, dones = buffer.get()
+    (
+        states_tmj,
+        actions_tmj,
+        rewards_tmj,
+        old_values_tmj,
+        old_log_probs_tmj,
+        valid_action_masks_tmj,
+        dones_tmj,
+    ) = buffer.get()
+    time_steps, num_envs = actions_tmj.shape
 
     agent.model.eval()
     with torch.no_grad():
-        next_state = torch.from_numpy(states[-1:]).float().to(device)
+        next_state = torch.from_numpy(last_states).float().to(device)  # [num_envs, state_dim]
         if agent.model_type == "flat":
             _, next_value = agent.model(next_state)
         elif agent.model_type == "hierarchical":
             _, _, next_value = agent.model(next_state)
-        next_value = next_value.item()
+        next_values = next_value.squeeze(-1).detach().cpu().numpy()
     agent.model.train()
 
-    advantages, returns = compute_gae(rewards, old_values, dones, next_value, gamma, gae_lambda)
+    advantages_tmj, returns_tmj = compute_gae_batched(
+        rewards_tmj, old_values_tmj, dones_tmj, next_values, gamma, gae_lambda
+    )
+
+    # experiences start time-major (T, E, ...); flatten to (T*E, ...) for batching
+    states = states_tmj.reshape(time_steps * num_envs, -1)
+    actions = actions_tmj.reshape(-1)
+    old_log_probs = old_log_probs_tmj.reshape(-1)
+    advantages = advantages_tmj.reshape(-1)
+    returns = returns_tmj.reshape(-1)
+    valid_action_masks = valid_action_masks_tmj.reshape(time_steps * num_envs, -1)
+
+    # Filter out experiences with only one available action (very common, e.g.
+    # roll dice or end turn), to prevent biasing our model towards no-ops.
+    multi_action_mask = np.array([va.sum() > 1 for va in valid_action_masks], dtype=bool)
+    states = states[multi_action_mask]
+    actions = actions[multi_action_mask]
+    old_log_probs = old_log_probs[multi_action_mask]
+    advantages = advantages[multi_action_mask]
+    returns = returns[multi_action_mask]
+    valid_action_masks = valid_action_masks[multi_action_mask]
+
+    if len(advantages) == 0:
+        print("No valid experiences found for PPO update. Skipping update.")
+        return {"policy_loss": 0.0, "value_loss": 0.0, "entropy_loss": 0.0, "total_loss": 0.0}
+
+
     advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
     states_t = torch.from_numpy(states).float().to(device)
@@ -222,6 +268,7 @@ def ppo_update(
             end = start + batch_size
             batch_indices = indices[start:end]
             if len(batch_indices) <= 1:
+                print(f"Skipping small batch: {len(batch_indices)}")
                 continue
 
             batch_states = states_t[batch_indices]
@@ -229,12 +276,12 @@ def ppo_update(
             batch_old_log_probs = old_log_probs_t[batch_indices]
             batch_advantages = advantages_t[batch_indices]
             batch_returns = returns_t[batch_indices]
-            batch_valid_actions = [valid_actions[i] for i in batch_indices]
+            batch_valid_action_masks = valid_action_masks[batch_indices]
 
             log_probs, values, entropy = agent.evaluate_actions(
-                batch_states, batch_actions, batch_valid_actions
+                batch_states, batch_actions, batch_valid_action_masks
             )
-
+            
             ratio = torch.exp(log_probs - batch_old_log_probs)
             surr1 = ratio * batch_advantages
             surr2 = torch.clamp(ratio, 1 - clip_epsilon, 1 + clip_epsilon) * batch_advantages
@@ -244,7 +291,7 @@ def ppo_update(
             entropy_loss = -entropy.mean()
 
             loss = policy_loss + value_coef * value_loss + entropy_coef * entropy_loss
-
+            
             optimizer.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(agent.model.parameters(), max_grad_norm)
@@ -254,6 +301,7 @@ def ppo_update(
                 for param in agent.model.parameters()
             )
             if has_nan_grad:
+                print("  WARNING: NaN gradients detected! Skipping batch update.")
                 optimizer.zero_grad()
                 continue
 
@@ -266,13 +314,21 @@ def ppo_update(
             n_updates += 1
 
     if n_updates == 0:
-        return {"policy_loss": 0.0, "value_loss": 0.0, "entropy_loss": 0.0, "total_loss": 0.0}
+        print("  WARNING: n_updates was 0! Loop didn't run or all batches were too small.")
+        return {
+            "policy_loss": 0.0,
+            "value_loss": 0.0,
+            "entropy_loss": 0.0,
+            "total_loss": 0.0,
+            "num_updates": 0,
+        }
 
     return {
         "policy_loss": total_policy_loss / n_updates,
         "value_loss": total_value_loss / n_updates,
         "entropy_loss": total_entropy_loss / n_updates,
         "total_loss": total_loss / n_updates,
+        "num_updates": n_updates,
     }
 
 
@@ -283,7 +339,7 @@ def train(
     hidden_dims: List[int] = (512, 512),
     load_weights: str | None = None,
     n_episodes: int = 1000,
-    update_freq: int = 32,
+    rollout_steps: int = 4096,
     lr: float = 1e-4,
     gamma: float = 0.99,
     gae_lambda: float = 0.95,
@@ -296,11 +352,14 @@ def train(
     save_freq: int = 100,
     device: str | torch.device = "cuda" if torch.cuda.is_available() else "cpu",
     wandb_config: dict | None = None,
-    map_type: str = "BASE",
+    map_type: Literal["BASE", "TOURNAMENT", "MINI"] = "BASE",
     opponent_configs: List[str] | None = None,
+    reward_function: str = "shaped",
     num_envs: int = 4,
     use_lr_scheduler: bool = False,
     lr_scheduler_kwargs: dict | None = None,
+    metric_window: int = 200,
+    num_validation_games: int = 250,
 ):
     """Train the shared policy/value network using single-agent PPO."""
 
@@ -310,7 +369,7 @@ def train(
     print(f"Device: {device}")
     print(f"Map type: {map_type}")
     print(f"Episodes: {n_episodes}")
-    print(f"Update frequency: {update_freq} episodes")
+    print(f"Rollout steps: {rollout_steps}")
     print(f"Parallel environments: {num_envs}")
 
     opponent_configs = opponent_configs or ["random"]
@@ -344,18 +403,21 @@ def train(
         print(f"Loading weights from: {load_weights}")
         state_dict = torch.load(load_weights, map_location=device)
         model.load_state_dict(state_dict)
-        print("  ✓ Weights loaded successfully")
+        print("  Weights loaded succesfully.")
 
     agent = SARLAgent(model, model_type, device)
     optimizer = optim.Adam(model.parameters(), lr=lr)
 
     # Create learning rate scheduler
     scheduler = None
+    scheduler_total_iters = None
+    scheduler_steps_taken = 0
     if use_lr_scheduler:
         scheduler_kwargs = lr_scheduler_kwargs or {}
         start_factor = scheduler_kwargs.get("start_factor", 1.0)
         end_factor = scheduler_kwargs.get("end_factor", 0.0)
         total_iters = scheduler_kwargs.get("total_iters", n_episodes)
+        scheduler_total_iters = total_iters
         scheduler = lr_scheduler.LinearLR(
             optimizer, start_factor=start_factor, end_factor=end_factor, total_iters=total_iters
         )
@@ -367,126 +429,177 @@ def train(
 
     model.eval()
 
-    buffer = OnPolicyBuffer()
-    episode_rewards = deque(maxlen=100)
-    episode_lengths = deque(maxlen=100)
+    buffer = ExperienceBuffer(
+        num_rollouts=rollout_steps,
+        state_dim=input_dim,
+        action_space_size=num_actions,
+        num_envs=num_envs,
+    )
+    pending_scheduler_steps = 0
+    episode_rewards = deque(maxlen=metric_window)
+    episode_lengths = deque(maxlen=metric_window)
     best_avg_reward = float("-inf")
     global_step = 0
     total_episodes = 0
+    last_checkpoint_episode = 0
 
     envs = make_vectorized_envs(
+        reward_function=reward_function,
         map_type=map_type,
         opponent_configs=opponent_configs,
         num_envs=num_envs,
         representation="mixed",
     )
 
+    def flatten_observations(observation_batch: Dict[str, np.ndarray]) -> np.ndarray:
+        numeric_obs = observation_batch["numeric"].astype(np.float32)
+        board_obs = observation_batch["board"].astype(np.float32)  # [N, C, H, W]
+        board_obs_ch_last = np.transpose(board_obs, (0, 2, 3, 1))
+        board_flat = board_obs_ch_last.reshape(board_obs_ch_last.shape[0], -1)
+        return np.concatenate([numeric_obs, board_flat], axis=1)
+
     env_episode_rewards = np.zeros(num_envs)
     env_episode_lengths = np.zeros(num_envs, dtype=int)
-    episode_start = np.zeros(num_envs, dtype=bool)
 
     print("\nStarting training...")
     observations, infos = envs.reset()
 
     with tqdm(total=n_episodes, desc="Episodes") as pbar:
         while total_episodes < n_episodes:
-            numeric_obs = observations["numeric"].astype(np.float32)
-            board_obs = observations["board"].astype(np.float32)  # [N, C, H, W]
-            board_obs_ch_last = np.transpose(board_obs, (0, 2, 3, 1))
-            board_flat = board_obs_ch_last.reshape(board_obs_ch_last.shape[0], -1)
-            states = np.concatenate([numeric_obs, board_flat], axis=1)
+            states = flatten_observations(observations)
 
             info_valid = infos.get("valid_actions")
-            if info_valid is None:
-                valid_actions_list = [
-                    np.arange(ACTION_SPACE_SIZE, dtype=np.int64) for _ in range(num_envs)
-                ]
-            else:
-                valid_actions_list = []
-                for v in info_valid:
-                    arr = np.array(v, dtype=np.int64)
-                    if arr.size == 0:
-                        arr = np.arange(ACTION_SPACE_SIZE, dtype=np.int64)
-                    valid_actions_list.append(arr)
-
+            valid_action_masks = np.zeros((num_envs, ACTION_SPACE_SIZE), dtype=np.bool_)
+            for i, v in enumerate(info_valid):
+                valid_action_masks[i, v] = True
             states_t = torch.from_numpy(states).float().to(device)
-            actions, log_probs, values = agent.select_actions_batch(states_t, valid_actions_list)
+            actions, log_probs, values = agent.select_actions_batch(states_t, valid_action_masks)
 
             next_observations, rewards, terminations, truncations, infos = envs.step(actions)
 
-            for env_idx in range(num_envs):
-                if not episode_start[env_idx]:
-                    buffer.add(
-                        states[env_idx],
-                        actions[env_idx],
-                        rewards[env_idx],
-                        values[env_idx],
-                        log_probs[env_idx],
-                        valid_actions_list[env_idx],
-                        bool(terminations[env_idx] or truncations[env_idx]),
-                    )
-                    env_episode_rewards[env_idx] += rewards[env_idx]
-                    env_episode_lengths[env_idx] += 1
-                    global_step += 1
+            dones = np.logical_or(terminations, truncations)
+            env_episode_rewards += rewards
+            env_episode_lengths += 1
 
-                if terminations[env_idx] or truncations[env_idx]:
-                    episode_rewards.append(env_episode_rewards[env_idx])
-                    episode_lengths.append(env_episode_lengths[env_idx])
-                    total_episodes += 1
-                    pbar.update(1)
+            actions_arr = np.array(actions)
+            values_arr = np.array(values)
+            log_probs_arr = np.array(log_probs)
 
-                    avg_reward = np.mean(episode_rewards)
-                    avg_length = np.mean(episode_lengths)
+            buffer.add_batch(
+                states,
+                actions_arr,
+                rewards,
+                values_arr,
+                log_probs_arr,
+                valid_action_masks,
+                dones,
+            )
+            global_step += num_envs
 
-                    if total_episodes % 10 == 0:
-                        print(
-                            f"\nEpisode {total_episodes}/{n_episodes} | "
-                            f"Reward: {env_episode_rewards[env_idx]:.2f} | "
-                            f"Avg(100): {avg_reward:.2f} | "
-                            f"Length: {env_episode_lengths[env_idx]}"
-                        )
+            done_indices = np.where(dones)[0]
+            if len(done_indices) > 0:
+                batch_completed_episodes_rewards = env_episode_rewards[done_indices]
+                batch_completed_episodes_lengths = env_episode_lengths[done_indices]
+                completed_episodes = len(done_indices)
 
-                    wandb.log(
-                        {
-                            "episode/reward": env_episode_rewards[env_idx],
-                            "episode/length": env_episode_lengths[env_idx],
-                            "episode/avg_reward": avg_reward,
-                            "episode/avg_length": avg_length,
-                            "episode": total_episodes,
-                        },
-                        step=global_step,
-                    )
+                episode_rewards.extend(batch_completed_episodes_rewards.tolist())
+                episode_lengths.extend(batch_completed_episodes_lengths.tolist())
+                total_episodes += completed_episodes
+                pbar.update(completed_episodes)
 
-                    env_episode_rewards[env_idx] = 0
-                    env_episode_lengths[env_idx] = 0
-                    episode_start[env_idx] = True
+                avg_reward = float(np.mean(episode_rewards)) if episode_rewards else 0.0
+                avg_length = float(np.mean(episode_lengths)) if episode_lengths else 0.0
 
-                    min_episodes_for_best = min(update_freq, 100)
-                    if (
-                        len(episode_rewards) >= min_episodes_for_best
-                        and avg_reward > best_avg_reward
-                    ):
-                        best_avg_reward = avg_reward
-                        torch.save(model.state_dict(), save_path)
-                        print(f"  → Saved best model (avg_reward: {avg_reward:.2f})")
-                        if wandb.run is not None:
-                            wandb.run.summary["best_avg_reward"] = best_avg_reward
+                wandb.log(
+                    {
+                        "episode/batch_completed_episodes": completed_episodes,
+                        "episode/batch_completed_episodes_reward_mean": float(np.mean(batch_completed_episodes_rewards)),
+                        "episode/batch_completed_episodes_reward_min": float(np.min(batch_completed_episodes_rewards)),
+                        "episode/batch_completed_episodes_reward_max": float(np.max(batch_completed_episodes_rewards)),
+                        "episode/batch_completed_episodes_length_mean": float(np.mean(batch_completed_episodes_lengths)),
+                        "episode/batch_completed_episodes_length_min": float(np.min(batch_completed_episodes_lengths)),
+                        "episode/batch_completed_episodes_length_max": float(np.max(batch_completed_episodes_lengths)),
+                        "episode/avg_episode_reward": avg_reward,
+                        "episode/avg_episode_length": avg_length,
+                        "episode": total_episodes,
+                    },
+                    step=global_step,
+                )
 
-                    if total_episodes % save_freq == 0:
+                env_episode_rewards[done_indices] = 0.0
+                env_episode_lengths[done_indices] = 0
+
+                if scheduler is not None and (
+                    scheduler_total_iters is None or scheduler_steps_taken < scheduler_total_iters
+                ):
+                    pending_scheduler_steps += completed_episodes
+
+                if len(episode_rewards) >= metric_window and avg_reward > best_avg_reward:
+                    best_avg_reward = avg_reward
+                    torch.save(model.state_dict(), save_path)
+                    print(f"  → Saved best model (avg_reward: {avg_reward:.2f})")
+                    if wandb.run is not None:
+                        wandb.run.summary["best_avg_reward"] = best_avg_reward
+
+                if save_freq > 0:
+                    while last_checkpoint_episode + save_freq <= total_episodes:
+                        last_checkpoint_episode += save_freq
                         save_dir = os.path.dirname(save_path)
                         checkpoint_path = (
-                            os.path.join(save_dir, f"checkpoint_ep{total_episodes}.pt")
+                            os.path.join(save_dir, f"checkpoint_ep{last_checkpoint_episode}.pt")
                             if save_dir
-                            else f"checkpoint_ep{total_episodes}.pt"
+                            else f"checkpoint_ep{last_checkpoint_episode}.pt"
                         )
                         torch.save(model.state_dict(), checkpoint_path)
                         print(f"  → Saved checkpoint: {checkpoint_path}")
-                else:
-                    episode_start[env_idx] = False
 
             observations = next_observations
 
-            if len(buffer) >= update_freq * ESTIMATED_STEPS_PER_EPISODE:
+            if len(buffer) >= rollout_steps:
+                bootstrap_states = flatten_observations(observations)
+                # quick lil winrate/vp eval against random and value function player
+                wins, vps, total_vps, turns = eval(
+                    NNPolicyPlayer(
+                        COLOR_ORDER[0],
+                        model_type=model_type,
+                        model=policy_value_to_policy_only(model),
+                    ),
+                    [RandomPlayer(COLOR_ORDER[1], is_bot=True)],
+                    map_type=map_type,
+                    num_games=num_validation_games,
+                    seed=42,
+                )
+                wandb.log(
+                    {
+                        "eval/win_rate_vs_random": wins / num_validation_games,
+                        "eval/avg_vps_vs_random": sum(vps) / len(vps),
+                        "eval/avg_total_vps_vs_random": sum(total_vps) / len(total_vps),
+                        "eval/avg_turns_vs_random": sum(turns) / len(turns),
+                    },
+                    step=global_step,
+                )
+
+                wins, vps, total_vps, turns = eval(
+                    NNPolicyPlayer(
+                        COLOR_ORDER[0],
+                        model_type=model_type,
+                        model=policy_value_to_policy_only(model),
+                    ),
+                    [ValueFunctionPlayer(COLOR_ORDER[1])],
+                    map_type=map_type,
+                    num_games=num_validation_games,
+                    seed=42,
+                )
+                wandb.log(
+                    {
+                        "eval/win_rate_vs_value": wins / num_validation_games,
+                        "eval/avg_vps_vs_value": sum(vps) / len(vps),
+                        "eval/avg_total_vps_vs_value": sum(total_vps) / len(total_vps),
+                        "eval/avg_turns_vs_value": sum(turns) / len(turns),
+                    },
+                    step=global_step,
+                )
+
                 metrics = ppo_update(
                     agent=agent,
                     optimizer=optimizer,
@@ -497,19 +610,43 @@ def train(
                     n_epochs=n_epochs,
                     batch_size=batch_size,
                     device=device,
+                    last_states=bootstrap_states,
                     gamma=gamma,
                     gae_lambda=gae_lambda,
                 )
                 buffer.clear()
                 model.eval()
 
-                # Step learning rate scheduler
-                current_lr = optimizer.param_groups[0]["lr"]
-                if scheduler is not None:
-                    scheduler.step()
-                    new_lr = optimizer.param_groups[0]["lr"]
-                    if new_lr != current_lr:
-                        print(f"  → LR updated: {current_lr:.6f} → {new_lr:.6f}")
+                # Step learning rate scheduler based on completed episodes since last update
+                updates_performed = metrics.get("num_updates", 0)
+                lr_before_scheduler = optimizer.param_groups[0]["lr"]
+                lr_after_scheduler = lr_before_scheduler
+                if (
+                    updates_performed > 0
+                    and scheduler is not None
+                    and pending_scheduler_steps > 0
+                ):
+                    remaining_steps = (
+                        (scheduler_total_iters - scheduler_steps_taken)
+                        if scheduler_total_iters is not None
+                        else pending_scheduler_steps
+                    )
+                    if remaining_steps <= 0:
+                        pending_scheduler_steps = 0
+                    else:
+                        steps_to_apply = min(pending_scheduler_steps, remaining_steps)
+                        for _ in range(steps_to_apply):
+                            scheduler.step()
+                        scheduler_steps_taken += steps_to_apply
+                        pending_scheduler_steps -= steps_to_apply
+                        lr_after_scheduler = optimizer.param_groups[0]["lr"]
+                        if lr_after_scheduler != lr_before_scheduler:
+                            print(
+                                f"  → LR updated: {lr_before_scheduler:.6f} → "
+                                f"{lr_after_scheduler:.6f} ({steps_to_apply} episode step"
+                                f"{'s' if steps_to_apply != 1 else ''})"
+                            )
+                current_lr = lr_after_scheduler
 
                 print(
                     f"\n  → PPO Update | "

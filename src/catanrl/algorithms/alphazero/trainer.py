@@ -32,7 +32,7 @@ from ...features.catanatron_utils import (
     game_to_features,
     get_numeric_feature_names,
 )
-from ...models.models import build_flat_policy_value_network
+from ...models import BackboneConfig, MLPBackboneConfig, build_flat_policy_value_network
 from .mcts import NeuralMCTS
 
 
@@ -95,9 +95,13 @@ class AlphaZeroTrainer:
         self._set_seed(self.config.seed)
 
         input_dim = compute_feature_vector_dim(self.config.num_players, self.config.map_type)
+        backbone_config = BackboneConfig(
+            architecture="mlp",
+            args=MLPBackboneConfig(input_dim=input_dim, hidden_dims=[512, 512]),
+        )
 
         self.model = model or build_flat_policy_value_network(
-            input_dim=input_dim, num_actions=ACTION_SPACE_SIZE
+            backbone_config=backbone_config, num_actions=ACTION_SPACE_SIZE
         )
         self.model.to(self.device)
         self._hierarchical_model = hasattr(self.model, "flat_to_hierarchical") or hasattr(

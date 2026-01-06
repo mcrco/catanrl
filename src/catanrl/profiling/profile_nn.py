@@ -16,7 +16,11 @@ import torch
 
 from catanrl.features.catanatron_utils import COLOR_ORDER, compute_feature_vector_dim
 
-from catanrl.models.models import build_hierarchical_policy_value_network
+from catanrl.models import (
+    BackboneConfig,
+    MLPBackboneConfig,
+    build_hierarchical_policy_value_network,
+)
 
 
 def _maybe_sync(device: str | torch.device) -> None:
@@ -142,7 +146,11 @@ def main() -> None:
     batch_sizes = parse_int_list(args.batch_sizes)
 
     input_dim = compute_feature_vector_dim(len(COLOR_ORDER), args.map_type)
-    model = build_hierarchical_policy_value_network(input_dim=input_dim, hidden_dims=hidden_dims)
+    backbone_config = BackboneConfig(
+        architecture="mlp",
+        args=MLPBackboneConfig(input_dim=input_dim, hidden_dims=hidden_dims),
+    )
+    model = build_hierarchical_policy_value_network(backbone_config=backbone_config)
 
     print("== AlphaZero timing profile ==")
     print(f"Device: {device}")
