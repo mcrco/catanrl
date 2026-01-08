@@ -81,6 +81,9 @@ def main():
     parser.add_argument("--wandb", action="store_true", help="Enable Weights & Biases logging")
     parser.add_argument("--wandb-project", type=str, default="catan-marl")
     parser.add_argument("--wandb-run-name", type=str, default=None)
+    parser.add_argument("--num-envs", type=int, default=4)
+    parser.add_argument("--reward-function", type=str, default="shaped")
+    parser.add_argument("--metric-window", type=int, default=200)
 
     args = parser.parse_args()
 
@@ -161,6 +164,9 @@ def main():
         deterministic_policy=args.deterministic_policy,
         eval_freq=args.eval_freq,
         eval_games_per_opponent=args.eval_games,
+        num_envs=args.num_envs,
+        reward_function=args.reward_function,
+        metric_window=args.metric_window,
     )
 
     print("\n" + "=" * 60)
