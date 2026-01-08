@@ -11,7 +11,7 @@ import os
 import random
 from collections import defaultdict, deque
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple, cast
 
 import numpy as np
 import torch
@@ -55,65 +55,88 @@ class MARLAgent:
     def select_action(
         self,
         state_vec: np.ndarray,
-        valid_actions: np.ndarray,
+        valid_action_mask: np.ndarray,
         deterministic: bool = False,
     ) -> Tuple[int, float, float]:
-        """Select an action for the current PettingZoo agent."""
-        if valid_actions.size == 0:
-            valid_actions = np.arange(ACTION_SPACE_SIZE, dtype=np.int64)
+        """
+        Select an action for the current PettingZoo agent.
 
+        `valid_action_mask` is a boolean/int mask of shape [ACTION_SPACE_SIZE].
+        """
         state_tensor = torch.from_numpy(state_vec).float().unsqueeze(0).to(self.device)
+        masks = np.asarray(valid_action_mask, dtype=np.bool_).reshape(1, -1)
+        actions, log_probs, values = self.select_actions_batch(
+            state_tensor, masks, deterministic=deterministic
+        )
+        return actions[0], log_probs[0], values[0]
+
+    def select_actions_batch(
+        self,
+        states: torch.Tensor,
+        valid_action_masks: np.ndarray,
+        deterministic: bool = False,
+    ) -> Tuple[List[int], List[float], List[float]]:
+        """Vectorized action selection for batch size B (B can be 1)."""
         self.model.eval()
+        actions: List[int] = []
+        log_probs_out: List[float] = []
+        values_out: List[float] = []
         with torch.no_grad():
             if self.model_type == "flat":
-                policy_logits, value = self.model(state_tensor)
+                policy_logits, values = self.model(states)
             elif self.model_type == "hierarchical":
-                action_type_logits, param_logits, value = self.model(state_tensor)
-                policy_logits = self.model.get_flat_action_logits(action_type_logits, param_logits)
+                action_type_logits, param_logits, values = self.model(states)
+                policy_logits = cast(Any, self.model).get_flat_action_logits(
+                    action_type_logits, param_logits
+                )
 
-            mask = torch.full_like(policy_logits, float("-inf"))
-            mask[0, valid_actions] = 0.0
-            masked_logits = torch.clamp(policy_logits + mask, min=-100, max=100)
+            # Match SARL masking semantics: clamp valid logits first, then apply mask.
+            policy_logits = torch.clamp(policy_logits, min=-100, max=100)
+            mask_t = torch.as_tensor(valid_action_masks, dtype=torch.bool, device=policy_logits.device)
+            masked_logits = torch.where(mask_t, policy_logits, torch.full_like(policy_logits, -1e9))
 
             probs = torch.softmax(masked_logits, dim=-1)
             log_probs_all = torch.log_softmax(masked_logits, dim=-1)
 
-            if deterministic:
-                action_idx = torch.argmax(probs[0, valid_actions]).item()
-                action = int(valid_actions[action_idx])
-            else:
-                valid_probs = probs[0, valid_actions]
-                valid_probs = valid_probs / (valid_probs.sum() + 1e-12)
-                dist = torch.distributions.Categorical(valid_probs)
-                action = int(valid_actions[dist.sample().item()])
+            batch_size = probs.shape[0]
+            for i in range(batch_size):
+                valid_idx = np.asarray(valid_action_masks[i]).nonzero()[0]
+                if valid_idx.size == 0:
+                    valid_idx = np.arange(ACTION_SPACE_SIZE, dtype=np.int64)
 
-            log_prob = float(log_probs_all[0, action].item())
-            value_out = float(value.item())
+                if deterministic:
+                    local_idx = torch.argmax(probs[i, valid_idx]).item()
+                    action = int(valid_idx[local_idx])
+                else:
+                    valid_probs = probs[i, valid_idx]
+                    valid_probs = valid_probs / (valid_probs.sum() + 1e-12)
+                    dist = torch.distributions.Categorical(probs=valid_probs)
+                    action = int(valid_idx[dist.sample().item()])
 
-        return action, log_prob, value_out
+                actions.append(action)
+                log_probs_out.append(float(log_probs_all[i, action].item()))
+                values_out.append(float(values[i].item()))
+
+        return actions, log_probs_out, values_out
 
     def evaluate_actions(
         self,
         states: torch.Tensor,
         actions: torch.Tensor,
-        valid_actions_batch: List[np.ndarray],
+        valid_action_masks: np.ndarray,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Evaluate log-probs, values, and entropy for PPO updates."""
         if self.model_type == "flat":
             policy_logits, values = self.model(states)
         elif self.model_type == "hierarchical":
             action_type_logits, param_logits, values = self.model(states)
-            policy_logits = self.model.get_flat_action_logits(action_type_logits, param_logits)
-        batch_size, num_actions = policy_logits.shape
+            policy_logits = cast(Any, self.model).get_flat_action_logits(
+                action_type_logits, param_logits
+            )
 
-        masks = torch.full((batch_size, num_actions), float("-inf"), device=states.device)
-        for idx, valid in enumerate(valid_actions_batch):
-            if valid.size == 0:
-                masks[idx] = 0.0
-            else:
-                masks[idx, valid] = 0.0
-
-        masked_logits = torch.clamp(policy_logits + masks, min=-100, max=100)
+        policy_logits = torch.clamp(policy_logits, min=-100, max=100)
+        mask_t = torch.as_tensor(valid_action_masks, dtype=torch.bool, device=states.device)
+        masked_logits = torch.where(mask_t, policy_logits, torch.full_like(policy_logits, -1e9))
         log_probs_all = torch.log_softmax(masked_logits, dim=-1)
         probs = torch.softmax(masked_logits, dim=-1)
 
@@ -128,7 +151,7 @@ class PendingExperience:
     action: int
     value: float
     log_prob: float
-    valid_actions: np.ndarray
+    valid_action_mask: np.ndarray
 
 
 def set_global_seeds(seed: Optional[int]):
@@ -165,7 +188,7 @@ def ppo_update(
         rewards_tmj,
         old_values_tmj,
         old_log_probs_tmj,
-        valid_actions_tmj,
+        valid_action_masks_tmj,
         dones_tmj,
     ) = buffer.get()
     time_steps, num_envs = actions_tmj.shape
@@ -176,8 +199,7 @@ def ppo_update(
         if agent.model_type == "flat":
             _, next_value_tensor = agent.model(last_state)
         elif agent.model_type == "hierarchical":
-            action_type_logits, param_logits, next_value_tensor = agent.model(last_state)
-            next_value_tensor = agent.model.get_flat_action_logits(action_type_logits, param_logits)
+            _, _, next_value_tensor = agent.model(last_state)
         next_values = next_value_tensor.squeeze(-1).detach().cpu().numpy()
     agent.model.train()
 
@@ -196,16 +218,16 @@ def ppo_update(
     old_log_probs = old_log_probs_tmj.reshape(-1)
     advantages = advantages_tmj.reshape(-1)
     returns = returns_tmj.reshape(-1)
-    valid_actions = valid_actions_tmj.reshape(time_steps * num_envs, -1)
+    valid_action_masks = valid_action_masks_tmj.reshape(time_steps * num_envs, -1)
 
     # Filter out experiences with only one available action
-    multi_action_mask = np.array([va.sum() > 1 for va in valid_actions], dtype=bool)
+    multi_action_mask = np.array([va.sum() > 1 for va in valid_action_masks], dtype=bool)
     states = states[multi_action_mask]
     actions = actions[multi_action_mask]
     old_log_probs = old_log_probs[multi_action_mask]
     advantages = advantages[multi_action_mask]
     returns = returns[multi_action_mask]
-    valid_actions = valid_actions[multi_action_mask]
+    valid_action_masks = valid_action_masks[multi_action_mask]
 
     if len(advantages) == 0:
         return {"policy_loss": 0.0, "value_loss": 0.0, "entropy_loss": 0.0, "total_loss": 0.0}
@@ -237,10 +259,10 @@ def ppo_update(
             batch_old_log_probs = old_log_probs_t[batch_idx]
             batch_advantages = advantages_t[batch_idx]
             batch_returns = returns_t[batch_idx]
-            batch_valid_actions: List[np.ndarray] = [valid_actions[i] for i in batch_idx]
+            batch_valid_action_masks = valid_action_masks[batch_idx]
 
             log_probs, values, entropy = agent.evaluate_actions(
-                batch_states, batch_actions, batch_valid_actions
+                batch_states, batch_actions, batch_valid_action_masks
             )
 
             ratio = torch.exp(log_probs - batch_old_log_probs)
@@ -301,7 +323,7 @@ def train(
     entropy_coef: float = 0.01,
     ppo_epochs: int = 4,
     batch_size: int = 256,
-    hidden_dims: List[int] = (512, 512),
+    hidden_dims: Sequence[int] = (512, 512),
     save_path: str = "weights/policy_value_marl.pt",
     save_freq: int = 50,
     load_weights: Optional[str] = None,
@@ -347,13 +369,14 @@ def train(
     if wandb_config:
         wandb.init(**wandb_config)
         print(
-            f"Initialized wandb: {wandb_config['project']}/{wandb_config.get('name', wandb.run.name)}"
+            f"Initialized wandb: {wandb_config['project']}/"
+            f"{wandb_config.get('name', wandb.run.name if wandb.run is not None else 'run')}"
         )
     else:
         wandb.init(mode="disabled")
 
     backbone_config = BackboneConfig(
-        architecture="mlp", args=MLPBackboneConfig(input_dim=input_dim, hidden_dims=hidden_dims)
+        architecture="mlp", args=MLPBackboneConfig(input_dim=input_dim, hidden_dims=list(hidden_dims))
     )
     if model_type == "flat":
         model = build_flat_policy_value_network(
@@ -405,7 +428,7 @@ def train(
                         reward,
                         exp.value,
                         exp.log_prob,
-                        exp.valid_actions,
+                        exp.valid_action_mask,
                         done,
                     )
                     episode_returns[agent_name] += reward
@@ -419,15 +442,21 @@ def train(
 
                 obs_vector = flatten_marl_observation(observation, representation)
                 valid_actions = get_valid_actions(info, observation)
+                valid_action_mask = np.zeros(ACTION_SPACE_SIZE, dtype=np.bool_)
+                if valid_actions.size == 0:
+                    valid_action_mask[:] = True
+                else:
+                    valid_action_mask[valid_actions] = True
+
                 action, log_prob, value = agent.select_action(
-                    obs_vector, valid_actions, deterministic=deterministic_policy
+                    obs_vector, valid_action_mask, deterministic=deterministic_policy
                 )
                 pending[agent_name] = PendingExperience(
                     state=obs_vector.copy(),
                     action=action,
                     value=value,
                     log_prob=log_prob,
-                    valid_actions=valid_actions.copy(),
+                    valid_action_mask=valid_action_mask.copy(),
                 )
                 env.step(action)
 

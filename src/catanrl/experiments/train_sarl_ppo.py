@@ -100,7 +100,7 @@ def main():
         "--reward",
         type=str,
         default="shaped",
-        choices=["shaped", "simple"],
+        choices=["shaped", "win"],
         help="Reward function type (default: shaped)",
     )
     parser.add_argument("--wandb", action="store_true", help="Enable Weights & Biases logging")

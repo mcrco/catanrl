@@ -21,19 +21,15 @@ import wandb
 from tqdm import tqdm
 
 from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE
-from catanatron.models.player import RandomPlayer
-from catanatron.players.value import ValueFunctionPlayer
 from pufferlib.emulation import nativize
 
 from ...envs import compute_multiagent_input_dim, flatten_marl_observation
 from ...envs.zoo.multi_env import make_vectorized_envs as make_marl_vectorized_envs
 from ...features.catanatron_utils import (
-    COLOR_ORDER,
     get_full_numeric_feature_names,
     get_numeric_feature_names,
 )
-from ...eval.eval_nn_vs_catanatron import eval
-from ...players.nn_policy_player import NNPolicyPlayer
+from ...eval.training_eval import evaluate_against_baselines
 from ...models.backbones import BackboneConfig, MLPBackboneConfig
 from ...models.models import (
     build_flat_policy_network,
@@ -123,31 +119,26 @@ class PolicyAgent:
         valid_action_masks: np.ndarray,
         deterministic: bool = False,
     ) -> Tuple[np.ndarray, np.ndarray]:
+        """Vectorized action selection for multiple parallel environments."""
         self.model.eval()
         with torch.no_grad():
             policy_logits = self._policy_logits(states)
-            masked_logits, mask_tensor = self._mask_logits(policy_logits, valid_action_masks)
+            masked_logits, _ = self._mask_logits(policy_logits, valid_action_masks)
             probs = torch.softmax(masked_logits, dim=-1)
             log_probs_all = torch.log_softmax(masked_logits, dim=-1)
 
-            actions = []
-            log_probs = []
-            for i in range(masked_logits.shape[0]):
-                valid_indices = torch.nonzero(mask_tensor[i], as_tuple=False).squeeze(-1)
-                if valid_indices.numel() == 0:
-                    valid_indices = torch.arange(masked_logits.shape[1], device=states.device)
-                if deterministic:
-                    local_idx = torch.argmax(probs[i, valid_indices]).item()
-                    action = int(valid_indices[local_idx].item())
-                else:
-                    valid_probs = probs[i, valid_indices]
-                    valid_probs = valid_probs / (valid_probs.sum() + 1e-12)
-                    dist = torch.distributions.Categorical(valid_probs)
-                    action = int(valid_indices[dist.sample()].item())
-                actions.append(action)
-                log_probs.append(float(log_probs_all[i, action].item()))
+            if deterministic:
+                action_tensor = torch.argmax(masked_logits, dim=-1)
+            else:
+                dist = torch.distributions.Categorical(probs=probs)
+                action_tensor = dist.sample()
 
-        return np.asarray(actions, dtype=np.int64), np.asarray(log_probs, dtype=np.float32)
+            log_prob_tensor = log_probs_all.gather(1, action_tensor.unsqueeze(1)).squeeze(1)
+
+            actions = action_tensor.detach().cpu().numpy().astype(np.int64)
+            log_probs = log_prob_tensor.detach().cpu().numpy().astype(np.float32)
+
+        return actions, log_probs
 
     def evaluate_actions(
         self,
@@ -234,7 +225,7 @@ def ppo_update(
     valid_action_masks = valid_action_masks_tmj.reshape(time_steps * num_envs, -1)
 
     # Filter out experiences with only one available action
-    multi_action_mask = np.array([va.sum() > 1 for va in valid_action_masks], dtype=bool)
+    multi_action_mask = valid_action_masks.sum(axis=-1) > 1
     actor_states = actor_states[multi_action_mask]
     critic_states = critic_states[multi_action_mask]
     actions = actions[multi_action_mask]
@@ -359,7 +350,7 @@ def train(
     seed: Optional[int] = 42,
     max_grad_norm: float = 0.5,
     deterministic_policy: bool = False,
-    eval_games_per_opponent: int = 50,
+    eval_games_per_opponent: int = 250,
     eval_freq: Optional[int] = None,
     num_envs: int = 2,
     reward_function: str = "shaped",
@@ -568,48 +559,14 @@ def train(
                     # Evaluate policy against catanatron bots
                     policy_agent.model.eval()
                     with torch.no_grad():
-                        # Evaluate against RandomPlayer
-                        wins, vps, total_vps, turns = eval(
-                            NNPolicyPlayer(
-                                COLOR_ORDER[0],
-                                model_type=model_type,
-                                model=policy_model,
-                            ),
-                            [RandomPlayer(COLOR_ORDER[1], is_bot=True)],
+                        evaluate_against_baselines(
+                            policy_model=policy_model,
+                            model_type=model_type,
                             map_type=map_type,
                             num_games=eval_games_per_opponent,
                             seed=seed if seed is not None else 42,
-                        )
-                        wandb.log(
-                            {
-                                "eval/win_rate_vs_random": wins / eval_games_per_opponent,
-                                "eval/avg_vps_vs_random": sum(vps) / len(vps),
-                                "eval/avg_total_vps_vs_random": sum(total_vps) / len(total_vps),
-                                "eval/avg_turns_vs_random": sum(turns) / len(turns),
-                            },
-                            step=global_step,
-                        )
-
-                        # Evaluate against ValueFunctionPlayer
-                        wins, vps, total_vps, turns = eval(
-                            NNPolicyPlayer(
-                                COLOR_ORDER[0],
-                                model_type=model_type,
-                                model=policy_model,
-                            ),
-                            [ValueFunctionPlayer(COLOR_ORDER[1])],
-                            map_type=map_type,
-                            num_games=eval_games_per_opponent,
-                            seed=seed if seed is not None else 42,
-                        )
-                        wandb.log(
-                            {
-                                "eval/win_rate_vs_value": wins / eval_games_per_opponent,
-                                "eval/avg_vps_vs_value": sum(vps) / len(vps),
-                                "eval/avg_total_vps_vs_value": sum(total_vps) / len(total_vps),
-                                "eval/avg_turns_vs_value": sum(turns) / len(turns),
-                            },
-                            step=global_step,
+                            log_to_wandb=True,
+                            global_step=global_step,
                         )
 
                     policy_agent.model.train()

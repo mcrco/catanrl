@@ -1,10 +1,12 @@
 import torch.nn as nn
 
+from .heads import FlatPolicyHead, HierarchicalPolicyHead, ValueHead
+
 
 class PolicyNetworkWrapper(nn.Module):
     """Wrapper for policy network."""
 
-    def __init__(self, backbone: nn.Module, policy_head: nn.Module):
+    def __init__(self, backbone: nn.Module, policy_head: FlatPolicyHead | HierarchicalPolicyHead):
         super().__init__()
         self.backbone = backbone
         self.policy_head = policy_head
@@ -14,7 +16,7 @@ class PolicyNetworkWrapper(nn.Module):
         return self.policy_head(features)
 
     def get_flat_action_logits(self, action_type_logits, param_logits):
-        if hasattr(self.policy_head, "get_flat_action_logits"):
+        if isinstance(self.policy_head, HierarchicalPolicyHead):
             return self.policy_head.get_flat_action_logits(action_type_logits, param_logits)
         raise AttributeError("Policy head does not expose get_flat_action_logits")
 
@@ -35,7 +37,12 @@ class ValueNetworkWrapper(nn.Module):
 class PolicyValueNetworkWrapper(nn.Module):
     """Wrapper for joint policy and value networks."""
 
-    def __init__(self, backbone: nn.Module, policy_head: nn.Module, value_head: nn.Module):
+    def __init__(
+        self,
+        backbone: nn.Module,
+        policy_head: FlatPolicyHead | HierarchicalPolicyHead,
+        value_head: ValueHead,
+    ):
         super().__init__()
         self.backbone = backbone
         self.policy_head = policy_head
@@ -52,7 +59,7 @@ class PolicyValueNetworkWrapper(nn.Module):
         return policy_outputs, value_outputs
 
     def get_flat_action_logits(self, action_type_logits, param_logits):
-        if hasattr(self.policy_head, "get_flat_action_logits"):
+        if isinstance(self.policy_head, HierarchicalPolicyHead):
             return self.policy_head.get_flat_action_logits(action_type_logits, param_logits)
         raise AttributeError("Policy head does not expose get_flat_action_logits")
 

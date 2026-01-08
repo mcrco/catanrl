@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Tuple
 
 import numpy as np
+import numpy.typing as npt
 
 from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE
 
@@ -41,7 +42,7 @@ class ExperienceBuffer:
         reward: float,
         value: float,
         log_prob: float,
-        valid_action_masks: np.ndarray,
+        valid_action_masks: npt.NDArray[np.bool_],
         done: bool,
         env_id: int = 0,
     ):
@@ -67,7 +68,7 @@ class ExperienceBuffer:
         rewards: np.ndarray,
         values: np.ndarray,
         log_probs: np.ndarray,
-        valid_action_masks: np.ndarray,
+        valid_action_masks: npt.NDArray[np.bool_],
         dones: np.ndarray,
     ):
         """Add a batch of transitions to the buffer."""
@@ -127,7 +128,7 @@ class CentralCriticExperienceBuffer(ExperienceBuffer):
         reward: float,
         value: float,
         log_prob: float,
-        valid_action_masks: np.ndarray,
+        valid_action_masks: npt.NDArray[np.bool_],
         done: bool,
         env_id: int = 0,
     ):
@@ -144,7 +145,7 @@ class CentralCriticExperienceBuffer(ExperienceBuffer):
         rewards: np.ndarray,
         values: np.ndarray,
         log_probs: np.ndarray,
-        valid_action_masks: np.ndarray,
+        valid_action_masks: npt.NDArray[np.bool_],
         dones: np.ndarray,
     ):
         actor_states = np.asarray(actor_states)
