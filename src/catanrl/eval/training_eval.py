@@ -5,7 +5,7 @@ Provides a unified interface for evaluating trained policies against
 standard Catanatron opponents (RandomPlayer, ValueFunctionPlayer).
 """
 
-from typing import Dict, Optional
+from typing import Dict, Optional, Literal
 
 import wandb
 from catanatron.models.player import RandomPlayer
@@ -20,7 +20,7 @@ from .eval_nn_vs_catanatron import eval
 def evaluate_against_baselines(
     policy_model: PolicyNetworkWrapper,
     model_type: str,
-    map_type: str,
+    map_type: Literal["BASE", "TOURNAMENT", "MINI"],
     num_games: int = 250,
     seed: int = 42,
     log_to_wandb: bool = True,
