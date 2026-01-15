@@ -1,8 +1,14 @@
-from catanrl.models import BackboneConfig, MLPBackboneConfig
-from catanrl.players import create_nn_policy_player
+import torch
 from catanatron.players.value import ValueFunctionPlayer
-from catanrl.features.catanatron_utils import compute_feature_vector_dim, COLOR_ORDER
+
 from catanrl.eval.eval_nn_vs_catanatron import eval
+from catanrl.features.catanatron_utils import COLOR_ORDER, compute_feature_vector_dim
+from catanrl.models import (
+    BackboneConfig,
+    MLPBackboneConfig,
+)
+from catanrl.models.models import build_hierarchical_policy_network
+from catanrl.players import NNPolicyPlayer
 
 if __name__ == "__main__":
     backbone_config = BackboneConfig(
@@ -12,12 +18,13 @@ if __name__ == "__main__":
             hidden_dims=[512, 512],
         ),
     )
-    nn_player = create_nn_policy_player(
-        COLOR_ORDER[0],
-        model_type="hierarchical",
-        backbone_config=backbone_config,
-        model_path="weights/policy_value_rl_best.pt",
+    model = build_hierarchical_policy_network(backbone_config)
+    model_path = "weights/ppo-central-critic/checkpoint_ep92000.pt"
+    model.load_state_dict(
+        torch.load(model_path, map_location="cuda" if torch.cuda.is_available() else "cpu")
     )
+
+    nn_player = NNPolicyPlayer(color=COLOR_ORDER[0], model_type="hierarchical", model=model)
     opponents = [ValueFunctionPlayer(COLOR_ORDER[1])]
     wins, vps, total_vps, turns = eval(
         nn_player, opponents, map_type="BASE", num_games=100, seed=42

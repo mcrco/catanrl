@@ -1,18 +1,13 @@
-from typing import List, Literal
 import random
 import sys
+from typing import List, Literal
 
 from catanatron.game import Game
-from catanatron.models.player import Player
 from catanatron.models.map import build_map
-from catanatron.players.value import ValueFunctionPlayer
+from catanatron.models.player import Player
 from catanatron.state_functions import get_actual_victory_points
 
-from catanrl.players import create_nn_policy_player, NNPolicyPlayer
-from catanrl.features.catanatron_utils import COLOR_ORDER
-from catanrl.models import BackboneConfig, MLPBackboneConfig
-
-from tqdm import tqdm
+from catanrl.players import NNPolicyPlayer
 
 
 def eval(

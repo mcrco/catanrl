@@ -1,20 +1,12 @@
-import torch
 import numpy as np
-import torch.nn as nn
-from typing import Literal, Dict
-
-from catanatron.models.player import Player, Color, RandomPlayer
-from catanatron.game import Game
-from catanatron.models.map import build_map
-from catanatron.cli.cli_players import register_cli_player
-from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE, ACTIONS_ARRAY, normalize_action
+import torch
+from catanatron.gym.envs.catanatron_env import ACTIONS_ARRAY, normalize_action
+from catanatron.models.player import Color, Player
 
 from catanrl.features.catanatron_utils import (
     game_to_features,
-    COLOR_ORDER,
 )
 from catanrl.models import (
-    BackboneConfig,
     PolicyNetworkWrapper,
 )
 
@@ -85,49 +77,3 @@ class NNPolicyPlayer(Player):
 
     def __repr__(self) -> str:
         return super().__repr__().replace("Player", "NNPolicyPlayer")
-
-
-def create_nn_policy_player(
-    color,
-    model_type: str,
-    backbone_config: BackboneConfig,
-    model_path: str,
-    map_template: Literal["BASE", "TOURNAMENT", "MINI"] = "BASE",
-    num_players: int = 2,
-):
-    """
-    Factory function to create NNPolicyPlayer.
-
-    Args:
-        color: Player color
-        map_template: Map template - 'BASE' (default), 'm' or 'MINI' for mini map,
-                      't' or 'TOURNAMENT' for tournament map
-    """
-    # Normalize map template parameter
-    map_type_map: Dict[str, Literal["BASE", "TOURNAMENT", "MINI"]] = {
-        "m": "MINI",
-        "MINI": "MINI",
-        "t": "TOURNAMENT",
-        "TOURNAMENT": "TOURNAMENT",
-        "BASE": "BASE",
-        "b": "BASE",
-    }
-    map_type = map_type_map.get(map_template if isinstance(map_template, str) else "BASE", "BASE")
-
-    num_players = 2
-    dummy_game = Game(
-        players=[RandomPlayer(c) for c in COLOR_ORDER[:num_players]],
-    )
-    input_dim = len(
-        game_to_features(dummy_game, COLOR_ORDER[0], num_players=num_players, map_type=map_type)
-    )
-
-    return NNPolicyPlayer(
-        color=color,
-        model_type=model_type,
-        backbone_config=backbone_config,
-        model_path=model_path,
-        input_dim=input_dim,
-        map_type=map_type,
-        num_players=num_players,
-    )
