@@ -1,6 +1,7 @@
 import random
 import sys
 from typing import List, Literal
+from tqdm import tqdm
 
 from catanatron.game import Game
 from catanatron.models.map import build_map
@@ -16,6 +17,7 @@ def eval(
     map_type: Literal["BASE", "TOURNAMENT", "MINI"] = "BASE",
     num_games: int = 100,
     seed: int = 42,
+    show_tqdm: bool = False,
 ):
     wins = 0
     vps = []
@@ -24,12 +26,12 @@ def eval(
 
     players = [nn_player] + opponents
     map = build_map(map_type)
-    random.seed(seed)
-    for _ in range(num_games):
+    rng = random.Random(seed)
+    for _ in tqdm(range(num_games), disable=not show_tqdm):
         game = Game(
             players=players,
             catan_map=map,
-            seed=random.randint(
+            seed=rng.randint(
                 0,
                 sys.maxsize,
             ),

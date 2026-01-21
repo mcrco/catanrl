@@ -45,8 +45,7 @@ def main():
         default="512,512",
         help="Hidden dimensions for critic network (comma-separated)",
     )
-    parser.add_argument("--save-path", type=str, default="weights/policy_value_marl_central.pt")
-    parser.add_argument("--save-freq", type=int, default=50)
+    parser.add_argument("--save-path", type=str, default="weights/marl_central_critic")
     parser.add_argument(
         "--eval-freq",
         type=int,
@@ -95,46 +94,40 @@ def main():
         print(f"Error: Critic weights file '{args.load_critic_weights}' not found!")
         return
 
-    # Create save directory if needed
-    if args.save_path:
-        save_dir = os.path.dirname(args.save_path)
-        if save_dir and not os.path.exists(save_dir):
-            print(f"Creating directory {save_dir}")
-            os.makedirs(save_dir, exist_ok=True)
-
     # Parse hidden dimensions
     policy_hidden_dims = [int(dim) for dim in args.policy_hidden_dims.split(",") if dim.strip()]
     critic_hidden_dims = [int(dim) for dim in args.critic_hidden_dims.split(",") if dim.strip()]
 
-    # Prepare wandb config
-    wandb_config = None
+    # Prepare wandb config (initialization happens in train)
+    config_dict = {
+        "algorithm": "PPO_Central_Critic",
+        "episodes": args.episodes,
+        "rollout_steps": args.rollout_steps,
+        "policy_lr": args.policy_lr,
+        "critic_lr": args.critic_lr,
+        "gamma": args.gamma,
+        "gae_lambda": args.gae_lambda,
+        "clip_epsilon": args.clip_epsilon,
+        "value_coef": args.value_coef,
+        "entropy_coef": args.entropy_coef,
+        "ppo_epochs": args.ppo_epochs,
+        "batch_size": args.batch_size,
+        "policy_hidden_dims": policy_hidden_dims,
+        "critic_hidden_dims": critic_hidden_dims,
+        "num_players": args.num_players,
+        "map_type": args.map_type,
+        "model_type": args.model_type,
+        "max_grad_norm": args.max_grad_norm,
+        "deterministic_policy": args.deterministic_policy,
+    }
     if args.wandb:
-        config_dict = {
-            "algorithm": "PPO_Central_Critic",
-            "episodes": args.episodes,
-            "rollout_steps": args.rollout_steps,
-            "policy_lr": args.policy_lr,
-            "critic_lr": args.critic_lr,
-            "gamma": args.gamma,
-            "gae_lambda": args.gae_lambda,
-            "clip_epsilon": args.clip_epsilon,
-            "value_coef": args.value_coef,
-            "entropy_coef": args.entropy_coef,
-            "ppo_epochs": args.ppo_epochs,
-            "batch_size": args.batch_size,
-            "policy_hidden_dims": policy_hidden_dims,
-            "critic_hidden_dims": critic_hidden_dims,
-            "num_players": args.num_players,
-            "map_type": args.map_type,
-            "model_type": args.model_type,
-            "max_grad_norm": args.max_grad_norm,
-            "deterministic_policy": args.deterministic_policy,
-        }
         wandb_config = {
             "project": args.wandb_project,
             "name": args.wandb_run_name,
             "config": config_dict,
         }
+    else:
+        wandb_config = {"mode": "disabled", "config": config_dict}
 
     # Train model
     train(
@@ -155,7 +148,6 @@ def main():
         policy_hidden_dims=policy_hidden_dims,
         critic_hidden_dims=critic_hidden_dims,
         save_path=args.save_path,
-        save_freq=args.save_freq,
         load_policy_weights=args.load_policy_weights,
         load_critic_weights=args.load_critic_weights,
         wandb_config=wandb_config,
@@ -173,8 +165,9 @@ def main():
     print("Multi-agent central critic training complete!")
     print("=" * 60)
     if args.save_path:
-        print(f"Policy model saved to: {args.save_path}")
-        print(f"Critic model saved to: {os.path.splitext(args.save_path)[0]}_critic.pt")
+        print("Policy models saved under the configured directory.")
+        print("Best policy: policy_best.pt")
+        print("Best critic: critic_best.pt")
 
     if args.wandb:
         wandb.finish()

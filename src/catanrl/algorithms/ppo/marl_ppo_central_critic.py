@@ -334,8 +334,7 @@ def train(
     batch_size: int = 256,
     policy_hidden_dims: Sequence[int] = (512, 512),
     critic_hidden_dims: Sequence[int] = (512, 512),
-    save_path: str = "weights/policy_value_marl_central.pt",
-    save_freq: int = 50,
+    save_path: Optional[str] = "weights/marl_central_critic",
     load_policy_weights: Optional[str] = None,
     load_critic_weights: Optional[str] = None,
     wandb_config: Optional[Dict] = None,
@@ -375,14 +374,15 @@ def train(
     else:
         print("Evaluation: every PPO update (when buffer is full)")
 
-    if wandb_config:
-        wandb.init(**wandb_config)
-        print(
-            f"Initialized wandb: {wandb_config['project']}/"
-            f"{wandb_config.get('name', wandb.run.name)}"
-        )
-    else:
-        wandb.init(mode="disabled")
+    if wandb.run is None:
+        if wandb_config:
+            wandb.init(**wandb_config)
+        else:
+            wandb.init(mode="disabled")
+
+    default_save_dir = "weights/marl_central_critic"
+    if save_path == default_save_dir and wandb.run is not None and getattr(wandb.run, "name", None):
+        save_path = os.path.join("weights", wandb.run.name)
 
     policy_backbone_config = BackboneConfig(
         architecture="mlp",
@@ -455,7 +455,7 @@ def train(
         return actor_batch, critic_batch, action_masks
 
     metric_window = max(1, metric_window)
-    best_avg_return = -float("inf")
+    best_eval_win_rate = -float("inf")
     global_step = 0
     total_episodes = 0
     ppo_update_count = 0
@@ -519,28 +519,6 @@ def train(
                             },
                             step=global_step,
                         )
-                        if len(reward_window) >= metric_window and avg_reward > best_avg_return:
-                            best_avg_return = avg_reward
-                            if save_path:
-                                policy_path = save_path
-                                critic_path = f"{os.path.splitext(save_path)[0]}_critic.pt"
-                                torch.save(policy_model.state_dict(), policy_path)
-                                torch.save(critic_model.state_dict(), critic_path)
-                                if wandb.run is not None:
-                                    wandb.run.summary["best_avg_reward"] = best_avg_return
-                                print(f"  → Saved best models (avg reward: {best_avg_return:.2f})")
-                        if save_path and save_freq > 0 and total_episodes % save_freq == 0:
-                            base_dir = os.path.dirname(save_path)
-                            policy_ckpt = (
-                                os.path.join(base_dir, f"checkpoint_ep{total_episodes}.pt")
-                                if base_dir
-                                else f"checkpoint_ep{total_episodes}.pt"
-                            )
-                            critic_ckpt = f"{os.path.splitext(policy_ckpt)[0]}_critic.pt"
-                            torch.save(policy_model.state_dict(), policy_ckpt)
-                            torch.save(critic_model.state_dict(), critic_ckpt)
-                            print(f"  → Saved checkpoint: {policy_ckpt}")
-
                         episode_rewards[env_idx] = 0.0
                         episode_lengths[env_idx] = 0
 
@@ -548,19 +526,6 @@ def train(
 
                 if len(buffer) >= max(batch_size * 2, rollout_steps):
                     _, bootstrap_critic_batch, _ = decode_observations(observations)
-                    # Evaluate policy against catanatron bots
-                    policy_agent.model.eval()
-                    with torch.no_grad():
-                        evaluate_against_baselines(
-                            policy_model=policy_model,
-                            model_type=model_type,
-                            map_type=map_type,
-                            num_games=eval_games_per_opponent,
-                            seed=seed if seed is not None else 42,
-                            log_to_wandb=True,
-                            global_step=global_step,
-                        )
-
                     policy_agent.model.train()
                     metrics = ppo_update(
                         policy_agent=policy_agent,
@@ -593,14 +558,55 @@ def train(
                         },
                         step=global_step,
                     )
-                    print(
-                        f"\n  → PPO Update | "
-                        f"Policy Loss: {metrics['policy_loss']:.4f} | "
-                        f"Value Loss: {metrics['value_loss']:.4f} | "
-                        f"Entropy: {-metrics['entropy_loss']:.4f}"
-                    )
+
+                    if save_path:
+                        save_dir = save_path
+                        os.makedirs(save_dir, exist_ok=True)
+                        snapshot_name = f"policy_update_{ppo_update_count + 1}.pt"
+                        policy_path = os.path.join(save_dir, snapshot_name)
+                        critic_path = os.path.join(
+                            save_dir,
+                            f"{os.path.splitext(snapshot_name)[0]}_critic.pt",
+                        )
+                        torch.save(policy_model.state_dict(), policy_path)
+                        torch.save(critic_model.state_dict(), critic_path)
+
+                    # Evaluate policy against catanatron bots
+                    policy_agent.model.eval()
+                    with torch.no_grad():
+                        eval_metrics = evaluate_against_baselines(
+                            policy_model=policy_model,
+                            model_type=model_type,
+                            map_type=map_type,
+                            num_games=eval_games_per_opponent,
+                            seed=seed if seed is not None else 42,
+                            log_to_wandb=True,
+                            global_step=global_step,
+                        )
+                    if save_path:
+                        eval_win_rate = float(eval_metrics.get("eval/win_rate_vs_value", 0.0))
+                        if eval_win_rate > best_eval_win_rate:
+                            best_eval_win_rate = eval_win_rate
+                            save_dir = save_path
+                            os.makedirs(save_dir, exist_ok=True)
+                            best_policy_path = os.path.join(save_dir, "policy_best.pt")
+                            best_critic_path = os.path.join(save_dir, "critic_best.pt")
+                            torch.save(policy_model.state_dict(), best_policy_path)
+                            torch.save(critic_model.state_dict(), best_critic_path)
+                            if wandb.run is not None:
+                                wandb.run.summary["best_eval_win_rate_vs_value"] = (
+                                    best_eval_win_rate
+                                )
+                            print(
+                                "  → Saved best models "
+                                f"(eval win rate vs value: {best_eval_win_rate:.3f})"
+                            )
+
     finally:
         envs.close()
 
-    print(f"\nTraining complete. Best avg reward: {best_avg_return:.2f}")
+    if best_eval_win_rate > -float("inf"):
+        print("\nTraining complete. Best eval win rate vs value: " f"{best_eval_win_rate:.3f}")
+    else:
+        print("\nTraining complete. Best eval win rate vs value: n/a")
     return policy_model, critic_model
