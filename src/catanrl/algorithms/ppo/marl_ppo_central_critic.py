@@ -1,11 +1,3 @@
-"""
-Centralized-critic PPO trainer for the multi-agent PettingZoo environment.
-
-Each agent acts on its own (partial) observation while a separate critic
-network consumes the perfect-information feature vector returned by
-`full_game_to_features`
-"""
-
 from __future__ import annotations
 
 import os
