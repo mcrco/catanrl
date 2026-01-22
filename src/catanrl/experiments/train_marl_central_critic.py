@@ -119,6 +119,7 @@ def main():
         "model_type": args.model_type,
         "max_grad_norm": args.max_grad_norm,
         "deterministic_policy": args.deterministic_policy,
+        "seed": args.seed,
     }
     if args.wandb:
         wandb_config = {

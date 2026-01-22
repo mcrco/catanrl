@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import os
+import sys
 import random
 from collections import deque
-from typing import Dict, Optional, Sequence, Tuple
+from typing import Dict, Optional, Sequence, Tuple, Literal
 
 import numpy as np
 import torch
@@ -319,7 +320,7 @@ def ppo_update(
 
 def train(
     num_players: int = 2,
-    map_type: str = "BASE",
+    map_type: Literal["BASE", "TOURNAMENT", "MINI"] = "BASE",
     model_type: str = "flat",
     episodes: int = 500,
     rollout_steps: int = 4096,
@@ -344,7 +345,7 @@ def train(
     eval_games_per_opponent: int = 250,
     eval_freq: Optional[int] = None,
     num_envs: int = 2,
-    reward_function: str = "shaped",
+    reward_function: Literal["shaped", "win"] = "shaped",
     metric_window: int = 200,
 ) -> Tuple[PolicyNetworkWrapper, ValueNetworkWrapper]:
     """Train a shared policy with a centralized critic using PPO."""
@@ -579,7 +580,7 @@ def train(
                             model_type=model_type,
                             map_type=map_type,
                             num_games=eval_games_per_opponent,
-                            seed=seed if seed is not None else 42,
+                            seed=random.randint(0, sys.maxsize), # different random games each time
                             log_to_wandb=True,
                             global_step=global_step,
                         )

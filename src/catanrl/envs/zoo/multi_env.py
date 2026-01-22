@@ -12,7 +12,7 @@ This ensures:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple, Union, TypedDict, Callable
+from typing import Dict, Optional, Tuple, Union, TypedDict, Callable, Literal
 import pufferlib
 import pufferlib.vector as puffer_vector
 import numpy as np
@@ -27,7 +27,6 @@ from catanrl.features.catanatron_utils import (
     compute_feature_vector_dim,
     get_numeric_feature_names,
 )
-from catanrl.envs.zoo.rewards import ShapedReward, WinReward
 
 BOARD_WIDTH = 21
 BOARD_HEIGHT = 11
@@ -54,15 +53,15 @@ class SharedCriticObservation(ActorObservation):
 @dataclass
 class MultiAgentCatanatronEnvConfig:
     num_players: int = 2
-    map_type: str = "BASE"
+    map_type: Literal["BASE", "TOURNAMENT", "MINI"] = "BASE"
     vps_to_win: int = 10
     shared_critic: bool = False
-    reward_function: str = "shaped"
+    reward_function: Literal["shaped", "win"] = "shaped"
 
 
 def compute_multiagent_input_dim(
     num_players: int,
-    map_type: str,
+    map_type: Literal["BASE", "TOURNAMENT", "MINI"],
 ) -> Tuple[int, Optional[Tuple[int, int, int]], Optional[int]]:
     numeric_dim = len(get_numeric_feature_names(num_players, map_type))
     vector_dim = compute_feature_vector_dim(num_players, map_type)
@@ -96,18 +95,14 @@ def get_valid_actions(
 
 def _make_aec_env(
     num_players: int,
-    map_type: str,
+    map_type: Literal["BASE", "TOURNAMENT", "MINI"],
     shared_critic: bool,
-    reward_function: str,
+    reward_function: Literal["shaped", "win"],
 ) -> Callable[[], AECEnv]:
     """Factory for individual multi-agent Catanatron environments."""
     from catanrl.envs.zoo.aec_env import AecCatanatronEnv
 
-    if reward_function == "shaped":
-        reward_fn = ShapedReward(env=None)
-    elif reward_function == "win":
-        reward_fn = WinReward()
-    else:
+    if reward_function not in ("shaped", "win"):
         raise ValueError(f"Unknown reward function: {reward_function}")
 
     def _init():
@@ -116,7 +111,7 @@ def _make_aec_env(
                 num_players=num_players,
                 map_type=map_type,
                 shared_critic=shared_critic,
-                reward_function=reward_fn,
+                reward_function=reward_function,
             )
         )
 
@@ -125,9 +120,9 @@ def _make_aec_env(
 
 def _make_parallel_env(
     num_players: int,
-    map_type: str,
+    map_type: Literal["BASE", "TOURNAMENT", "MINI"],
     shared_critic: bool,
-    reward_function: str,
+    reward_function: Literal["shaped", "win"],
 ) -> Callable[[], pufferlib.emulation.PettingzooPufferEnv]:
     from catanrl.envs.zoo.parallel_env import ParallelCatanatronEnv
 
@@ -145,7 +140,11 @@ def _make_parallel_env(
 
 
 def make_vectorized_envs(
-    num_players: int, map_type: str, shared_critic: bool, reward_function: str, num_envs: int
+    num_players: int,
+    map_type: Literal["BASE", "TOURNAMENT", "MINI"],
+    shared_critic: bool,
+    reward_function: Literal["shaped", "win"],
+    num_envs: int,
 ):
     """
     Create a vectorized set of gym environments for SARL training.

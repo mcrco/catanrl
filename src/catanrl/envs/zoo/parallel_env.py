@@ -33,8 +33,6 @@ from catanrl.envs.zoo.multi_env import (
     COLOR_ORDER,
     BOARD_WIDTH,
     BOARD_HEIGHT,
-    ActorObservation,
-    SharedCriticObservation,
     LocalObservation,
 )
 
@@ -173,7 +171,7 @@ class ParallelCatanatronEnv(ParallelEnv):
 
         return observations, rewards, terminations, truncations, infos
 
-    def _get_observation(self, agent: str) -> Union[ActorObservation, SharedCriticObservation]:
+    def _get_observation(self, agent: str) -> Dict[str, np.ndarray]:
         color = self.agent_name_to_color[agent]
         return {
             "observation": self._actor_observation(color),
@@ -205,7 +203,7 @@ class ParallelCatanatronEnv(ParallelEnv):
         else:
             mask[END_TURN_IDX] = 1
 
-        return mask
+        return np.asarray(mask, dtype=np.int8)
 
     def _get_info(self, agent: str) -> Dict:
         valid_actions = np.where(self._action_mask(agent) == 1)[0]
