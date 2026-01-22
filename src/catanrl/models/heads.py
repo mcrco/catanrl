@@ -5,9 +5,14 @@ from typing import Tuple
 from catanatron.gym.envs.catanatron_env import ACTIONS_ARRAY
 from catanatron.models.enums import ActionType
 
+from .utils import orthogonal_init
+
 
 class ValueHead(nn.Module):
     """Value head for value network."""
+
+    # Smaller gain for value output layer (common PPO practice)
+    VALUE_OUTPUT_GAIN = 1.0
 
     def __init__(self, input_dim: int, output_sigmoid: bool = False):
         super().__init__()
@@ -15,6 +20,15 @@ class ValueHead(nn.Module):
             self.value_head = nn.Sequential(nn.Linear(input_dim, 1), nn.Sigmoid())
         else:
             self.value_head = nn.Linear(input_dim, 1)
+        # For PPO
+        self._init_weights()
+
+    def _init_weights(self) -> None:
+        if isinstance(self.value_head, nn.Sequential):
+            # Only init the Linear layer (first element)
+            orthogonal_init(self.value_head[0], gain=self.VALUE_OUTPUT_GAIN)
+        else:
+            orthogonal_init(self.value_head, gain=self.VALUE_OUTPUT_GAIN)
 
     def forward(self, x):
         return self.value_head(x).squeeze(-1)
@@ -23,9 +37,17 @@ class ValueHead(nn.Module):
 class FlatPolicyHead(nn.Module):
     """Simple linear head for policy network that outputs flat action logits."""
 
+    # Small gain for policy output layer to start with near-uniform action probs
+    POLICY_OUTPUT_GAIN = 0.01
+
     def __init__(self, input_dim: int, num_actions: int):
         super().__init__()
         self.policy_head = nn.Linear(input_dim, num_actions)
+        # For PPO
+        self._init_weights()
+
+    def _init_weights(self) -> None:
+        orthogonal_init(self.policy_head, gain=self.POLICY_OUTPUT_GAIN)
 
     def forward(self, x):
         return self.policy_head(x)
@@ -69,6 +91,9 @@ class HierarchicalPolicyHead(nn.Module):
     NUM_ACTION_TYPES = 13
     NUM_RESOURCES = 5
 
+    # Small gain for policy output layers to start with near-uniform action probs
+    POLICY_OUTPUT_GAIN = 0.01
+
     def __init__(self, input_dim: int):
         super().__init__()
 
@@ -91,6 +116,14 @@ class HierarchicalPolicyHead(nn.Module):
 
         # Build action space mappings
         self._build_action_mappings()
+
+        # For PPO
+        self._init_weights()
+
+    def _init_weights(self) -> None:
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                orthogonal_init(module, gain=self.POLICY_OUTPUT_GAIN)
 
     def _analyze_action_space(self):
         # Count unique parameter values for each action type

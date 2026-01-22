@@ -3,6 +3,8 @@ import torch.nn as nn
 from dataclasses import dataclass
 from typing import List, Union, Tuple
 
+from .utils import orthogonal_init
+
 
 @dataclass
 class MLPBackboneConfig:
@@ -27,6 +29,12 @@ class MLPBackbone(nn.Module):
             layers.append(nn.ReLU())
             in_dim = hidden_dim
         self.layers = nn.Sequential(*layers)
+        self._init_weights()
+
+    def _init_weights(self) -> None:
+        # For PPO
+        for module in self.modules():
+            orthogonal_init(module)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.layers(x)

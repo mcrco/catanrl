@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import numpy as np
 
 
 def compute_hierarchical_loss(
@@ -79,3 +80,12 @@ def compute_hierarchical_loss(
     )
 
     return total_loss, action_type_loss, param_loss, value_loss
+
+
+# PPO style orthogonal initialization
+def orthogonal_init(module: nn.Module, gain: float = np.sqrt(2)) -> None:
+    if isinstance(module, nn.Linear):
+        nn.init.orthogonal_(module.weight, gain=gain)
+        if module.bias is not None:
+            nn.init.constant_(module.bias, 0.0)
+
