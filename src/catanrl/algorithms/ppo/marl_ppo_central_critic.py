@@ -13,7 +13,7 @@ import torch.optim as optim
 import wandb
 from tqdm import tqdm
 
-from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE
+from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE, ACTIONS_ARRAY, ACTION_TYPES
 from pufferlib.emulation import nativize
 
 from ...envs import compute_multiagent_input_dim, flatten_marl_observation
@@ -32,6 +32,54 @@ from ...models.models import (
 from ...models.wrappers import PolicyNetworkWrapper, ValueNetworkWrapper
 from .gae import compute_gae_batched
 from .buffers import CentralCriticExperienceBuffer
+
+
+def _build_action_type_mapping() -> Tuple[Dict[str, list], np.ndarray]:
+    """Build a mapping from action types to action indices and vice versa.
+
+    Returns:
+        action_type_to_indices: Dict mapping action type name to list of action indices
+        action_to_type_idx: Array mapping action index to action type index
+    """
+    action_type_to_indices: Dict[str, list] = {at.name: [] for at in ACTION_TYPES}
+    action_to_type_idx = np.zeros(ACTION_SPACE_SIZE, dtype=np.int32)
+
+    for action_idx, (action_type, _) in enumerate(ACTIONS_ARRAY):
+        action_type_to_indices[action_type.name].append(action_idx)
+        action_to_type_idx[action_idx] = ACTION_TYPES.index(action_type)
+
+    return action_type_to_indices, action_to_type_idx
+
+
+# Pre-compute action type mapping at module load time
+ACTION_TYPE_TO_INDICES, ACTION_TO_TYPE_IDX = _build_action_type_mapping()
+ACTION_TYPE_NAMES = [at.name for at in ACTION_TYPES]
+
+
+def compute_action_distributions(
+    actions: np.ndarray,
+) -> Tuple[Dict[str, float], Dict[str, float]]:
+    """Compute action type and action distributions from taken actions. Used for logging agent decisions over time."""
+    n_actions = len(actions)
+    if n_actions == 0:
+        return {}, {}
+
+    # Compute action type distribution
+    action_types_taken = ACTION_TO_TYPE_IDX[actions]
+    type_counts = np.bincount(action_types_taken, minlength=len(ACTION_TYPES))
+    action_type_dist = {
+        name: float(count / n_actions) for name, count in zip(ACTION_TYPE_NAMES, type_counts)
+    }
+
+    # Compute raw action distribution
+    action_counts = np.bincount(actions, minlength=ACTION_SPACE_SIZE)
+    action_dist = {
+        f"action_{idx}": float(count / n_actions)
+        for idx, count in enumerate(action_counts)
+        if count > 0
+    }
+
+    return action_type_dist, action_dist
 
 
 class PolicyAgent:
@@ -111,11 +159,15 @@ class PolicyAgent:
         states: torch.Tensor,
         valid_action_masks: np.ndarray,
         deterministic: bool = False,
-    ) -> Tuple[np.ndarray, np.ndarray]:
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Vectorized action selection for multiple parallel environments."""
         self.model.eval()
         with torch.no_grad():
             policy_logits = self._policy_logits(states)
+
+            # Track raw policy preference for logging purposes.
+            raw_argmax_tensor = torch.argmax(policy_logits, dim=-1)
+
             masked_logits, _ = self._mask_logits(policy_logits, valid_action_masks)
             probs = torch.softmax(masked_logits, dim=-1)
             log_probs_all = torch.log_softmax(masked_logits, dim=-1)
@@ -130,8 +182,9 @@ class PolicyAgent:
 
             actions = action_tensor.detach().cpu().numpy().astype(np.int64)
             log_probs = log_prob_tensor.detach().cpu().numpy().astype(np.float32)
+            raw_argmax = raw_argmax_tensor.detach().cpu().numpy().astype(np.int64)
 
-        return actions, log_probs
+        return actions, log_probs, raw_argmax
 
     def evaluate_actions(
         self,
@@ -510,6 +563,9 @@ def train(
     reward_window = deque(maxlen=metric_window)
     length_window = deque(maxlen=metric_window)
 
+    # Track raw policy preferences (argmax before masking) for diagnostics
+    raw_policy_argmax_buffer: list[np.ndarray] = []
+
     observations, infos = envs.reset()
 
     try:
@@ -517,9 +573,10 @@ def train(
             while total_episodes < episodes:
                 actor_batch, critic_batch, valid_masks = decode_observations(observations)
                 actor_tensor = torch.from_numpy(actor_batch).float().to(device)
-                actions, log_probs = policy_agent.select_actions_batch(
+                actions, log_probs, raw_argmax = policy_agent.select_actions_batch(
                     actor_tensor, valid_masks, deterministic=deterministic_policy
                 )
+                raw_policy_argmax_buffer.append(raw_argmax)
 
                 critic_inputs = torch.from_numpy(critic_batch).float().to(device)
                 critic_model.eval()
@@ -571,6 +628,17 @@ def train(
                 observations = next_observations
 
                 if len(buffer) >= max(batch_size * 2, rollout_steps):
+                    # Log raw policy preference distribution (argmax before masking)
+                    # This reveals what the network inherently prefers, regardless of action validity
+                    all_raw_argmax = np.concatenate(raw_policy_argmax_buffer)
+                    raw_action_type_dist, _ = compute_action_distributions(all_raw_argmax)
+                    raw_policy_log = {
+                        f"raw_policy/type_{name}": freq
+                        for name, freq in raw_action_type_dist.items()
+                    }
+                    wandb.log(raw_policy_log, step=global_step)
+                    raw_policy_argmax_buffer.clear()
+
                     _, bootstrap_critic_batch, _ = decode_observations(observations)
                     policy_agent.model.train()
                     metrics = ppo_update(
