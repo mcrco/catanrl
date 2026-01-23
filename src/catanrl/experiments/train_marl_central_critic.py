@@ -54,15 +54,9 @@ def main():
     )
     parser.add_argument("--save-path", type=str, default="weights/marl_central_critic")
     parser.add_argument(
-        "--eval-freq",
-        type=int,
-        default=None,
-        help="How often (in episodes) to run evaluation vs baselines. Defaults to --save-freq.",
-    )
-    parser.add_argument(
         "--eval-games",
         type=int,
-        default=50,
+        default=1000,
         help="Number of evaluation games per opponent (RandomPlayer and ValueFunctionPlayer).",
     )
     parser.add_argument(
@@ -164,7 +158,6 @@ def main():
         seed=args.seed,
         max_grad_norm=args.max_grad_norm,
         deterministic_policy=args.deterministic_policy,
-        eval_freq=args.eval_freq,
         eval_games_per_opponent=args.eval_games,
         num_envs=args.num_envs,
         reward_function=args.reward_function,

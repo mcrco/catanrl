@@ -397,7 +397,6 @@ def train(
     max_grad_norm: float = 0.5,
     deterministic_policy: bool = False,
     eval_games_per_opponent: int = 250,
-    eval_freq: Optional[int] = None,
     num_envs: int = 2,
     reward_function: Literal["shaped", "win"] = "shaped",
     metric_window: int = 200,
@@ -428,10 +427,6 @@ def train(
         print(f"Board shape (C, W, H): {board_shape} | Numeric dim: {numeric_dim}")
     print(f"Episodes: {episodes} | Rollout steps: {rollout_steps}")
     print(f"Parallel environments: {num_envs}")
-    if eval_freq:
-        print(f"Evaluation frequency: every {eval_freq} PPO updates")
-    else:
-        print("Evaluation: every PPO update (when buffer is full)")
 
     if wandb.run is None:
         if wandb_config:
