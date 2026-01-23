@@ -43,6 +43,7 @@ def main():
     parser.add_argument("--clip-epsilon", type=float, default=0.2)
     parser.add_argument("--value-coef", type=float, default=0.5)
     parser.add_argument("--entropy-coef", type=float, default=0.01)
+    parser.add_argument("--activity-coef", type=float, default=0.0)
     parser.add_argument("--ppo-epochs", type=int, default=4)
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument(
@@ -116,6 +117,7 @@ def main():
         "clip_epsilon": args.clip_epsilon,
         "value_coef": args.value_coef,
         "entropy_coef": args.entropy_coef,
+        "activity_coef": args.activity_coef,
         "ppo_epochs": args.ppo_epochs,
         "batch_size": args.batch_size,
         "policy_hidden_dims": policy_hidden_dims,
@@ -152,6 +154,7 @@ def main():
         clip_epsilon=args.clip_epsilon,
         value_coef=args.value_coef,
         entropy_coef=args.entropy_coef,
+        activity_coef=args.activity_coef,
         ppo_epochs=args.ppo_epochs,
         batch_size=args.batch_size,
         policy_hidden_dims=policy_hidden_dims,

@@ -191,8 +191,14 @@ class PolicyAgent:
         states: torch.Tensor,
         actions: torch.Tensor,
         valid_action_masks: np.ndarray,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Evaluate log-probs and entropy for PPO updates."""
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Evaluate log-probs, entropy, and raw policy logits for PPO updates.
+
+        Returns:
+            log_probs: Log probabilities of the taken actions
+            entropy: Entropy of the masked action distribution
+            policy_logits: Raw (unmasked) policy logits for activity regularization
+        """
         policy_logits = self._policy_logits(states)
         masked_logits, _ = self._mask_logits(policy_logits, valid_action_masks)
         log_probs_all = torch.log_softmax(masked_logits, dim=-1)
@@ -200,7 +206,7 @@ class PolicyAgent:
 
         log_probs = log_probs_all.gather(1, actions.unsqueeze(1)).squeeze(1)
         entropy = -(probs * log_probs_all).sum(dim=-1)
-        return log_probs, entropy
+        return log_probs, entropy, policy_logits
 
 
 def set_global_seeds(seed: Optional[int]):
@@ -222,6 +228,7 @@ def ppo_update(
     clip_epsilon: float,
     value_coef: float,
     entropy_coef: float,
+    activity_coef: float,
     n_epochs: int,
     batch_size: int,
     device: str,
@@ -232,7 +239,13 @@ def ppo_update(
 ) -> Dict[str, float]:
     """Run PPO updates over the centralized buffer."""
     if len(buffer) == 0:
-        return {"policy_loss": 0.0, "value_loss": 0.0, "entropy_loss": 0.0, "total_loss": 0.0}
+        return {
+            "policy_loss": 0.0,
+            "value_loss": 0.0,
+            "entropy_loss": 0.0,
+            "activity_loss": 0.0,
+            "total_loss": 0.0,
+        }
 
     (
         actor_states_tmj,
@@ -281,7 +294,13 @@ def ppo_update(
     valid_action_masks = valid_action_masks[multi_action_mask]
 
     if len(advantages) == 0:
-        return {"policy_loss": 0.0, "value_loss": 0.0, "entropy_loss": 0.0, "total_loss": 0.0}
+        return {
+            "policy_loss": 0.0,
+            "value_loss": 0.0,
+            "entropy_loss": 0.0,
+            "activity_loss": 0.0,
+            "total_loss": 0.0,
+        }
 
     if advantages.std() > 1e-8:
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
@@ -298,6 +317,7 @@ def ppo_update(
     total_policy_loss = 0.0
     total_value_loss = 0.0
     total_entropy_loss = 0.0
+    total_activity_loss = 0.0
     total_loss = 0.0
     n_updates = 0
 
@@ -318,7 +338,7 @@ def ppo_update(
             batch_returns = returns_t[batch_idx].to(device)
             batch_valid_masks = valid_action_masks[batch_idx]
 
-            log_probs, entropy = policy_agent.evaluate_actions(
+            log_probs, entropy, policy_logits = policy_agent.evaluate_actions(
                 batch_actor_states, batch_actions, batch_valid_masks
             )
             ratio = torch.exp(log_probs - batch_old_log_probs)
@@ -327,8 +347,12 @@ def ppo_update(
             policy_loss = -torch.min(surr1, surr2).mean()
             entropy_loss = -entropy.mean()
 
+            # Activity loss: L2 penalty on policy logits to prevent extreme values
+            # This keeps all actions "alive" by preventing logits from going to -inf
+            activity_loss = (policy_logits**2).mean()
+
             policy_optimizer.zero_grad()
-            (policy_loss + entropy_coef * entropy_loss).backward()
+            (policy_loss + entropy_coef * entropy_loss + activity_coef * activity_loss).backward()
             torch.nn.utils.clip_grad_norm_(policy_agent.model.parameters(), max_grad_norm)
             if any(
                 param.grad is not None and torch.isnan(param.grad).any()
@@ -356,20 +380,29 @@ def ppo_update(
             total_policy_loss += float(policy_loss.item())
             total_value_loss += float(value_loss.item())
             total_entropy_loss += float(entropy_loss.item())
+            total_activity_loss += float(activity_loss.item())
             total_loss += float(
                 policy_loss.item()
                 + entropy_coef * entropy_loss.item()
+                + activity_coef * activity_loss.item()
                 + value_coef * value_loss.item()
             )
             n_updates += 1
 
     if n_updates == 0:
-        return {"policy_loss": 0.0, "value_loss": 0.0, "entropy_loss": 0.0, "total_loss": 0.0}
+        return {
+            "policy_loss": 0.0,
+            "value_loss": 0.0,
+            "entropy_loss": 0.0,
+            "activity_loss": 0.0,
+            "total_loss": 0.0,
+        }
 
     return {
         "policy_loss": total_policy_loss / n_updates,
         "value_loss": total_value_loss / n_updates,
         "entropy_loss": total_entropy_loss / n_updates,
+        "activity_loss": total_activity_loss / n_updates,
         "total_loss": total_loss / n_updates,
     }
 
@@ -388,6 +421,7 @@ def train(
     clip_epsilon: float = 0.2,
     value_coef: float = 0.5,
     entropy_coef: float = 0.01,
+    activity_coef: float = 0.0,
     ppo_epochs: int = 4,
     batch_size: int = 256,
     policy_hidden_dims: Sequence[int] = (512, 512),
@@ -638,6 +672,7 @@ def train(
                         clip_epsilon=clip_epsilon,
                         value_coef=value_coef,
                         entropy_coef=entropy_coef,
+                        activity_coef=activity_coef,
                         n_epochs=ppo_epochs,
                         batch_size=batch_size,
                         device=device,
@@ -656,6 +691,7 @@ def train(
                             "train/policy_loss": metrics["policy_loss"],
                             "train/value_loss": metrics["value_loss"],
                             "train/entropy": -metrics["entropy_loss"],
+                            "train/activity_loss": metrics["activity_loss"],
                             "train/total_loss": metrics["total_loss"],
                         },
                         step=global_step,
