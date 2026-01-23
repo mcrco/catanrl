@@ -286,12 +286,14 @@ def ppo_update(
     if advantages.std() > 1e-8:
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
-    actor_states_t = torch.from_numpy(actor_states).float().to(device)
-    critic_states_t = torch.from_numpy(critic_states).float().to(device)
-    actions_t = torch.from_numpy(actions).long().to(device)
-    old_log_probs_t = torch.from_numpy(old_log_probs).float().to(device)
-    advantages_t = torch.from_numpy(advantages).float().to(device)
-    returns_t = torch.from_numpy(returns).float().to(device)
+    # Keep data on CPU, only move mini-batches to GPU during training
+    # This allows scaling to large rollout buffers without GPU OOM
+    actor_states_t = torch.from_numpy(actor_states).float()
+    critic_states_t = torch.from_numpy(critic_states).float()
+    actions_t = torch.from_numpy(actions).long()
+    old_log_probs_t = torch.from_numpy(old_log_probs).float()
+    advantages_t = torch.from_numpy(advantages).float()
+    returns_t = torch.from_numpy(returns).float()
 
     total_policy_loss = 0.0
     total_value_loss = 0.0
@@ -307,12 +309,13 @@ def ppo_update(
             if len(batch_idx) < 2:
                 continue
 
-            batch_actor_states = actor_states_t[batch_idx]
-            batch_critic_states = critic_states_t[batch_idx]
-            batch_actions = actions_t[batch_idx]
-            batch_old_log_probs = old_log_probs_t[batch_idx]
-            batch_advantages = advantages_t[batch_idx]
-            batch_returns = returns_t[batch_idx]
+            # Move only this mini-batch to GPU
+            batch_actor_states = actor_states_t[batch_idx].to(device)
+            batch_critic_states = critic_states_t[batch_idx].to(device)
+            batch_actions = actions_t[batch_idx].to(device)
+            batch_old_log_probs = old_log_probs_t[batch_idx].to(device)
+            batch_advantages = advantages_t[batch_idx].to(device)
+            batch_returns = returns_t[batch_idx].to(device)
             batch_valid_masks = valid_action_masks[batch_idx]
 
             log_probs, entropy = policy_agent.evaluate_actions(
@@ -376,7 +379,7 @@ def train(
     map_type: Literal["BASE", "TOURNAMENT", "MINI"] = "BASE",
     model_type: str = "flat",
     backbone_type: str = "mlp",
-    episodes: int = 500,
+    total_timesteps: int = 1_000_000,
     rollout_steps: int = 4096,
     policy_lr: float = 3e-4,
     critic_lr: float = 3e-4,
@@ -425,7 +428,7 @@ def train(
     print(f"Actor input dim: {actor_input_dim} | Critic input dim: {critic_input_dim}")
     if backbone_type == "xdim":
         print(f"Board shape (C, W, H): {board_shape} | Numeric dim: {numeric_dim}")
-    print(f"Episodes: {episodes} | Rollout steps: {rollout_steps}")
+    print(f"Total timesteps: {total_timesteps:,} | Rollout steps: {rollout_steps}")
     print(f"Parallel environments: {num_envs}")
 
     if wandb.run is None:
@@ -553,9 +556,7 @@ def train(
     global_step = 0
     total_episodes = 0
     ppo_update_count = 0
-    episode_rewards = np.zeros(num_envs, dtype=np.float32)
     episode_lengths = np.zeros(num_envs, dtype=np.int32)
-    reward_window = deque(maxlen=metric_window)
     length_window = deque(maxlen=metric_window)
 
     # Track raw policy preferences (argmax before masking) for diagnostics
@@ -564,8 +565,8 @@ def train(
     observations, infos = envs.reset()
 
     try:
-        with tqdm(total=episodes, desc="Episodes") as pbar:
-            while total_episodes < episodes:
+        with tqdm(total=total_timesteps, desc="Steps", unit="step", unit_scale=True) as pbar:
+            while global_step < total_timesteps:
                 actor_batch, critic_batch, valid_masks = decode_observations(observations)
                 actor_tensor = torch.from_numpy(actor_batch).float().to(device)
                 actions, log_probs, raw_argmax = policy_agent.select_actions_batch(
@@ -593,31 +594,23 @@ def train(
                     valid_masks,
                     dones,
                 )
-                global_step += len(actions)
+                global_step += num_envs
+                pbar.update(num_envs)
 
                 for env_idx, start in enumerate(env_offsets):
                     end = start + agents_per_env[env_idx]
-                    episode_rewards[env_idx] += rewards[start]
                     episode_lengths[env_idx] += 1
                     if dones[start:end].all():
                         total_episodes += 1
-                        pbar.update(1)
-                        reward_window.append(episode_rewards[env_idx])
                         length_window.append(episode_lengths[env_idx])
-                        avg_reward = float(np.mean(reward_window))
                         avg_length = float(np.mean(length_window))
                         wandb.log(
                             {
-                                "episode/return": episode_rewards[env_idx],
-                                "episode/length": episode_lengths[env_idx],
-                                "episode/avg_return": avg_reward,
                                 "episode/avg_length": avg_length,
-                                "episode": total_episodes,
-                                "global_step": global_step,
+                                "episode/count": total_episodes,
                             },
                             step=global_step,
                         )
-                        episode_rewards[env_idx] = 0.0
                         episode_lengths[env_idx] = 0
 
                 observations = next_observations
@@ -715,7 +708,13 @@ def train(
         envs.close()
 
     if best_eval_win_rate > -float("inf"):
-        print("\nTraining complete. Best eval win rate vs value: " f"{best_eval_win_rate:.3f}")
+        print(
+            f"\nTraining complete. {global_step:,} steps, {total_episodes} episodes. "
+            f"Best eval win rate vs value: {best_eval_win_rate:.3f}"
+        )
     else:
-        print("\nTraining complete. Best eval win rate vs value: n/a")
+        print(
+            f"\nTraining complete. {global_step:,} steps, {total_episodes} episodes. "
+            "Best eval win rate vs value: n/a"
+        )
     return policy_model, critic_model

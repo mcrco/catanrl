@@ -25,7 +25,12 @@ def main():
         default="mlp",
         help="Backbone architecture: mlp (standard MLP) or xdim (cross-dimensional CNN+MLP from the paper)",
     )
-    parser.add_argument("--episodes", type=int, default=500)
+    parser.add_argument(
+        "--total-timesteps",
+        type=int,
+        default=1_000_000,
+        help="Total number of environment steps to train for",
+    )
     parser.add_argument("--rollout-steps", type=int, default=4096)
     parser.add_argument(
         "--policy-lr", type=float, default=3e-4, help="Learning rate for policy network"
@@ -102,7 +107,7 @@ def main():
     # Prepare wandb config (initialization happens in train)
     config_dict = {
         "algorithm": "PPO_Central_Critic",
-        "episodes": args.episodes,
+        "total_timesteps": args.total_timesteps,
         "rollout_steps": args.rollout_steps,
         "policy_lr": args.policy_lr,
         "critic_lr": args.critic_lr,
@@ -138,7 +143,7 @@ def main():
         map_type=args.map_type,
         model_type=args.model_type,
         backbone_type=args.backbone_type,
-        episodes=args.episodes,
+        total_timesteps=args.total_timesteps,
         rollout_steps=args.rollout_steps,
         policy_lr=args.policy_lr,
         critic_lr=args.critic_lr,
