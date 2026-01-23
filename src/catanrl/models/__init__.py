@@ -1,6 +1,10 @@
 """Convenience exports for model components."""
 
-from .backbones import BackboneConfig, MLPBackboneConfig
+from .backbones import (
+    BackboneConfig,
+    MLPBackboneConfig,
+    CrossDimensionalBackboneConfig,
+)
 from .models import (
     build_flat_policy_value_network,
     build_hierarchical_policy_value_network,
@@ -15,6 +19,7 @@ from .wrappers import (
 __all__ = [
     "BackboneConfig",
     "MLPBackboneConfig",
+    "CrossDimensionalBackboneConfig",
     "build_flat_policy_value_network",
     "build_hierarchical_policy_value_network",
     "PolicyNetworkWrapper",

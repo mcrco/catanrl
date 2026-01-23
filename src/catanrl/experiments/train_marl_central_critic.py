@@ -18,6 +18,13 @@ def main():
         default="flat",
         help="Model architecture type: flat or hierarchical (default: flat)",
     )
+    parser.add_argument(
+        "--backbone-type",
+        type=str,
+        choices=["mlp", "xdim"],
+        default="mlp",
+        help="Backbone architecture: mlp (standard MLP) or xdim (cross-dimensional CNN+MLP from the paper)",
+    )
     parser.add_argument("--episodes", type=int, default=500)
     parser.add_argument("--rollout-steps", type=int, default=4096)
     parser.add_argument(
@@ -117,6 +124,7 @@ def main():
         "num_players": args.num_players,
         "map_type": args.map_type,
         "model_type": args.model_type,
+        "backbone_type": args.backbone_type,
         "max_grad_norm": args.max_grad_norm,
         "deterministic_policy": args.deterministic_policy,
         "seed": args.seed,
@@ -135,6 +143,7 @@ def main():
         num_players=args.num_players,
         map_type=args.map_type,
         model_type=args.model_type,
+        backbone_type=args.backbone_type,
         episodes=args.episodes,
         rollout_steps=args.rollout_steps,
         policy_lr=args.policy_lr,

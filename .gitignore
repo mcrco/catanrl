@@ -4,6 +4,7 @@ wandb/
 JSettlers2/
 **/weights
 *.svg
+third_party/
 
 # Python-generated files
 __pycache__/

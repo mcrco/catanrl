@@ -23,7 +23,7 @@ from ...features.catanatron_utils import (
     get_numeric_feature_names,
 )
 from ...eval.training_eval import evaluate_against_baselines
-from ...models.backbones import BackboneConfig, MLPBackboneConfig
+from ...models.backbones import BackboneConfig, MLPBackboneConfig, CrossDimensionalBackboneConfig
 from ...models.models import (
     build_flat_policy_network,
     build_hierarchical_policy_network,
@@ -322,6 +322,7 @@ def train(
     num_players: int = 2,
     map_type: Literal["BASE", "TOURNAMENT", "MINI"] = "BASE",
     model_type: str = "flat",
+    backbone_type: str = "mlp",
     episodes: int = 500,
     rollout_steps: int = 4096,
     policy_lr: float = 3e-4,
@@ -352,11 +353,12 @@ def train(
 
     assert 2 <= num_players <= 4, "num_players must be between 2 and 4"
     assert num_envs >= 1, "num_envs must be >= 1"
+    assert backbone_type in ("mlp", "xdim"), f"Unknown backbone_type '{backbone_type}'"
 
     set_global_seeds(seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    actor_input_dim, _, numeric_dim = compute_multiagent_input_dim(num_players, map_type)
+    actor_input_dim, board_shape, numeric_dim = compute_multiagent_input_dim(num_players, map_type)
     numeric_dim = numeric_dim or len(get_numeric_feature_names(num_players, map_type))
     board_dim = actor_input_dim - numeric_dim
     full_numeric_len = len(get_full_numeric_feature_names(num_players, map_type))
@@ -367,7 +369,10 @@ def train(
     print(f"{'=' * 60}")
     print(f"Device: {device}")
     print(f"Map type: {map_type} | Players: {num_players}")
+    print(f"Backbone: {backbone_type} | Model type: {model_type}")
     print(f"Actor input dim: {actor_input_dim} | Critic input dim: {critic_input_dim}")
+    if backbone_type == "xdim":
+        print(f"Board shape (C, W, H): {board_shape} | Numeric dim: {numeric_dim}")
     print(f"Episodes: {episodes} | Rollout steps: {rollout_steps}")
     print(f"Parallel environments: {num_envs}")
     if eval_freq:
@@ -385,10 +390,31 @@ def train(
     if save_path == default_save_dir and wandb.run is not None and getattr(wandb.run, "name", None):
         save_path = os.path.join("weights", wandb.run.name)
 
-    policy_backbone_config = BackboneConfig(
-        architecture="mlp",
-        args=MLPBackboneConfig(input_dim=actor_input_dim, hidden_dims=list(policy_hidden_dims)),
-    )
+    # Build backbone config based on backbone_type
+    if backbone_type == "mlp":
+        policy_backbone_config = BackboneConfig(
+            architecture="mlp",
+            args=MLPBackboneConfig(input_dim=actor_input_dim, hidden_dims=list(policy_hidden_dims)),
+        )
+    else:  # xdim
+        # board_shape is (C, W, H) from catanatron, but we need (H, W, C)
+        assert board_shape is not None
+        board_channels, board_width, board_height = board_shape
+        policy_backbone_config = BackboneConfig(
+            architecture="cross_dimensional",
+            args=CrossDimensionalBackboneConfig(
+                board_height=board_height,
+                board_width=board_width,
+                board_channels=board_channels,
+                numeric_dim=numeric_dim,
+                cnn_channels=[64, 128, 128],
+                cnn_kernel_size=(3, 5),
+                numeric_hidden_dims=list(policy_hidden_dims),
+                fusion_hidden_dim=policy_hidden_dims[-1] if policy_hidden_dims else 256,
+                output_dim=policy_hidden_dims[-1] if policy_hidden_dims else 256,
+            ),
+        )
+
     if model_type == "flat":
         policy_model = build_flat_policy_network(
             backbone_config=policy_backbone_config, num_actions=ACTION_SPACE_SIZE
@@ -400,10 +426,29 @@ def train(
     else:
         raise ValueError(f"Unknown model_type '{model_type}'")
 
-    critic_backbone_config = BackboneConfig(
-        architecture="mlp",
-        args=MLPBackboneConfig(input_dim=critic_input_dim, hidden_dims=list(critic_hidden_dims)),
-    )
+    # Build critic backbone config
+    if backbone_type == "mlp":
+        critic_backbone_config = BackboneConfig(
+            architecture="mlp",
+            args=MLPBackboneConfig(input_dim=critic_input_dim, hidden_dims=list(critic_hidden_dims)),
+        )
+    else:  # xdim
+        assert board_shape is not None
+        board_channels, board_width, board_height = board_shape
+        critic_backbone_config = BackboneConfig(
+            architecture="cross_dimensional",
+            args=CrossDimensionalBackboneConfig(
+                board_height=board_height,
+                board_width=board_width,
+                board_channels=board_channels,
+                numeric_dim=full_numeric_len,  # critic uses full numeric features
+                cnn_channels=[64, 128, 128],
+                cnn_kernel_size=(3, 5),
+                numeric_hidden_dims=list(critic_hidden_dims),
+                fusion_hidden_dim=critic_hidden_dims[-1] if critic_hidden_dims else 256,
+                output_dim=critic_hidden_dims[-1] if critic_hidden_dims else 256,
+            ),
+        )
     critic_model = build_value_network(backbone_config=critic_backbone_config).to(device)
 
     if load_policy_weights and os.path.exists(load_policy_weights):
