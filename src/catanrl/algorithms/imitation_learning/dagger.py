@@ -13,12 +13,14 @@ from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 import wandb
 from pufferlib.emulation import nativize
 
 from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE
+
+from .dataset import AggregatedDataset, _discount_rewards
 
 from ...envs.gym.single_env import (
     compute_single_agent_dims,
@@ -54,15 +56,6 @@ def _observation_to_state_vector(observation: Dict[str, np.ndarray]) -> np.ndarr
     board_flat = board_ch_last.reshape(-1)
     return np.concatenate([numeric, board_flat], axis=0)
 
-
-def _discount_rewards(rewards: List[float], gamma: float) -> List[float]:
-    """Return discounted returns for one episode."""
-    discounted: List[float] = [0.0] * len(rewards)
-    running = 0.0
-    for idx in reversed(range(len(rewards))):
-        running = rewards[idx] + gamma * running
-        discounted[idx] = running
-    return discounted
 
 
 def _extract_valid_actions(info: Dict[str, Any] | None) -> np.ndarray:
@@ -178,104 +171,6 @@ def _select_policy_actions_batch(
         policy_model.train()
 
     return actions, log_probs
-
-
-class AggregatedDataset(Dataset):
-    """In-memory dataset for aggregated DAgger trajectories with separate actor/critic states."""
-
-    def __init__(
-        self,
-        actor_dim: int,
-        critic_dim: int,
-        max_size: int = 100_000_000,
-    ):
-        self.actor_dim = actor_dim
-        self.critic_dim = critic_dim
-        # Handle case where None is passed explicitly
-        if max_size is None:
-            max_size = 100_000_000
-        self.max_size = max_size
-        self.capacity = max_size
-
-        # Preallocate full capacity.
-        # NOTE: With max_size=100M, this will attempt to allocate ~1.5TB+ of RAM depending on dims.
-        self.actor_states = np.zeros((self.max_size, actor_dim), dtype=np.float32)
-        self.critic_states = np.zeros((self.max_size, critic_dim), dtype=np.float32)
-        self.actions = np.zeros((self.max_size,), dtype=np.int64)
-        self.returns = np.zeros((self.max_size,), dtype=np.float32)
-        self.is_single_action = np.zeros((self.max_size,), dtype=np.bool_)
-
-        self.pos = 0
-        self.size = 0
-
-    def __len__(self) -> int:
-        return self.size
-
-    def __getitem__(
-        self, idx: int
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        if idx >= self.size:
-            raise IndexError(f"Index {idx} out of bounds for size {self.size}")
-
-        return (
-            torch.from_numpy(self.actor_states[idx]),
-            torch.from_numpy(self.critic_states[idx]),
-            torch.tensor(self.actions[idx], dtype=torch.long),
-            torch.tensor(self.returns[idx], dtype=torch.float32),
-            torch.tensor(self.is_single_action[idx], dtype=torch.bool),
-        )
-
-    def add_episode(
-        self,
-        actor_states: np.ndarray | List[np.ndarray],
-        critic_states: np.ndarray | List[np.ndarray],
-        expert_actions: np.ndarray | List[int],
-        rewards: List[float],
-        gamma: float,
-        is_single_action: np.ndarray | List[bool],
-    ) -> None:
-        """Add a full episode to the dataset."""
-        # Convert rewards to returns
-        returns_list = _discount_rewards(rewards, gamma)
-        returns = np.array(returns_list, dtype=np.float32)
-
-        # Ensure inputs are arrays
-        actor_states = np.asarray(actor_states, dtype=np.float32)
-        critic_states = np.asarray(critic_states, dtype=np.float32)
-        expert_actions = np.asarray(expert_actions, dtype=np.int64)
-        is_single_action = np.asarray(is_single_action, dtype=np.bool_)
-
-        num_samples = len(actor_states)
-        if num_samples == 0:
-            return
-
-        # Ring buffer logic: write data, wrapping around if necessary
-        remaining = num_samples
-        src_idx = 0
-        while remaining > 0:
-            space = self.capacity - self.pos
-            to_write = min(remaining, space)
-
-            start = self.pos
-            end = start + to_write
-
-            self.actor_states[start:end] = actor_states[src_idx : src_idx + to_write]
-            self.critic_states[start:end] = critic_states[src_idx : src_idx + to_write]
-            self.actions[start:end] = expert_actions[src_idx : src_idx + to_write]
-            self.returns[start:end] = returns[src_idx : src_idx + to_write]
-            self.is_single_action[start:end] = is_single_action[
-                src_idx : src_idx + to_write
-            ]
-
-            self.pos = (self.pos + to_write) % self.capacity
-            # size grows up to capacity
-            self.size = min(self.size + to_write, self.capacity)
-
-            remaining -= to_write
-            src_idx += to_write
-
-    def _add_sample(self, *args):
-        raise NotImplementedError("Use add_episode with batched data instead.")
 
 
 @dataclass
