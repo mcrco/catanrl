@@ -1,44 +1,37 @@
-#!/usr/bin/env python3
 """
-Dataset Aggregation (DAgger) imitation-learning trainer for the Catan RL agent.
-
-This module follows the same conventions as the PPO and supervised trainers:
-  * Builds Policy/Value networks from shared backbone configs
-  * Exposes a single `train(...)` entrypoint consumed by experiment scripts
-  * Supports both flat and hierarchical policy heads
+Dataset Aggregation (DAgger) imitation-learning trainer.
 """
 
 from __future__ import annotations
 
 import os
 import random
+import sys
 from dataclasses import dataclass
-from typing import Any, Dict, List, Sequence, Tuple
+from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple
 
-import gymnasium as gym
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
+from tqdm import tqdm
 import wandb
+from pufferlib.emulation import nativize
 
-from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE, to_action_space
-from catanatron.models.player import Color, Player, RandomPlayer
-from catanatron.players.mcts import MCTSPlayer
-from catanatron.players.minimax import AlphaBetaPlayer, SameTurnAlphaBetaPlayer
-from catanatron.players.playouts import GreedyPlayoutsPlayer
-from catanatron.players.search import VictoryPointPlayer
-from catanatron.players.value import ValueFunctionPlayer
-from catanatron.players.weighted_random import WeightedRandomPlayer
+from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE
 
-from ...envs.gym.single_env import create_opponents
-from ...models.backbones import BackboneConfig, MLPBackboneConfig
-from ...models.models import (
-    build_flat_policy_value_network,
-    build_hierarchical_policy_value_network,
+from ...envs.gym.single_env import (
+    compute_single_agent_dims,
+    make_puffer_vectorized_envs,
 )
-from ...algorithms.supervised.loss_utils import create_loss_computer
+from ...models.backbones import BackboneConfig, MLPBackboneConfig, CrossDimensionalBackboneConfig
+from ...models.models import (
+    build_flat_policy_network,
+    build_hierarchical_policy_network,
+    build_value_network,
+)
+from ...models.wrappers import PolicyNetworkWrapper, ValueNetworkWrapper
+from ...eval.training_eval import evaluate_against_baselines
 
 
 def _mask_logits(
@@ -81,8 +74,23 @@ def _extract_valid_actions(info: Dict[str, Any] | None) -> np.ndarray:
     return np.array(valid_actions, dtype=np.int64)
 
 
+def _get_policy_logits(
+    policy_model: PolicyNetworkWrapper,
+    states: torch.Tensor,
+    model_type: str,
+) -> torch.Tensor:
+    """Get flat action logits from policy model."""
+    if model_type == "flat":
+        return policy_model(states)
+    elif model_type == "hierarchical":
+        action_type_logits, param_logits = policy_model(states)
+        return policy_model.get_flat_action_logits(action_type_logits, param_logits)
+    else:
+        raise ValueError(f"Unknown model_type '{model_type}'")
+
+
 def _select_policy_action(
-    model: nn.Module,
+    policy_model: PolicyNetworkWrapper,
     state_vec: np.ndarray,
     valid_actions: np.ndarray,
     model_type: str,
@@ -91,18 +99,11 @@ def _select_policy_action(
 ) -> int:
     """Sample or pick the highest-probability action under the current policy."""
     state_t = torch.from_numpy(state_vec).float().unsqueeze(0).to(device)
-    was_training = model.training
-    model.eval()
+    was_training = policy_model.training
+    policy_model.eval()
 
     with torch.no_grad():
-        if model_type == "flat":
-            policy_logits, _ = model(state_t)
-        elif model_type == "hierarchical":
-            action_type_logits, param_logits, _ = model(state_t)
-            policy_logits = model.get_flat_action_logits(action_type_logits, param_logits)
-        else:  # pragma: no cover - defensive
-            raise ValueError(f"Unknown model_type '{model_type}'")
-
+        policy_logits = _get_policy_logits(policy_model, state_t, model_type)
         masked_logits = _mask_logits(policy_logits, valid_actions, device)
         valid_logits = masked_logits[:, valid_actions]
         if torch.isnan(valid_logits).any():
@@ -118,166 +119,163 @@ def _select_policy_action(
             action_idx = int(valid_actions[local_idx])
 
     if was_training:
-        model.train()
+        policy_model.train()
     return action_idx
 
 
-def _query_expert_action(env: Any, expert: Player) -> int:
-    """Ask the expert policy for the optimal action in the current game state."""
-    playable_actions = list(getattr(env.game.state, "playable_actions", []))
-    if not playable_actions:
-        return 0
-
-    try:
-        expert_action = expert.decide(env.game, playable_actions)
-    except Exception:
-        expert_action = playable_actions[0]
-
-    try:
-        expert_idx = to_action_space(expert_action)
-    except ValueError:
-        expert_idx = to_action_space(playable_actions[0])
-    return expert_idx
-
-
-def _evaluate_policy(
-    map_type: str,
-    opponent_configs: Sequence[str],
-    model: nn.Module,
+def _select_policy_actions_batch(
+    policy_model: PolicyNetworkWrapper,
+    states: torch.Tensor,
+    valid_action_masks: np.ndarray,
     model_type: str,
     device: torch.device,
-    episodes: int,
-    seed: int,
-) -> Dict[str, float]:
-    """Roll deterministic episodes to track win-rate and reward."""
-    opponents = create_opponents(list(opponent_configs))
-    eval_env = gym.make(
-        "catanatron/Catanatron-v0",
-        config={
-            "map_type": map_type,
-            "enemies": opponents,
-            "representation": "mixed",
-        },
-    )
+    deterministic: bool = False,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Vectorized action selection for multiple parallel environments.
 
-    episode_rewards: List[float] = []
-    episode_lengths: List[int] = []
-    wins = 0
+    Returns:
+        actions: Selected action indices (batch_size,)
+        log_probs: Log probabilities of selected actions (batch_size,)
+    """
+    was_training = policy_model.training
+    policy_model.eval()
 
-    for ep in range(episodes):
-        obs, info = eval_env.reset(seed=seed + ep)
-        done = False
-        ep_reward = 0.0
-        ep_length = 0
+    with torch.no_grad():
+        policy_logits = _get_policy_logits(policy_model, states, model_type)
 
-        while not done:
-            state_vec = _observation_to_state_vector(obs)
-            valid_actions = _extract_valid_actions(info)
-            action = _select_policy_action(
-                model, state_vec, valid_actions, model_type, device, deterministic=True
-            )
-            obs, reward, terminated, truncated, info = eval_env.step(action)
-            ep_reward += float(reward)
-            ep_length += 1
-            done = bool(terminated or truncated)
+        # Mask invalid actions
+        mask_tensor = torch.as_tensor(
+            valid_action_masks, dtype=torch.bool, device=device
+        )
+        if mask_tensor.ndim == 1:
+            mask_tensor = mask_tensor.unsqueeze(0)
+        # Handle case where no actions are valid (shouldn't happen)
+        no_valid = ~mask_tensor.any(dim=1, keepdim=True)
+        mask_tensor = torch.where(no_valid, torch.ones_like(mask_tensor), mask_tensor)
 
-        episode_rewards.append(ep_reward)
-        episode_lengths.append(ep_length)
-        if getattr(eval_env, "game", None) and eval_env.game.winning_color() == Color.BLUE:
-            wins += 1
+        masked_logits = torch.where(
+            mask_tensor,
+            policy_logits,
+            torch.full_like(policy_logits, float("-inf")),
+        )
+        masked_logits = torch.clamp(masked_logits, min=-100, max=100)
 
-    eval_env.close()
+        probs = torch.softmax(masked_logits, dim=-1)
+        log_probs_all = torch.log_softmax(masked_logits, dim=-1)
 
-    return {
-        "avg_reward": float(np.mean(episode_rewards)) if episode_rewards else 0.0,
-        "avg_length": float(np.mean(episode_lengths)) if episode_lengths else 0.0,
-        "win_rate": wins / episodes if episodes > 0 else 0.0,
-    }
+        if deterministic:
+            action_tensor = torch.argmax(masked_logits, dim=-1)
+        else:
+            dist = torch.distributions.Categorical(probs=probs)
+            action_tensor = dist.sample()
+
+        log_prob_tensor = log_probs_all.gather(1, action_tensor.unsqueeze(1)).squeeze(1)
+
+        actions = action_tensor.detach().cpu().numpy().astype(np.int64)
+        log_probs = log_prob_tensor.detach().cpu().numpy().astype(np.float32)
+
+    if was_training:
+        policy_model.train()
+
+    return actions, log_probs
 
 
 class AggregatedDataset(Dataset):
-    """Simple in-memory dataset for aggregated DAgger trajectories."""
+    """In-memory dataset for aggregated DAgger trajectories with separate actor/critic states."""
 
-    def __init__(self, input_dim: int, max_size: int | None = None):
-        self.input_dim = input_dim
+    def __init__(
+        self,
+        actor_dim: int,
+        critic_dim: int,
+        max_size: int = 100_000_000,
+    ):
+        self.actor_dim = actor_dim
+        self.critic_dim = critic_dim
+        # Handle case where None is passed explicitly
+        if max_size is None:
+            max_size = 100_000_000
         self.max_size = max_size
-        self.states: List[np.ndarray] = []
-        self.actions: List[int] = []
-        self.returns: List[float] = []
+        self.capacity = max_size
+
+        # Preallocate full capacity.
+        # NOTE: With max_size=100M, this will attempt to allocate ~1.5TB+ of RAM depending on dims.
+        self.actor_states = np.zeros((self.max_size, actor_dim), dtype=np.float32)
+        self.critic_states = np.zeros((self.max_size, critic_dim), dtype=np.float32)
+        self.actions = np.zeros((self.max_size,), dtype=np.int64)
+        self.returns = np.zeros((self.max_size,), dtype=np.float32)
+        self.is_single_action = np.zeros((self.max_size,), dtype=np.bool_)
+
+        self.pos = 0
+        self.size = 0
 
     def __len__(self) -> int:
-        return len(self.states)
+        return self.size
 
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def __getitem__(
+        self, idx: int
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        if idx >= self.size:
+            raise IndexError(f"Index {idx} out of bounds for size {self.size}")
+
         return (
-            torch.from_numpy(self.states[idx]),
+            torch.from_numpy(self.actor_states[idx]),
+            torch.from_numpy(self.critic_states[idx]),
             torch.tensor(self.actions[idx], dtype=torch.long),
             torch.tensor(self.returns[idx], dtype=torch.float32),
+            torch.tensor(self.is_single_action[idx], dtype=torch.bool),
         )
 
     def add_episode(
         self,
-        states: List[np.ndarray],
-        expert_actions: List[int],
+        actor_states: np.ndarray | List[np.ndarray],
+        critic_states: np.ndarray | List[np.ndarray],
+        expert_actions: np.ndarray | List[int],
         rewards: List[float],
         gamma: float,
+        is_single_action: np.ndarray | List[bool],
     ) -> None:
-        returns = _discount_rewards(rewards, gamma)
-        for state, action, ret in zip(states, expert_actions, returns):
-            self._add_sample(state, action, ret)
+        """Add a full episode to the dataset."""
+        # Convert rewards to returns
+        returns_list = _discount_rewards(rewards, gamma)
+        returns = np.array(returns_list, dtype=np.float32)
 
-    def _add_sample(self, state: np.ndarray, action: int, ret: float) -> None:
-        vec = np.asarray(state, dtype=np.float32).reshape(-1)
-        if vec.shape[0] != self.input_dim:
-            raise ValueError(f"State dim mismatch: expected {self.input_dim}, got {vec.shape[0]}")
-        self.states.append(vec)
-        self.actions.append(int(action))
-        self.returns.append(float(ret))
-        self._truncate_if_needed()
+        # Ensure inputs are arrays
+        actor_states = np.asarray(actor_states, dtype=np.float32)
+        critic_states = np.asarray(critic_states, dtype=np.float32)
+        expert_actions = np.asarray(expert_actions, dtype=np.int64)
+        is_single_action = np.asarray(is_single_action, dtype=np.bool_)
 
-    def _truncate_if_needed(self) -> None:
-        if self.max_size is None:
+        num_samples = len(actor_states)
+        if num_samples == 0:
             return
-        overflow = len(self.states) - self.max_size
-        if overflow > 0:
-            self.states = self.states[overflow:]
-            self.actions = self.actions[overflow:]
-            self.returns = self.returns[overflow:]
 
+        # Ring buffer logic: write data, wrapping around if necessary
+        remaining = num_samples
+        src_idx = 0
+        while remaining > 0:
+            space = self.capacity - self.pos
+            to_write = min(remaining, space)
 
-def _create_expert_player(config: str) -> Player:
-    """Parse CLI-like config string into a Player that labels actions for BLUE."""
-    color = Color.BLUE
-    parts = config.split(":")
-    player_type = parts[0].lower()
-    params = parts[1:]
+            start = self.pos
+            end = start + to_write
 
-    try:
-        if player_type in {"random", "r"}:
-            return RandomPlayer(color)
-        if player_type in {"weighted", "w"}:
-            return WeightedRandomPlayer(color)
-        if player_type in {"value", "f"}:
-            return ValueFunctionPlayer(color)
-        if player_type in {"victorypoint", "vp"}:
-            return VictoryPointPlayer(color)
-        if player_type in {"alphabeta", "ab"}:
-            depth = int(params[0]) if params else 2
-            pruning = params[1].lower() != "false" if len(params) > 1 else True
-            return AlphaBetaPlayer(color, depth=depth, prunning=pruning)
-        if player_type in {"sameturnalphabeta", "sab"}:
-            return SameTurnAlphaBetaPlayer(color)
-        if player_type in {"mcts", "m"}:
-            simulations = int(params[0]) if params else 200
-            return MCTSPlayer(color, simulations)
-        if player_type in {"playouts", "greedyplayouts", "g"}:
-            num_playouts = int(params[0]) if params else 25
-            return GreedyPlayoutsPlayer(color, num_playouts)
-    except Exception as exc:  # pragma: no cover - defensive
-        print(f"[DAgger] Failed to build expert '{config}': {exc}. Falling back to RandomPlayer.")
+            self.actor_states[start:end] = actor_states[src_idx : src_idx + to_write]
+            self.critic_states[start:end] = critic_states[src_idx : src_idx + to_write]
+            self.actions[start:end] = expert_actions[src_idx : src_idx + to_write]
+            self.returns[start:end] = returns[src_idx : src_idx + to_write]
+            self.is_single_action[start:end] = is_single_action[
+                src_idx : src_idx + to_write
+            ]
 
-    print(f"[DAgger] Unknown expert '{config}', defaulting to RandomPlayer.")
-    return RandomPlayer(color)
+            self.pos = (self.pos + to_write) % self.capacity
+            # size grows up to capacity
+            self.size = min(self.size + to_write, self.capacity)
+
+            remaining -= to_write
+            src_idx += to_write
+
+    def _add_sample(self, *args):
+        raise NotImplementedError("Use add_episode with batched data instead.")
 
 
 @dataclass
@@ -289,57 +287,218 @@ class DAggerCollectStats:
     dataset_size: int
 
 
-def _collect_dagger_rollouts(
-    env: gym.Env,
-    model: nn.Module,
+def _flatten_puffer_observation(obs: Dict[str, Any]) -> Tuple[np.ndarray, np.ndarray]:
+    """Convert Puffer observation dict to flattened actor and critic vectors."""
+    actor_obs = obs["observation"]
+    numeric = np.asarray(actor_obs["numeric"], dtype=np.float32).reshape(-1)
+    board = np.asarray(actor_obs["board"], dtype=np.float32)
+    # board is (C, W, H), transpose to (W, H, C) then flatten
+    board_wh_last = np.transpose(board, (1, 2, 0))
+    board_flat = board_wh_last.reshape(-1)
+    actor_vec = np.concatenate([numeric, board_flat], axis=0)
+    critic_vec = np.asarray(obs["critic"], dtype=np.float32).reshape(-1)
+    return actor_vec, critic_vec
+
+
+def _get_action_mask_from_obs(obs: Dict[str, Any]) -> np.ndarray:
+    """Extract action mask from Puffer observation."""
+    return np.asarray(obs["action_mask"], dtype=np.int8) > 0
+
+
+def _extract_expert_actions_from_infos(infos: Any, batch_size: int) -> np.ndarray:
+    """Extract expert actions from PufferLib vectorized env infos.
+
+    The infos from puffer vectorized envs can be structured as a dict of arrays
+    or as a list of dicts. This handles both cases.
+    """
+    expert_actions = np.zeros(batch_size, dtype=np.int64)
+
+    if isinstance(infos, dict) and "expert_action" in infos:
+        # Dict of arrays format
+        expert_arr = infos["expert_action"]
+        if hasattr(expert_arr, "__len__") and len(expert_arr) == batch_size:
+            expert_actions[:] = expert_arr
+        else:
+            expert_actions[:] = int(expert_arr)
+    elif isinstance(infos, (list, tuple)):
+        # List of dicts format
+        for idx, info in enumerate(infos):
+            if isinstance(info, dict) and "expert_action" in info:
+                expert_actions[idx] = int(info["expert_action"])
+    elif hasattr(infos, "__iter__"):
+        # Try to iterate over infos
+        for idx, info in enumerate(infos):
+            if idx >= batch_size:
+                break
+            if isinstance(info, dict) and "expert_action" in info:
+                expert_actions[idx] = int(info["expert_action"])
+
+    return expert_actions
+
+
+def _collect_dagger_rollouts_vectorized(
+    envs: Any,
+    policy_model: PolicyNetworkWrapper,
     dataset: AggregatedDataset,
-    expert: Player,
-    episodes: int,
+    num_steps: int,
     beta: float,
     gamma: float,
     model_type: str,
     device: torch.device,
-    seed: int,
+    actor_dim: int,
+    critic_dim: int,
 ) -> DAggerCollectStats:
-    """Run policy/environment interaction and aggregate expert-labeled data."""
+    """Run batched policy/environment interaction and aggregate expert-labeled data.
+
+    This version works with PufferLib vectorized environments where expert actions
+    are provided in the info dict (via expert_player config on the env).
+    """
+    num_envs = envs.num_envs
+    driver_env = envs.driver_env
+    # For GymnasiumPufferEnv, get observation space from the wrapped env
+    if hasattr(driver_env, "env_single_observation_space"):
+        obs_space = driver_env.env_single_observation_space
+    else:
+        obs_space = driver_env.observation_space
+    if hasattr(driver_env, "obs_dtype"):
+        obs_dtype = driver_env.obs_dtype
+    else:
+        obs_dtype = np.float32
+
+    # Preallocated buffers for each environment
+    # Each buffer is resized if needed, but we start with a reasonable size
+    initial_buffer_size = 2000  # TURNS_LIMIT=1000, ~2 steps per turn max
+
+    # We maintain a list of buffers (dictionaries of arrays)
+    ep_buffers = []
+    for _ in range(num_envs):
+        ep_buffers.append(
+            {
+                "actor": np.zeros((initial_buffer_size, actor_dim), dtype=np.float32),
+                "critic": np.zeros((initial_buffer_size, critic_dim), dtype=np.float32),
+                "label": np.zeros(initial_buffer_size, dtype=np.int64),
+                "reward": np.zeros(initial_buffer_size, dtype=np.float32),
+                "is_single": np.zeros(initial_buffer_size, dtype=np.bool_),
+                "size": 0,
+                "capacity": initial_buffer_size,
+            }
+        )
+
     episode_rewards: List[float] = []
     steps_collected = 0
     expert_actions_used = 0
     total_actions = 0
 
-    for ep in range(episodes):
-        expert.reset_state()
-        obs, info = env.reset(seed=seed + ep)
-        done = False
-        ep_states: List[np.ndarray] = []
-        ep_labels: List[int] = []
-        ep_rewards: List[float] = []
+    observations, infos = envs.reset()
 
-        while not done:
-            state_vec = _observation_to_state_vector(obs)
-            valid_actions = _extract_valid_actions(info)
-            expert_action = _query_expert_action(env, expert)
-            policy_action = _select_policy_action(
-                model, state_vec, valid_actions, model_type, device, deterministic=False
-            )
+    for _ in range(num_steps):
+        batch_size = observations.shape[0]
+        actor_batch = np.zeros((batch_size, actor_dim), dtype=np.float32)
+        critic_batch = np.zeros((batch_size, critic_dim), dtype=np.float32)
+        action_masks = np.zeros((batch_size, ACTION_SPACE_SIZE), dtype=np.bool_)
 
-            if random.random() < beta:
-                action_to_play = expert_action
-                expert_actions_used += 1
-            else:
-                action_to_play = policy_action
+        # Decode observations
+        for idx in range(batch_size):
+            structured = nativize(observations[idx], obs_space, obs_dtype)
+            actor_batch[idx], critic_batch[idx] = _flatten_puffer_observation(structured)
+            action_masks[idx] = _get_action_mask_from_obs(structured)
 
-            total_actions += 1
-            ep_states.append(state_vec)
-            ep_labels.append(expert_action)
+        # Get policy actions
+        actor_tensor = torch.from_numpy(actor_batch).float().to(device)
+        policy_actions, _ = _select_policy_actions_batch(
+            policy_model,
+            actor_tensor,
+            action_masks,
+            model_type,
+            device,
+            deterministic=False,
+        )
 
-            obs, reward, terminated, truncated, info = env.step(int(action_to_play))
-            ep_rewards.append(float(reward))
+        # Get expert actions from info dict (computed by the env)
+        expert_actions = _extract_expert_actions_from_infos(infos, batch_size)
+
+        # Determine which steps are single-action steps (only 1 valid action)
+        num_valid_actions = action_masks.sum(axis=1)
+        is_single_action_batch = num_valid_actions <= 1
+
+        # Decide which action to execute (expert or policy)
+        # Vectorized beta sampling
+        use_expert = np.random.random(batch_size) < beta
+        actions_to_play = np.where(use_expert, expert_actions, policy_actions)
+
+        expert_actions_used += np.sum(use_expert)
+        total_actions += batch_size
+
+        # Store experience in buffers
+        for idx in range(batch_size):
+            buf = ep_buffers[idx]
+            pos = buf["size"]
+
+            # Resize if needed
+            if pos >= buf["capacity"]:
+                new_cap = buf["capacity"] * 2
+
+                new_actor = np.zeros((new_cap, actor_dim), dtype=np.float32)
+                new_actor[: buf["capacity"]] = buf["actor"]
+                buf["actor"] = new_actor
+
+                new_critic = np.zeros((new_cap, critic_dim), dtype=np.float32)
+                new_critic[: buf["capacity"]] = buf["critic"]
+                buf["critic"] = new_critic
+
+                new_label = np.zeros(new_cap, dtype=np.int64)
+                new_label[: buf["capacity"]] = buf["label"]
+                buf["label"] = new_label
+
+                new_reward = np.zeros(new_cap, dtype=np.float32)
+                new_reward[: buf["capacity"]] = buf["reward"]
+                buf["reward"] = new_reward
+
+                new_is_single = np.zeros(new_cap, dtype=np.bool_)
+                new_is_single[: buf["capacity"]] = buf["is_single"]
+                buf["is_single"] = new_is_single
+
+                buf["capacity"] = new_cap
+
+            # Write to buffer
+            buf["actor"][pos] = actor_batch[idx]
+            buf["critic"][pos] = critic_batch[idx]
+            buf["label"][pos] = expert_actions[idx]
+            buf["is_single"][pos] = is_single_action_batch[idx]
+            buf["size"] += 1
+
+        # Step environments
+        next_observations, rewards, terminations, truncations, infos = envs.step(
+            actions_to_play
+        )
+        rewards = rewards.astype(np.float32)
+        dones = np.logical_or(terminations, truncations)
+
+        for idx in range(batch_size):
+            # Assign reward to the previous step (which is at size-1)
+            buf = ep_buffers[idx]
+            pos = buf["size"] - 1
+            buf["reward"][pos] = rewards[idx]
+
             steps_collected += 1
-            done = bool(terminated or truncated)
 
-        dataset.add_episode(ep_states, ep_labels, ep_rewards, gamma)
-        episode_rewards.append(float(np.sum(ep_rewards)))
+            if dones[idx]:
+                # Episode finished - add to dataset
+                size = buf["size"]
+                dataset.add_episode(
+                    actor_states=buf["actor"][:size],
+                    critic_states=buf["critic"][:size],
+                    expert_actions=buf["label"][:size],
+                    rewards=buf["reward"][:size],
+                    gamma=gamma,
+                    is_single_action=buf["is_single"][:size],
+                )
+                episode_rewards.append(float(np.sum(buf["reward"][:size])))
+
+                # Reset buffer
+                buf["size"] = 0
+
+        observations = next_observations
 
     mean_reward = float(np.mean(episode_rewards)) if episode_rewards else 0.0
     expert_fraction = expert_actions_used / total_actions if total_actions else 0.0
@@ -354,73 +513,78 @@ def _collect_dagger_rollouts(
 
 def _train_on_dataset(
     dataset: AggregatedDataset,
-    model: nn.Module,
-    optimizer: torch.optim.Optimizer,
-    loss_computer,
+    policy_model: PolicyNetworkWrapper,
+    critic_model: ValueNetworkWrapper,
+    policy_optimizer: torch.optim.Optimizer,
+    critic_optimizer: torch.optim.Optimizer,
     epochs: int,
     batch_size: int,
     model_type: str,
     device: torch.device,
+    max_grad_norm: float = 5.0,
 ) -> Dict[str, float]:
-    """Run supervised updates on the aggregated dataset."""
+    """Run supervised updates on the aggregated dataset with separate policy/critic."""
     if len(dataset) == 0 or epochs <= 0:
         return {"total_loss": 0.0, "policy_loss": 0.0, "value_loss": 0.0, "accuracy": 0.0}
 
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=False)
-    model.train()
+    policy_model.train()
+    critic_model.train()
 
     total_loss = 0.0
     total_policy_loss = 0.0
     total_value_loss = 0.0
     correct = 0
     total_samples = 0
+    n_updates = 0
 
     for _ in range(epochs):
-        for features, actions, returns in loader:
-            features = features.to(device)
+        for actor_features, critic_features, actions, returns, is_single_action in loader:
+            actor_features = actor_features.to(device)
+            critic_features = critic_features.to(device)
             actions = actions.to(device)
             returns = returns.to(device)
+            is_single_action = is_single_action.to(device)
 
-            optimizer.zero_grad()
-
-            if model_type == "flat":
-                policy_logits, value_pred = model(features)
-                batch_total_loss, policy_loss, value_loss = loss_computer.compute_flat_loss(
-                    policy_logits, value_pred.squeeze(-1), actions, returns
+            # Policy update (only on non-single-action steps since end-turn steps dominate otherwise)
+            policy_optimizer.zero_grad()
+            policy_logits = _get_policy_logits(policy_model, actor_features, model_type)
+            non_single_mask = ~is_single_action
+            if non_single_mask.any():
+                # Compute loss only for non-single-action steps
+                policy_loss_per_sample = F.cross_entropy(
+                    policy_logits, actions, reduction="none"
                 )
-                logits_for_metrics = policy_logits
-            elif model_type == "hierarchical":
-                action_type_logits, param_logits, value_pred = model(features)
-                (
-                    batch_total_loss,
-                    policy_loss,
-                    _,
-                    value_loss,
-                ) = loss_computer.compute_hierarchical_loss(
-                    action_type_logits,
-                    param_logits,
-                    value_pred.squeeze(-1),
-                    actions,
-                    returns,
-                    model.flat_to_hierarchical,
-                )
-                logits_for_metrics = model.get_flat_action_logits(action_type_logits, param_logits)
-            else:  # pragma: no cover
-                raise ValueError(f"Unknown model_type '{model_type}'")
+                policy_loss = policy_loss_per_sample[non_single_mask].mean()
+                policy_loss.backward()
+                torch.nn.utils.clip_grad_norm_(policy_model.parameters(), max_norm=max_grad_norm)
+                policy_optimizer.step()
+            else:
+                # All samples are single-action steps, skip policy update
+                policy_loss = torch.tensor(0.0, device=device)
 
-            batch_total_loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
-            optimizer.step()
+            # Critic update
+            critic_optimizer.zero_grad()
+            value_pred = critic_model(critic_features).squeeze(-1)
+            value_loss = F.mse_loss(value_pred, returns)
+            value_loss.backward()
+            torch.nn.utils.clip_grad_norm_(critic_model.parameters(), max_norm=max_grad_norm)
+            critic_optimizer.step()
 
+            # Metrics
+            batch_total_loss = policy_loss + value_loss
             total_loss += float(batch_total_loss.item())
             total_policy_loss += float(policy_loss.item())
             total_value_loss += float(value_loss.item())
 
-            predictions = torch.argmax(logits_for_metrics, dim=-1)
-            correct += int((predictions == actions).sum().item())
-            total_samples += actions.size(0)
+            predictions = torch.argmax(policy_logits, dim=-1)
+            # Once again, only compute accuracy for non-single-action steps since end-turn steps dominate otherwise
+            if non_single_mask.any():
+                correct += int(((predictions == actions) & non_single_mask).sum().item())
+                total_samples += int(non_single_mask.sum().item())
+            n_updates += 1
 
-    n_updates = max(len(loader) * epochs, 1)
+    n_updates = max(n_updates, 1)
     accuracy = correct / total_samples if total_samples else 0.0
     return {
         "total_loss": total_loss / n_updates,
@@ -431,42 +595,82 @@ def _train_on_dataset(
 
 
 def train(
-    input_dim: int,
     num_actions: int = ACTION_SPACE_SIZE,
     model_type: str = "flat",
-    hidden_dims: Sequence[int] = (512, 512),
-    load_weights: str | None = None,
+    backbone_type: str = "mlp",
+    policy_hidden_dims: Sequence[int] = (512, 512),
+    critic_hidden_dims: Sequence[int] = (512, 512),
+    load_policy_weights: Optional[str] = None,
+    load_critic_weights: Optional[str] = None,
     n_iterations: int = 10,
-    episodes_per_iteration: int = 5,
+    steps_per_iteration: int = 2048,
     train_epochs: int = 1,
     batch_size: int = 256,
-    lr: float = 1e-4,
+    policy_lr: float = 1e-4,
+    critic_lr: float = 1e-4,
     gamma: float = 0.99,
     expert_config: str = "AB:2",
-    opponent_configs: Sequence[str] | None = None,
-    map_type: str = "BASE",
+    opponent_configs: Optional[Sequence[str]] = None,
+    map_type: Literal["BASE", "MINI", "TOURNAMENT"] = "BASE",
     beta_init: float = 1.0,
     beta_decay: float = 0.9,
     beta_min: float = 0.05,
-    max_dataset_size: int | None = None,
-    save_path: str | None = None,
-    device: str | torch.device | None = None,
-    wandb_config: Dict[str, Any] | None = None,
-    eval_episodes: int = 5,
+    max_dataset_size: Optional[int] = None,
+    save_path: Optional[str] = None,
+    device: Optional[str] = None,
+    wandb_config: Optional[Dict[str, Any]] = None,
+    eval_games_per_opponent: int = 250,
     seed: int = 42,
-) -> nn.Module:
+    num_envs: int = 4,
+    reward_function: Literal["shaped", "win"] = "shaped",
+    max_grad_norm: float = 5.0,
+) -> Tuple[PolicyNetworkWrapper, ValueNetworkWrapper]:
     """
-    Train the policy-value network with DAgger.
+    Train separate policy and critic networks with DAgger using vectorized environments.
 
-    Args mirror other training utilities for consistency.
+    The policy network is trained via imitation learning (cross-entropy with expert labels).
+    The critic network is trained to predict discounted returns using full game information.
+
+    Args:
+        num_actions: Size of action space
+        model_type: "flat" or "hierarchical" policy head
+        backbone_type: "mlp" or "xdim" (cross-dimensional with CNN for board)
+        policy_hidden_dims: Hidden layer sizes for policy backbone
+        critic_hidden_dims: Hidden layer sizes for critic backbone
+        load_policy_weights: Path to load initial policy weights
+        load_critic_weights: Path to load initial critic weights
+        n_iterations: Number of DAgger iterations
+        steps_per_iteration: Environment steps to collect per iteration
+        train_epochs: Training epochs per iteration
+        batch_size: Batch size for training
+        policy_lr: Policy learning rate
+        critic_lr: Critic learning rate
+        gamma: Discount factor for computing returns
+        expert_config: Expert player config string (e.g. "AB:2", "MCTS:200")
+        opponent_configs: List of opponent config strings
+        map_type: Catan map type
+        beta_init: Initial probability of using expert action
+        beta_decay: Multiplicative decay for beta per iteration
+        beta_min: Minimum beta value
+        max_dataset_size: Maximum samples to keep in replay buffer
+        save_path: Directory to save checkpoints
+        device: Torch device ("cuda" or "cpu")
+        wandb_config: W&B initialization config
+        eval_games_per_opponent: Number of games to play against each baseline opponent
+        seed: Random seed
+        num_envs: Number of parallel environments
+        reward_function: Reward function type ("shaped" or "win")
+        max_grad_norm: Maximum gradient norm for clipping
+
+    Returns:
+        Tuple of (policy_model, critic_model)
     """
     if device is None:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    elif isinstance(device, str):
-        device = torch.device(device)
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    torch_device = torch.device(device)
 
     opponent_configs = list(opponent_configs) if opponent_configs else ["random"]
-    save_path = save_path or "weights/policy_value_dagger.pt"
+    save_path = save_path or "weights/dagger"
 
     random.seed(seed)
     np.random.seed(seed)
@@ -479,139 +683,228 @@ def train(
     else:
         wandb.init(mode="disabled")
 
-    backbone_config = BackboneConfig(
-        architecture="mlp",
-        args=MLPBackboneConfig(input_dim=input_dim, hidden_dims=list(hidden_dims)),
-    )
+    assert backbone_type in ("mlp", "xdim"), f"Unknown backbone_type '{backbone_type}'"
+
+    # Compute dimensions
+    num_players = len(opponent_configs) + 1
+    dims = compute_single_agent_dims(num_players, map_type)
+    actor_dim = dims["actor_dim"]
+    critic_dim = dims["critic_dim"]
+    numeric_dim = dims["numeric_dim"]
+    full_numeric_dim = dims["full_numeric_dim"]
+    board_channels = dims["board_channels"]
+
+    # Board shape for xdim backbone (C, W, H)
+    BOARD_WIDTH = 21
+    BOARD_HEIGHT = 11
+
+    print(f"\n{'=' * 60}")
+    print("DAgger Training with Separate Policy/Critic Networks")
+    print(f"{'=' * 60}")
+    print(f"Device: {device}")
+    print(f"Map type: {map_type} | Players: {num_players}")
+    print(f"Backbone: {backbone_type} | Model type: {model_type}")
+    print(f"Actor input dim: {actor_dim} | Critic input dim: {critic_dim}")
+    if backbone_type == "xdim":
+        print(f"Board shape (C, W, H): ({board_channels}, {BOARD_WIDTH}, {BOARD_HEIGHT}) | Numeric dim: {numeric_dim}")
+    print(f"Parallel environments: {num_envs}")
+    print(f"Steps per iteration: {steps_per_iteration}")
+
+    # Build policy backbone config based on backbone_type
+    if backbone_type == "mlp":
+        policy_backbone_config = BackboneConfig(
+            architecture="mlp",
+            args=MLPBackboneConfig(input_dim=actor_dim, hidden_dims=list(policy_hidden_dims)),
+        )
+    else:  # xdim
+        policy_backbone_config = BackboneConfig(
+            architecture="cross_dimensional",
+            args=CrossDimensionalBackboneConfig(
+                board_height=BOARD_HEIGHT,
+                board_width=BOARD_WIDTH,
+                board_channels=board_channels,
+                numeric_dim=numeric_dim,
+                cnn_channels=[64, 128, 128],
+                cnn_kernel_size=(3, 5),
+                numeric_hidden_dims=list(policy_hidden_dims),
+                fusion_hidden_dim=policy_hidden_dims[-1] if policy_hidden_dims else 256,
+                output_dim=policy_hidden_dims[-1] if policy_hidden_dims else 256,
+            ),
+        )
 
     if model_type == "flat":
-        model = build_flat_policy_value_network(
-            backbone_config=backbone_config, num_actions=num_actions
-        ).to(device)
+        policy_model = build_flat_policy_network(
+            backbone_config=policy_backbone_config, num_actions=num_actions
+        ).to(torch_device)
     elif model_type == "hierarchical":
-        model = build_hierarchical_policy_value_network(backbone_config=backbone_config).to(device)
+        policy_model = build_hierarchical_policy_network(
+            backbone_config=policy_backbone_config
+        ).to(torch_device)
     else:
         raise ValueError(f"Unknown model_type '{model_type}'")
 
-    if load_weights:
-        if os.path.exists(load_weights):
-            state = torch.load(load_weights, map_location=device)
-            model.load_state_dict(state)
-            print(f"[DAgger] Loaded weights from {load_weights}")
-        else:
-            print(f"[DAgger] Warning: weights file '{load_weights}' not found.")
+    # Build critic backbone config
+    if backbone_type == "mlp":
+        critic_backbone_config = BackboneConfig(
+            architecture="mlp",
+            args=MLPBackboneConfig(input_dim=critic_dim, hidden_dims=list(critic_hidden_dims)),
+        )
+    else:  # xdim
+        critic_backbone_config = BackboneConfig(
+            architecture="cross_dimensional",
+            args=CrossDimensionalBackboneConfig(
+                board_height=BOARD_HEIGHT,
+                board_width=BOARD_WIDTH,
+                board_channels=board_channels,
+                numeric_dim=full_numeric_dim,  # critic uses full numeric features
+                cnn_channels=[64, 128, 128],
+                cnn_kernel_size=(3, 5),
+                numeric_hidden_dims=list(critic_hidden_dims),
+                fusion_hidden_dim=critic_hidden_dims[-1] if critic_hidden_dims else 256,
+                output_dim=critic_hidden_dims[-1] if critic_hidden_dims else 256,
+            ),
+        )
+    critic_model = build_value_network(backbone_config=critic_backbone_config).to(torch_device)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    loss_computer = create_loss_computer(
-        model=model,
-        train_actions=None,
-        policy_weight=1.0,
-        value_weight=1.0,
-        action_type_weight=1.0,
-        param_weight=1.0,
-        use_class_weights=False,
-        device=str(device),
+    # Load weights if provided
+    if load_policy_weights and os.path.exists(load_policy_weights):
+        state = torch.load(load_policy_weights, map_location=torch_device)
+        policy_model.load_state_dict(state)
+        print(f"[DAgger] Loaded policy weights from {load_policy_weights}")
+    elif load_policy_weights:
+        print(f"[DAgger] Warning: policy weights file '{load_policy_weights}' not found.")
+
+    if load_critic_weights and os.path.exists(load_critic_weights):
+        state = torch.load(load_critic_weights, map_location=torch_device)
+        critic_model.load_state_dict(state)
+        print(f"[DAgger] Loaded critic weights from {load_critic_weights}")
+    elif load_critic_weights:
+        print(f"[DAgger] Warning: critic weights file '{load_critic_weights}' not found.")
+
+    policy_optimizer = torch.optim.Adam(policy_model.parameters(), lr=policy_lr)
+    critic_optimizer = torch.optim.Adam(critic_model.parameters(), lr=critic_lr)
+
+    # Create vectorized environments with expert player embedded
+    # Each env will compute expert actions and include them in info dict
+    envs = make_puffer_vectorized_envs(
+        reward_function=reward_function,
+        map_type=map_type,
+        opponent_configs=list(opponent_configs),
+        num_envs=num_envs,
+        expert_config=expert_config,
     )
 
-    env = gym.make(
-        "catanatron/Catanatron-v0",
-        config={
-            "map_type": map_type,
-            "enemies": create_opponents(opponent_configs),
-            "representation": "mixed",
-        },
+    dataset = AggregatedDataset(
+        actor_dim=actor_dim, critic_dim=critic_dim, max_size=max_dataset_size
     )
-    expert = _create_expert_player(expert_config)
-    dataset = AggregatedDataset(input_dim=input_dim, max_size=max_dataset_size)
 
     beta = beta_init
-    best_eval_reward = float("-inf")
+    best_eval_win_rate = float("-inf")
+    total_steps = n_iterations * steps_per_iteration
+    global_step = 0
 
-    for iteration in range(1, n_iterations + 1):
-        print(f"\n[DAgger] Iteration {iteration}/{n_iterations} | beta={beta:.3f}")
-        collect_stats = _collect_dagger_rollouts(
-            env=env,
-            model=model,
-            dataset=dataset,
-            expert=expert,
-            episodes=episodes_per_iteration,
-            beta=beta,
-            gamma=gamma,
-            model_type=model_type,
-            device=device,
-            seed=seed + iteration * 100,
-        )
-        print(
-            f"  Collected {collect_stats.steps} steps "
-            f"({collect_stats.episodes} episodes, mean reward {collect_stats.mean_reward:.3f})"
-        )
-        print(
-            f"  Expert executed {collect_stats.expert_fraction * 100:.1f}% of actions | "
-            f"Dataset size: {collect_stats.dataset_size}"
-        )
+    try:
+        with tqdm(total=total_steps, desc="DAgger", unit="step", unit_scale=True) as pbar:
+            for iteration in range(1, n_iterations + 1):
+                pbar.set_postfix(
+                    {"iter": f"{iteration}/{n_iterations}", "beta": f"{beta:.2f}"}
+                )
 
-        train_stats = _train_on_dataset(
-            dataset=dataset,
-            model=model,
-            optimizer=optimizer,
-            loss_computer=loss_computer,
-            epochs=train_epochs,
-            batch_size=batch_size,
-            model_type=model_type,
-            device=device,
-        )
-        print(
-            f"  Train loss {train_stats['total_loss']:.4f} | "
-            f"Policy {train_stats['policy_loss']:.4f} | "
-            f"Value {train_stats['value_loss']:.4f} | "
-            f"Accuracy {train_stats['accuracy'] * 100:.2f}%"
-        )
+                collect_stats = _collect_dagger_rollouts_vectorized(
+                    envs=envs,
+                    policy_model=policy_model,
+                    dataset=dataset,
+                    num_steps=steps_per_iteration,
+                    beta=beta,
+                    gamma=gamma,
+                    model_type=model_type,
+                    device=torch_device,
+                    actor_dim=actor_dim,
+                    critic_dim=critic_dim,
+                )
+                global_step += collect_stats.steps
+                pbar.update(collect_stats.steps)
 
-        eval_stats = _evaluate_policy(
-            map_type=map_type,
-            opponent_configs=opponent_configs,
-            model=model,
-            model_type=model_type,
-            device=device,
-            episodes=eval_episodes,
-            seed=seed + iteration * 1000,
-        )
-        print(
-            f"  Eval reward {eval_stats['avg_reward']:.3f} | "
-            f"Win-rate {eval_stats['win_rate'] * 100:.1f}% | "
-            f"Avg length {eval_stats['avg_length']:.1f}"
-        )
+                train_stats = _train_on_dataset(
+                    dataset=dataset,
+                    policy_model=policy_model,
+                    critic_model=critic_model,
+                    policy_optimizer=policy_optimizer,
+                    critic_optimizer=critic_optimizer,
+                    epochs=train_epochs,
+                    batch_size=batch_size,
+                    model_type=model_type,
+                    device=torch_device,
+                    max_grad_norm=max_grad_norm,
+                )
 
-        if eval_stats["avg_reward"] > best_eval_reward:
-            best_eval_reward = eval_stats["avg_reward"]
-            save_dir = os.path.dirname(save_path)
-            if save_dir and not os.path.exists(save_dir):
-                os.makedirs(save_dir, exist_ok=True)
-            torch.save(model.state_dict(), save_path)
-            print(f"  → Saved improved checkpoint to {save_path}")
+                # Evaluate against baselines (same as MARL PPO)
+                policy_model.eval()
+                with torch.no_grad():
+                    eval_metrics = evaluate_against_baselines(
+                        policy_model=policy_model,
+                        model_type=model_type,
+                        map_type=map_type,
+                        num_games=eval_games_per_opponent,
+                        seed=random.randint(0, sys.maxsize),
+                        log_to_wandb=True,
+                        global_step=global_step,
+                    )
+                policy_model.train()
 
-        wandb.log(
-            {
-                "dagger/dataset_size": len(dataset),
-                "dagger/collect_reward": collect_stats.mean_reward,
-                "dagger/expert_fraction": collect_stats.expert_fraction,
-                "dagger/train_total_loss": train_stats["total_loss"],
-                "dagger/train_policy_loss": train_stats["policy_loss"],
-                "dagger/train_value_loss": train_stats["value_loss"],
-                "dagger/train_accuracy": train_stats["accuracy"],
-                "dagger/eval_reward": eval_stats["avg_reward"],
-                "dagger/eval_win_rate": eval_stats["win_rate"],
-            },
-            step=iteration,
-        )
+                eval_win_rate = float(eval_metrics.get("eval/win_rate_vs_value", 0.0))
+                pbar.set_postfix(
+                    {
+                        "iter": f"{iteration}/{n_iterations}",
+                        "beta": f"{beta:.2f}",
+                        "acc": f"{train_stats['accuracy'] * 100:.1f}%",
+                        "wr_val": f"{eval_win_rate * 100:.1f}%",
+                    }
+                )
 
-        beta = max(beta * beta_decay, beta_min)
+                if eval_win_rate > best_eval_win_rate:
+                    best_eval_win_rate = eval_win_rate
+                    os.makedirs(save_path, exist_ok=True)
+                    policy_path = os.path.join(save_path, "policy_best.pt")
+                    critic_path = os.path.join(save_path, "critic_best.pt")
+                    torch.save(policy_model.state_dict(), policy_path)
+                    torch.save(critic_model.state_dict(), critic_path)
 
-    env.close()
+                # Save periodic checkpoints
+                os.makedirs(save_path, exist_ok=True)
+                policy_path = os.path.join(save_path, f"policy_iter_{iteration}.pt")
+                critic_path = os.path.join(save_path, f"critic_iter_{iteration}.pt")
+                torch.save(policy_model.state_dict(), policy_path)
+                torch.save(critic_model.state_dict(), critic_path)
+
+                wandb.log(
+                    {
+                        "dagger/dataset_size": len(dataset),
+                        "dagger/collect_reward": collect_stats.mean_reward,
+                        "dagger/expert_fraction": collect_stats.expert_fraction,
+                        "dagger/train_total_loss": train_stats["total_loss"],
+                        "dagger/train_policy_loss": train_stats["policy_loss"],
+                        "dagger/train_value_loss": train_stats["value_loss"],
+                        "dagger/train_accuracy": train_stats["accuracy"],
+                        "dagger/beta": beta,
+                        **eval_metrics,
+                    },
+                    step=global_step,
+                )
+
+                beta = max(beta * beta_decay, beta_min)
+
+    finally:
+        envs.close()
+
     if wandb.run is not None:
-        wandb.run.summary["best_eval_reward"] = best_eval_reward
+        wandb.run.summary["best_eval_win_rate_vs_value"] = best_eval_win_rate
 
-    return model
+    print(
+        f"\n[DAgger] Training complete. "
+        f"Best eval win rate vs value: {best_eval_win_rate:.3f}"
+    )
+    return policy_model, critic_model
 
 
 __all__ = ["train"]

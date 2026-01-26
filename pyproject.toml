@@ -40,6 +40,7 @@ train-sl = "catanrl.experiments.train_sl:main"
 train-sarl-ppo = "catanrl.experiments.train_sarl_ppo:main"
 train-marl-cc = "catanrl.experiments.train_marl_central_critic:main"
 train-alphazero = "catanrl.experiments.train_alphazero:main"
+train-dagger = "catanrl.experiments.train_dagger:main"
 profile-alphazero = "catanrl.experiments.profile_alphazero_timing:main"
 
 [tool.setuptools.packages.find]
