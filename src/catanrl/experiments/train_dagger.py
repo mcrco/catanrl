@@ -146,7 +146,7 @@ def main():
         "--eviction-strategy",
         type=str,
         choices=["random", "fifo", "correct"],
-        default="random",
+        default="fifo",
         help="Eviction strategy when dataset is full: random, fifo, or correct (default: random)",
     )
 
