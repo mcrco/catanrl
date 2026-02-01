@@ -20,7 +20,7 @@ from pufferlib.emulation import nativize
 
 from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE
 
-from .dataset import AggregatedDataset, _discount_rewards
+from .dataset import AggregatedDataset, EvictionStrategy, _discount_rewards
 
 from ...envs.gym.single_env import (
     compute_single_agent_dims,
@@ -511,6 +511,7 @@ def train(
     beta_decay: float = 0.9,
     beta_min: float = 0.05,
     max_dataset_size: Optional[int] = None,
+    eviction_strategy: EvictionStrategy = EvictionStrategy.RANDOM,
     save_path: Optional[str] = None,
     device: Optional[str] = None,
     wandb_config: Optional[Dict[str, Any]] = None,
@@ -548,6 +549,7 @@ def train(
         beta_decay: Multiplicative decay for beta per iteration
         beta_min: Minimum beta value
         max_dataset_size: Maximum samples to keep in replay buffer
+        eviction_strategy: Strategy for evicting samples when buffer is full
         save_path: Directory to save checkpoints
         device: Torch device ("cuda" or "cpu")
         wandb_config: W&B initialization config
@@ -690,7 +692,11 @@ def train(
     )
 
     dataset = AggregatedDataset(
-        actor_dim=actor_dim, critic_dim=critic_dim, max_size=max_dataset_size
+        critic_dim=critic_dim,
+        num_players=num_players,
+        map_type=map_type,
+        max_size=max_dataset_size,
+        eviction_strategy=eviction_strategy,
     )
 
     beta = beta_init

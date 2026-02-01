@@ -95,6 +95,28 @@ def compute_feature_vector_dim(
     return numeric_len + _board_tensor_size(num_players, map_type)
 
 
+def get_actor_indices_from_critic(
+    num_players: int, map_type: Literal["BASE", "MINI", "TOURNAMENT"]
+) -> np.ndarray:
+    """Return indices into critic feature vector that yield actor feature vector.
+    
+    The actor observation is [numeric, board] and the critic observation is
+    [full_numeric, board]. Since numeric is a prefix of full_numeric and the
+    board is identical, actor can be extracted from critic as:
+        actor = critic[indices]
+    where indices = [0..numeric_dim-1, full_numeric_dim..end]
+    
+    This allows storing only critic observations and deriving actor on demand.
+    """
+    numeric_dim = len(get_numeric_feature_names(num_players, map_type))
+    full_numeric_dim = len(get_full_numeric_feature_names(num_players, map_type))
+    board_dim = _board_tensor_size(num_players, map_type)
+    
+    numeric_indices = np.arange(numeric_dim)
+    board_indices = np.arange(full_numeric_dim, full_numeric_dim + board_dim)
+    return np.concatenate([numeric_indices, board_indices])
+
+
 def _augment_with_private_features(
     game: Game, base_sample: Dict[str, float], num_players: int, base_color: Color
 ) -> Dict[str, float]:

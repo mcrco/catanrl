@@ -6,6 +6,7 @@ from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE
 
 from ..envs.gym.single_env import create_opponents
 from ..algorithms.imitation_learning.dagger import train as dagger_train
+from ..algorithms.imitation_learning.dataset import EvictionStrategy
 
 
 def main():
@@ -140,6 +141,13 @@ def main():
         type=int,
         default=819200,
         help="Maximum samples in replay buffer (default: 819200)",
+    )
+    parser.add_argument(
+        "--eviction-strategy",
+        type=str,
+        choices=["random", "fifo", "correct"],
+        default="random",
+        help="Eviction strategy when dataset is full: random, fifo, or correct (default: random)",
     )
 
     # Environment
@@ -279,6 +287,7 @@ def main():
                 "beta_decay": args.beta_decay,
                 "beta_min": args.beta_min,
                 "max_dataset_size": args.max_dataset_size,
+                "eviction_strategy": args.eviction_strategy,
                 "eval_games_per_opponent": args.eval_games_per_opponent,
                 "seed": args.seed,
             },
@@ -307,6 +316,7 @@ def main():
         beta_decay=args.beta_decay,
         beta_min=args.beta_min,
         max_dataset_size=args.max_dataset_size,
+        eviction_strategy=EvictionStrategy(args.eviction_strategy),
         save_path=args.save_path,
         device=args.device,
         wandb_config=wandb_config,

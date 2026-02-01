@@ -1,14 +1,24 @@
 """
-Aggregated dataset for DAgger imitation learning with random eviction strategy.
+Aggregated dataset for DAgger imitation learning with configurable eviction strategy.
 """
 
 from __future__ import annotations
 
-from typing import List, Tuple
+from enum import Enum
+from typing import List, Literal, Tuple
 
 import numpy as np
 import torch
 from torch.utils.data import Dataset
+
+from catanrl.features.catanatron_utils import get_actor_indices_from_critic
+
+
+class EvictionStrategy(str, Enum):
+    """Strategy for evicting samples when dataset is full."""
+    RANDOM = "random"  # Randomly replace existing samples
+    FIFO = "fifo"      # Ring buffer - evict oldest samples first
+    CORRECT = "correct"  # Evict samples the model predicts correctly (not yet implemented)
 
 
 def _discount_rewards(rewards: List[float], gamma: float) -> List[float]:
@@ -22,33 +32,41 @@ def _discount_rewards(rewards: List[float], gamma: float) -> List[float]:
 
 
 class AggregatedDataset(Dataset):
-    """In-memory dataset for aggregated DAgger trajectories with random eviction.
+    """In-memory dataset for aggregated DAgger trajectories with configurable eviction.
     
-    When the dataset is full, new samples randomly replace existing samples
-    rather than following a FIFO (ring buffer) approach. This maintains better
-    diversity of game states across different games instead of only keeping
-    the most recent experiences.
+    Supports multiple eviction strategies when the dataset is full:
+    - RANDOM: Randomly replace existing samples
+    - FIFO: Ring buffer approach, evict oldest samples first
+    - CORRECT: Evict samples the model predicts correctly (not yet implemented)
     """
 
     def __init__(
         self,
-        actor_dim: int,
         critic_dim: int,
+        num_players: int,
+        map_type: Literal["BASE", "MINI", "TOURNAMENT"],
         max_size: int = 100_000_000,
+        eviction_strategy: EvictionStrategy = EvictionStrategy.RANDOM,
     ):
-        self.actor_dim = actor_dim
         self.critic_dim = critic_dim
+        self.num_players = num_players
+        self.map_type = map_type
         self.max_size = max_size
         self.capacity = max_size
+        self.eviction_strategy = eviction_strategy
 
-        # Preallocate full capacity.
-        self.actor_states = np.zeros((self.max_size, actor_dim), dtype=np.float32)
+        # Actor state is subset of critic state; these indices convert critic -> actor 
+        # so we don't double store overlapping board state.
+        self.actor_indices = get_actor_indices_from_critic(num_players, map_type)
+
+        # Preallocate full capacity - only store critic states
         self.critic_states = np.zeros((self.max_size, critic_dim), dtype=np.float32)
         self.actions = np.zeros((self.max_size,), dtype=np.int64)
         self.returns = np.zeros((self.max_size,), dtype=np.float32)
         self.is_single_action = np.zeros((self.max_size,), dtype=np.bool_)
 
         self.size = 0
+        self.head = 0  # Write pointer for FIFO eviction
 
     def __len__(self) -> int:
         return self.size
@@ -59,9 +77,13 @@ class AggregatedDataset(Dataset):
         if idx >= self.size:
             raise IndexError(f"Index {idx} out of bounds for size {self.size}")
 
+        critic = self.critic_states[idx]
+        # derive actor state on demand
+        actor = critic[self.actor_indices]
+
         return (
-            torch.from_numpy(self.actor_states[idx]),
-            torch.from_numpy(self.critic_states[idx]),
+            torch.from_numpy(actor.copy()),
+            torch.from_numpy(critic),
             torch.tensor(self.actions[idx], dtype=torch.long),
             torch.tensor(self.returns[idx], dtype=torch.float32),
             torch.tensor(self.is_single_action[idx], dtype=torch.bool),
@@ -76,21 +98,20 @@ class AggregatedDataset(Dataset):
         gamma: float,
         is_single_action: np.ndarray | List[bool],
     ) -> None:
-        """Add a full episode to the dataset using random eviction when full.
-        
-        When the dataset is at capacity, new samples randomly replace existing
-        samples to maintain diversity across different games rather than just
-        keeping the most recent experiences.
-        """
+        """Add a full episode to the dataset using the configured eviction strategy."""
+        if self.eviction_strategy == EvictionStrategy.CORRECT:
+            raise NotImplementedError(
+                "CORRECT eviction strategy requires model access and is not yet implemented"
+            )
+
         returns_list = _discount_rewards(rewards, gamma)
         returns = np.array(returns_list, dtype=np.float32)
 
-        actor_states = np.asarray(actor_states, dtype=np.float32)
         critic_states = np.asarray(critic_states, dtype=np.float32)
         expert_actions = np.asarray(expert_actions, dtype=np.int64)
         is_single_action = np.asarray(is_single_action, dtype=np.bool_)
 
-        num_samples = len(actor_states)
+        num_samples = len(critic_states)
         if num_samples == 0:
             return
 
@@ -98,33 +119,39 @@ class AggregatedDataset(Dataset):
         if num_samples <= available_space:
             start = self.size
             end = start + num_samples
-            self.actor_states[start:end] = actor_states
             self.critic_states[start:end] = critic_states
             self.actions[start:end] = expert_actions
             self.returns[start:end] = returns
             self.is_single_action[start:end] = is_single_action
             self.size += num_samples
+            self.head = self.size % self.capacity  # Update head for when we switch to eviction
         else:
             # Fill remaining space first
             if available_space > 0:
                 start = self.size
                 end = start + available_space
-                self.actor_states[start:end] = actor_states[:available_space]
                 self.critic_states[start:end] = critic_states[:available_space]
                 self.actions[start:end] = expert_actions[:available_space]
                 self.returns[start:end] = returns[:available_space]
                 self.is_single_action[start:end] = is_single_action[:available_space]
                 self.size = self.capacity
             
-            # Random eviction for remaining samples
+            # Evict and replace remaining samples
             remaining = num_samples - available_space
             if remaining > 0:
-                replace_indices = np.random.choice(
-                    self.capacity, size=remaining, replace=False
-                )
                 offset = available_space
                 
-                self.actor_states[replace_indices] = actor_states[offset:]
+                if self.eviction_strategy == EvictionStrategy.RANDOM:
+                    replace_indices = np.random.choice(
+                        self.capacity, size=remaining, replace=False
+                    )
+                elif self.eviction_strategy == EvictionStrategy.FIFO:
+                    # Ring buffer: write at head and advance
+                    replace_indices = np.arange(self.head, self.head + remaining) % self.capacity
+                    self.head = (self.head + remaining) % self.capacity
+                else:
+                    raise ValueError(f"Unknown eviction strategy: {self.eviction_strategy}")
+                
                 self.critic_states[replace_indices] = critic_states[offset:]
                 self.actions[replace_indices] = expert_actions[offset:]
                 self.returns[replace_indices] = returns[offset:]
@@ -134,4 +161,4 @@ class AggregatedDataset(Dataset):
         raise NotImplementedError("Use add_episode with batched data instead.")
 
 
-__all__ = ["AggregatedDataset", "_discount_rewards"]
+__all__ = ["AggregatedDataset", "EvictionStrategy", "_discount_rewards"]
