@@ -20,7 +20,7 @@ from tqdm import tqdm
 import wandb
 
 from ...envs.gym.single_env import create_opponents, make_vectorized_envs
-from ...eval.training_eval import evaluate_against_baselines
+from ...eval.training_eval import eval_policy_against_baselines
 from ...models import (
     PolicyValueNetworkWrapper,
     build_flat_policy_value_network,
@@ -513,7 +513,7 @@ def train(
             if len(buffer) >= rollout_steps:
                 bootstrap_states = flatten_observations(observations)
                 # Evaluate policy against baseline opponents
-                evaluate_against_baselines(
+                eval_policy_against_baselines(
                     policy_model=policy_value_to_policy_only(model),
                     model_type=model_type,
                     map_type=map_type,

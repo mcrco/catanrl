@@ -22,7 +22,7 @@ from ...features.catanatron_utils import (
     get_full_numeric_feature_names,
     get_numeric_feature_names,
 )
-from ...eval.training_eval import evaluate_against_baselines
+from ...eval.training_eval import eval_policy_against_baselines
 from ...models.backbones import BackboneConfig, MLPBackboneConfig, CrossDimensionalBackboneConfig
 from ...models.models import (
     build_flat_policy_network,
@@ -712,7 +712,7 @@ def train(
                     # Evaluate policy against catanatron bots
                     policy_agent.model.eval()
                     with torch.no_grad():
-                        eval_metrics = evaluate_against_baselines(
+                        eval_metrics = eval_policy_against_baselines(
                             policy_model=policy_model,
                             model_type=model_type,
                             map_type=map_type,

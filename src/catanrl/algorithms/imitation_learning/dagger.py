@@ -33,7 +33,7 @@ from ...models.models import (
     build_value_network,
 )
 from ...models.wrappers import PolicyNetworkWrapper, ValueNetworkWrapper
-from ...eval.training_eval import evaluate_against_baselines
+from ...eval.training_eval import eval_policy_value_against_baselines
 
 
 def _mask_logits(
@@ -701,6 +701,7 @@ def train(
 
     beta = beta_init
     best_eval_win_rate = float("-inf")
+    best_eval_critic_mse = float("inf")
     total_steps = n_iterations * steps_per_iteration
     global_step = 0
 
@@ -739,19 +740,27 @@ def train(
                     max_grad_norm=max_grad_norm,
                 )
 
-                # Evaluate against baselines (same as MARL PPO)
+                # Evaluate policy against baselines and critic value predictions
                 policy_model.eval()
+                critic_model.eval()
                 with torch.no_grad():
-                    eval_metrics = evaluate_against_baselines(
+                    eval_metrics = eval_policy_value_against_baselines(
                         policy_model=policy_model,
+                        critic_model=critic_model,
                         model_type=model_type,
                         map_type=map_type,
-                        num_games=eval_games_per_opponent,
+                        num_episodes=50,
+                        gamma=gamma,
+                        opponent_configs=opponent_configs,
                         seed=random.randint(0, sys.maxsize),
-                        log_to_wandb=True,
+                        log_to_wandb=False,
                         global_step=global_step,
+                        eval_policy=True,
+                        policy_eval_games=eval_games_per_opponent,
+                        device=device,
                     )
                 policy_model.train()
+                critic_model.train()
 
                 eval_win_rate = float(eval_metrics.get("eval/win_rate_vs_value", 0.0))
                 pbar.set_postfix(
@@ -767,9 +776,15 @@ def train(
                     best_eval_win_rate = eval_win_rate
                     os.makedirs(save_path, exist_ok=True)
                     policy_path = os.path.join(save_path, "policy_best.pt")
-                    critic_path = os.path.join(save_path, "critic_best.pt")
                     torch.save(policy_model.state_dict(), policy_path)
+
+                eval_critic_mse = eval_metrics.get("eval/value_mse", float("inf"))
+                if eval_critic_mse < best_critic_mse:
+                    best_eval_critic_mse = eval_critic_mse
+                    os.makedirs(save_path, exist_ok=True)
+                    critic_path = os.path.join(save_path, "critic_best.pt")
                     torch.save(critic_model.state_dict(), critic_path)
+
 
                 # Save periodic checkpoints
                 os.makedirs(save_path, exist_ok=True)
