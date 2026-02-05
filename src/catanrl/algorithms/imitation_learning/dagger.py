@@ -779,7 +779,7 @@ def train(
                     torch.save(policy_model.state_dict(), policy_path)
 
                 eval_critic_mse = eval_metrics.get("eval/value_mse", float("inf"))
-                if eval_critic_mse < best_critic_mse:
+                if eval_critic_mse < best_eval_critic_mse:
                     best_eval_critic_mse = eval_critic_mse
                     os.makedirs(save_path, exist_ok=True)
                     critic_path = os.path.join(save_path, "critic_best.pt")
