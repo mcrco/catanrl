@@ -190,8 +190,6 @@ def eval_policy_value_against_baselines(
         # Episode tracking
         episodes_completed = 0
         wins = 0
-        vps_list = []
-        total_vps_list = []
         turns_list = []
 
         # Episode buffers for each env
@@ -255,19 +253,15 @@ def eval_policy_value_against_baselines(
                         ep_rewards = np.array(ep_buffers[idx]["rewards"], dtype=np.float32)
                         ep_critic_states = np.array(ep_buffers[idx]["critic_states"], dtype=np.float32)
 
-                        # Extract episode metrics from info
-                        # The final reward indicates win (+1) or loss (-1)
-                        episode_reward = float(np.sum(ep_rewards))
-                        nn_won = ep_rewards[-1] > 0  # Win reward is positive
+                        # Detect win by checking if final reward equals win_weight (1.0), true for both shaped and win reward.
+                        final_reward = ep_rewards[-1]
+                        nn_won = abs(final_reward - 1.0) < 1e-6
 
                         if nn_won:
                             wins += 1
 
-                        # We don't have direct access to VPs in vectorized env, so use episode length as proxy
+                        # Track episode length (turns)
                         turns_list.append(ep_buffers[idx]["steps"])
-                        # Approximate VPs based on shaped reward (this is a rough estimate)
-                        vps_list.append(max(0, episode_reward))
-                        total_vps_list.append(10)  # Placeholder since we can't get opponent VPs easily
 
                         # Compute discounted returns
                         T = len(ep_rewards)
@@ -295,8 +289,6 @@ def eval_policy_value_against_baselines(
 
         # Log policy metrics for this opponent
         metrics[f"eval/win_rate_vs_{opponent_name}"] = wins / num_games if num_games > 0 else 0.0
-        metrics[f"eval/avg_vps_vs_{opponent_name}"] = sum(vps_list) / len(vps_list) if vps_list else 0.0
-        metrics[f"eval/avg_total_vps_vs_{opponent_name}"] = sum(total_vps_list) / len(total_vps_list) if total_vps_list else 0.0
         metrics[f"eval/avg_turns_vs_{opponent_name}"] = sum(turns_list) / len(turns_list) if turns_list else 0.0
 
     # Compute critic metrics
