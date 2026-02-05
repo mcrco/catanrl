@@ -113,8 +113,8 @@ def main():
         "--opponent-configs",
         type=str,
         nargs="+",
-        default=["V"],
-        help="Opponent player config strings (e.g., 'V' for ValueFunctionPlayer, 'random')",
+        default=["F"],
+        help="Opponent player config strings (e.g., 'F' for ValueFunctionPlayer, 'random')",
     )
 
     # Model weights
