@@ -749,14 +749,11 @@ def train(
                         critic_model=critic_model,
                         model_type=model_type,
                         map_type=map_type,
-                        num_episodes=50,
+                        num_games=eval_games_per_opponent,
                         gamma=gamma,
-                        opponent_configs=opponent_configs,
                         seed=random.randint(0, sys.maxsize),
                         log_to_wandb=False,
                         global_step=global_step,
-                        eval_policy=True,
-                        policy_eval_games=eval_games_per_opponent,
                         device=device,
                     )
                 policy_model.train()

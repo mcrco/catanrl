@@ -22,7 +22,7 @@ from ...features.catanatron_utils import (
     get_full_numeric_feature_names,
     get_numeric_feature_names,
 )
-from ...eval.training_eval import eval_policy_against_baselines
+from ...eval.training_eval import eval_policy_value_against_baselines
 from ...models.backbones import BackboneConfig, MLPBackboneConfig, CrossDimensionalBackboneConfig
 from ...models.models import (
     build_flat_policy_network,
@@ -587,6 +587,7 @@ def train(
 
     metric_window = max(1, metric_window)
     best_eval_win_rate = -float("inf")
+    best_eval_critic_mse = float("inf")
     global_step = 0
     total_episodes = 0
     ppo_update_count = 0
@@ -709,18 +710,23 @@ def train(
                         torch.save(policy_model.state_dict(), policy_path)
                         torch.save(critic_model.state_dict(), critic_path)
 
-                    # Evaluate policy against catanatron bots
+                    # Evaluate policy against catanatron bots and critic value predictions
                     policy_agent.model.eval()
+                    critic_model.eval()
                     with torch.no_grad():
-                        eval_metrics = eval_policy_against_baselines(
+                        eval_metrics = eval_policy_value_against_baselines(
                             policy_model=policy_model,
+                            critic_model=critic_model,
                             model_type=model_type,
                             map_type=map_type,
                             num_games=eval_games_per_opponent,
-                            seed=random.randint(0, sys.maxsize), # different random games each time
+                            gamma=gamma,
+                            seed=random.randint(0, sys.maxsize),  # different random games each time
                             log_to_wandb=True,
                             global_step=global_step,
+                            device=device,
                         )
+
                     if save_path:
                         eval_win_rate = float(eval_metrics.get("eval/win_rate_vs_value", 0.0))
                         if eval_win_rate > best_eval_win_rate:
@@ -728,17 +734,21 @@ def train(
                             save_dir = save_path
                             os.makedirs(save_dir, exist_ok=True)
                             best_policy_path = os.path.join(save_dir, "policy_best.pt")
-                            best_critic_path = os.path.join(save_dir, "critic_best.pt")
                             torch.save(policy_model.state_dict(), best_policy_path)
+                            if wandb.run is not None:
+                                wandb.run.summary["best_eval_win_rate_vs_value"] = best_eval_win_rate
+                            print(f"  → Saved best policy (eval win rate vs value: {best_eval_win_rate:.3f})")
+
+                        eval_critic_mse = eval_metrics.get("eval/value_mse", float("inf"))
+                        if eval_critic_mse < best_eval_critic_mse:
+                            best_eval_critic_mse = eval_critic_mse
+                            save_dir = save_path
+                            os.makedirs(save_dir, exist_ok=True)
+                            best_critic_path = os.path.join(save_dir, "critic_best.pt")
                             torch.save(critic_model.state_dict(), best_critic_path)
                             if wandb.run is not None:
-                                wandb.run.summary["best_eval_win_rate_vs_value"] = (
-                                    best_eval_win_rate
-                                )
-                            print(
-                                "  → Saved best models "
-                                f"(eval win rate vs value: {best_eval_win_rate:.3f})"
-                            )
+                                wandb.run.summary["best_eval_critic_mse"] = best_eval_critic_mse
+                            print(f"  → Saved best critic (eval MSE: {best_eval_critic_mse:.4f})")
 
     finally:
         envs.close()
