@@ -16,6 +16,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import wandb
+from sklearn.metrics import f1_score
 from pufferlib.emulation import nativize
 
 from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE
@@ -25,6 +26,10 @@ from .dataset import AggregatedDataset, EvictionStrategy, _discount_rewards
 from ...envs.gym.single_env import (
     compute_single_agent_dims,
     make_puffer_vectorized_envs,
+)
+from ...envs.gym.puffer_rollout_utils import (
+    flatten_puffer_observation,
+    get_action_mask_from_obs,
 )
 from ...models.backbones import BackboneConfig, MLPBackboneConfig, CrossDimensionalBackboneConfig
 from ...models.models import (
@@ -182,24 +187,6 @@ class DAggerCollectStats:
     dataset_size: int
 
 
-def _flatten_puffer_observation(obs: Dict[str, Any]) -> Tuple[np.ndarray, np.ndarray]:
-    """Convert Puffer observation dict to flattened actor and critic vectors."""
-    actor_obs = obs["observation"]
-    numeric = np.asarray(actor_obs["numeric"], dtype=np.float32).reshape(-1)
-    board = np.asarray(actor_obs["board"], dtype=np.float32)
-    # board is (C, W, H), transpose to (W, H, C) then flatten
-    board_wh_last = np.transpose(board, (1, 2, 0))
-    board_flat = board_wh_last.reshape(-1)
-    actor_vec = np.concatenate([numeric, board_flat], axis=0)
-    critic_vec = np.asarray(obs["critic"], dtype=np.float32).reshape(-1)
-    return actor_vec, critic_vec
-
-
-def _get_action_mask_from_obs(obs: Dict[str, Any]) -> np.ndarray:
-    """Extract action mask from Puffer observation."""
-    return np.asarray(obs["action_mask"], dtype=np.int8) > 0
-
-
 def _extract_expert_actions_from_infos(infos: Any, batch_size: int) -> np.ndarray:
     """Extract expert actions from PufferLib vectorized env infos.
 
@@ -295,8 +282,8 @@ def _collect_dagger_rollouts_vectorized(
         # Decode observations
         for idx in range(batch_size):
             structured = nativize(observations[idx], obs_space, obs_dtype)
-            actor_batch[idx], critic_batch[idx] = _flatten_puffer_observation(structured)
-            action_masks[idx] = _get_action_mask_from_obs(structured)
+            actor_batch[idx], critic_batch[idx] = flatten_puffer_observation(structured)
+            action_masks[idx] = get_action_mask_from_obs(structured)
 
         # Get policy actions
         actor_tensor = torch.from_numpy(actor_batch).float().to(device)
@@ -420,20 +407,22 @@ def _train_on_dataset(
 ) -> Dict[str, float]:
     """Run supervised updates on the aggregated dataset with separate policy/critic."""
     if len(dataset) == 0 or epochs <= 0:
-        return {"total_loss": 0.0, "policy_loss": 0.0, "value_loss": 0.0, "accuracy": 0.0}
+        return {"total_loss": 0.0, "policy_loss": 0.0, "value_loss": 0.0, "accuracy": 0.0, "f1_score": 0.0}
 
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=False)
     policy_model.train()
     critic_model.train()
 
-    total_loss = 0.0
-    total_policy_loss = 0.0
-    total_value_loss = 0.0
-    correct = 0
-    total_samples = 0
-    n_updates = 0
-
     for _ in range(epochs):
+        # Reset all metric counters each epoch (only report last epoch)
+        total_loss = 0.0
+        total_policy_loss = 0.0
+        total_value_loss = 0.0
+        correct = 0
+        total_samples = 0
+        all_labels = []
+        all_preds = []
+        n_updates = 0
         for actor_features, critic_features, actions, returns, is_single_action in loader:
             actor_features = actor_features.to(device)
             critic_features = critic_features.to(device)
@@ -477,15 +466,24 @@ def _train_on_dataset(
             if non_single_mask.any():
                 correct += int(((predictions == actions) & non_single_mask).sum().item())
                 total_samples += int(non_single_mask.sum().item())
+                # Collect labels and predictions for F1 calculation
+                all_labels.extend(actions[non_single_mask].cpu().numpy().tolist())
+                all_preds.extend(predictions[non_single_mask].cpu().numpy().tolist())
             n_updates += 1
 
     n_updates = max(n_updates, 1)
     accuracy = correct / total_samples if total_samples else 0.0
+    # Compute macro F1 score across all action classes
+    if all_labels and all_preds:
+        f1 = f1_score(all_labels, all_preds, average="macro", zero_division=0.0)
+    else:
+        f1 = 0.0
     return {
         "total_loss": total_loss / n_updates,
         "policy_loss": total_policy_loss / n_updates,
         "value_loss": total_value_loss / n_updates,
         "accuracy": accuracy,
+        "f1_score": f1,
     }
 
 
@@ -702,7 +700,7 @@ def train(
     beta = beta_init
     best_eval_win_rate = float("-inf")
     best_eval_critic_mse = float("inf")
-    total_steps = n_iterations * steps_per_iteration
+    total_steps = n_iterations * num_envs * steps_per_iteration
     global_step = 0
 
     try:
@@ -799,6 +797,7 @@ def train(
                         "dagger/train_policy_loss": train_stats["policy_loss"],
                         "dagger/train_value_loss": train_stats["value_loss"],
                         "dagger/train_accuracy": train_stats["accuracy"],
+                        "dagger/train_f1_score": train_stats["f1_score"],
                         "dagger/beta": beta,
                         **eval_metrics,
                     },
