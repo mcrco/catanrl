@@ -12,6 +12,7 @@ import torch
 import wandb
 from catanatron.models.player import RandomPlayer
 from catanatron.players.value import ValueFunctionPlayer
+from sklearn.metrics import f1_score
 
 from ..features.catanatron_utils import COLOR_ORDER
 from ..models.wrappers import PolicyNetworkWrapper, ValueNetworkWrapper
@@ -95,6 +96,8 @@ def eval_policy_value_against_baselines(
     log_to_wandb: bool = True,
     global_step: Optional[int] = None,
     device: Optional[str] = None,
+    compare_to_expert: bool = False,
+    expert_config: Optional[str] = None,
 ) -> Dict[str, float]:
     """
     Evaluate policy against baselines and critic prediction accuracy in a single loop.
@@ -117,6 +120,8 @@ def eval_policy_value_against_baselines(
         log_to_wandb: Whether to log metrics to wandb.
         global_step: Global training step for wandb logging.
         device: Torch device.
+        compare_to_expert: Whether to compute accuracy/F1 against expert labels.
+        expert_config: Expert config to use for labels when compare_to_expert is True.
 
     Returns:
         Dictionary containing all evaluation metrics.
@@ -139,16 +144,23 @@ def eval_policy_value_against_baselines(
     all_value_preds = []
     all_returns = []
 
+    all_expert_labels = []
+    all_expert_preds = []
+
     for opponent_name, opponent_configs in opponent_configs_list:
-        wins, turns_list, value_preds, returns = run_policy_value_eval_vectorized(
-            policy_model=policy_model,
-            critic_model=critic_model,
-            model_type=model_type,
-            map_type=map_type,
-            num_games=num_games,
-            gamma=gamma,
-            opponent_configs=opponent_configs,
-            device=device,
+        wins, turns_list, value_preds, returns, expert_labels, expert_preds = (
+            run_policy_value_eval_vectorized(
+                policy_model=policy_model,
+                critic_model=critic_model,
+                model_type=model_type,
+                map_type=map_type,
+                num_games=num_games,
+                gamma=gamma,
+                opponent_configs=opponent_configs,
+                device=device,
+                compare_to_expert=compare_to_expert,
+                expert_config=expert_config,
+            )
         )
 
         # Log policy metrics for this opponent
@@ -157,6 +169,8 @@ def eval_policy_value_against_baselines(
 
         all_value_preds.extend(value_preds)
         all_returns.extend(returns)
+        all_expert_labels.extend(expert_labels)
+        all_expert_preds.extend(expert_preds)
 
     # Compute critic metrics
     if len(all_value_preds) > 0:
@@ -181,6 +195,14 @@ def eval_policy_value_against_baselines(
         metrics["eval/value_explained_variance"] = explained_var
         metrics["eval/value_mean_pred"] = float(np.mean(value_preds))
         metrics["eval/value_mean_return"] = float(np.mean(returns))
+
+    if compare_to_expert and all_expert_labels:
+        labels = np.array(all_expert_labels, dtype=np.int64)
+        preds = np.array(all_expert_preds, dtype=np.int64)
+        metrics["eval/acc_vs_expert"] = float(np.mean(labels == preds))
+        metrics["eval/f1_score_vs_expert"] = float(
+            f1_score(labels, preds, average="macro", zero_division=0.0)
+        )
 
     if log_to_wandb and global_step is not None:
         wandb.log(metrics, step=global_step)

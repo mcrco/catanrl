@@ -30,6 +30,30 @@ def get_action_mask_from_obs(obs: Dict[str, Any]) -> np.ndarray:
     return np.asarray(obs["action_mask"], dtype=np.int8) > 0
 
 
+def extract_expert_actions_from_infos(infos: Any, batch_size: int) -> np.ndarray:
+    """Extract expert actions from PufferLib vectorized env infos."""
+    expert_actions = np.zeros(batch_size, dtype=np.int64)
+
+    if isinstance(infos, dict) and "expert_action" in infos:
+        expert_arr = infos["expert_action"]
+        if hasattr(expert_arr, "__len__") and len(expert_arr) == batch_size:
+            expert_actions[:] = expert_arr
+        else:
+            expert_actions[:] = int(expert_arr)
+    elif isinstance(infos, (list, tuple)):
+        for idx, info in enumerate(infos):
+            if isinstance(info, dict) and "expert_action" in info:
+                expert_actions[idx] = int(info["expert_action"])
+    elif hasattr(infos, "__iter__"):
+        for idx, info in enumerate(infos):
+            if idx >= batch_size:
+                break
+            if isinstance(info, dict) and "expert_action" in info:
+                expert_actions[idx] = int(info["expert_action"])
+
+    return expert_actions
+
+
 @dataclass
 class EpisodeBuffer:
     critic_states: List[np.ndarray]

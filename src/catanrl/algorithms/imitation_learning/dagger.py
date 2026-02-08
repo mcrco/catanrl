@@ -28,6 +28,7 @@ from ...envs.gym.single_env import (
     make_puffer_vectorized_envs,
 )
 from ...envs.gym.puffer_rollout_utils import (
+    extract_expert_actions_from_infos,
     flatten_puffer_observation,
     get_action_mask_from_obs,
 )
@@ -187,37 +188,6 @@ class DAggerCollectStats:
     dataset_size: int
 
 
-def _extract_expert_actions_from_infos(infos: Any, batch_size: int) -> np.ndarray:
-    """Extract expert actions from PufferLib vectorized env infos.
-
-    The infos from puffer vectorized envs can be structured as a dict of arrays
-    or as a list of dicts. This handles both cases.
-    """
-    expert_actions = np.zeros(batch_size, dtype=np.int64)
-
-    if isinstance(infos, dict) and "expert_action" in infos:
-        # Dict of arrays format
-        expert_arr = infos["expert_action"]
-        if hasattr(expert_arr, "__len__") and len(expert_arr) == batch_size:
-            expert_actions[:] = expert_arr
-        else:
-            expert_actions[:] = int(expert_arr)
-    elif isinstance(infos, (list, tuple)):
-        # List of dicts format
-        for idx, info in enumerate(infos):
-            if isinstance(info, dict) and "expert_action" in info:
-                expert_actions[idx] = int(info["expert_action"])
-    elif hasattr(infos, "__iter__"):
-        # Try to iterate over infos
-        for idx, info in enumerate(infos):
-            if idx >= batch_size:
-                break
-            if isinstance(info, dict) and "expert_action" in info:
-                expert_actions[idx] = int(info["expert_action"])
-
-    return expert_actions
-
-
 def _collect_dagger_rollouts_vectorized(
     envs: Any,
     policy_model: PolicyNetworkWrapper,
@@ -297,7 +267,7 @@ def _collect_dagger_rollouts_vectorized(
         )
 
         # Get expert actions from info dict (computed by the env)
-        expert_actions = _extract_expert_actions_from_infos(infos, batch_size)
+        expert_actions = extract_expert_actions_from_infos(infos, batch_size)
 
         # Determine which steps are single-action steps (only 1 valid action)
         num_valid_actions = action_masks.sum(axis=1)
@@ -514,6 +484,8 @@ def train(
     device: Optional[str] = None,
     wandb_config: Optional[Dict[str, Any]] = None,
     eval_games_per_opponent: int = 250,
+    eval_compare_to_expert: bool = False,
+    eval_expert_config: Optional[str] = None,
     seed: int = 42,
     num_envs: int = 4,
     reward_function: Literal["shaped", "win"] = "shaped",
@@ -552,6 +524,8 @@ def train(
         device: Torch device ("cuda" or "cpu")
         wandb_config: W&B initialization config
         eval_games_per_opponent: Number of games to play against each baseline opponent
+        eval_compare_to_expert: Whether to compute expert-accuracy/F1 during eval
+        eval_expert_config: Expert config to use for eval labels (defaults to expert_config)
         seed: Random seed
         num_envs: Number of parallel environments
         reward_function: Reward function type ("shaped" or "win")
@@ -741,6 +715,9 @@ def train(
                 # Evaluate policy against baselines and critic value predictions
                 policy_model.eval()
                 critic_model.eval()
+                eval_expert_cfg = (
+                    eval_expert_config if eval_expert_config is not None else expert_config
+                )
                 with torch.no_grad():
                     eval_metrics = eval_policy_value_against_baselines(
                         policy_model=policy_model,
@@ -753,6 +730,8 @@ def train(
                         log_to_wandb=False,
                         global_step=global_step,
                         device=device,
+                        compare_to_expert=eval_compare_to_expert,
+                        expert_config=eval_expert_cfg,
                     )
                 policy_model.train()
                 critic_model.train()

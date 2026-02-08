@@ -128,7 +128,7 @@ def main():
         "--beta-decay",
         type=float,
         default=0.95,
-        help="Multiplicative decay for beta per iteration (default: 0.9)",
+        help="Multiplicative decay for beta per iteration (default: 0.95)",
     )
     parser.add_argument(
         "--beta-min",

@@ -4,7 +4,7 @@ Vectorized rollout helpers for policy/value evaluation.
 
 from __future__ import annotations
 
-from typing import List, Optional, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple, Literal
 
 import numpy as np
 import torch
@@ -14,6 +14,7 @@ from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE
 
 from ..envs.gym.puffer_rollout_utils import (
     EpisodeBuffer,
+    extract_expert_actions_from_infos,
     flatten_puffer_observation,
     get_action_mask_from_obs,
     init_episode_buffers,
@@ -39,13 +40,15 @@ def run_policy_value_eval_vectorized(
     policy_model: PolicyNetworkWrapper,
     critic_model: ValueNetworkWrapper,
     model_type: str,
-    map_type: str,
+    map_type: Literal["BASE", "TOURNAMENT", "MINI"],
     num_games: int,
     gamma: float,
     opponent_configs: Sequence[str],
     device: Optional[str] = None,
     num_envs: Optional[int] = None,
-) -> Tuple[int, List[int], List[float], List[float]]:
+    compare_to_expert: bool = False,
+    expert_config: Optional[str] = None,
+) -> Tuple[int, List[int], List[float], List[float], List[int], List[int]]:
     """Run vectorized eval for a policy/critic against a single opponent set.
 
     Returns:
@@ -53,10 +56,15 @@ def run_policy_value_eval_vectorized(
         turns_list: episode lengths
         value_preds: critic predictions across all episodes
         returns: discounted returns across all episodes
+        expert_labels: expert action labels (filtered)
+        expert_preds: predicted actions (filtered)
     """
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
     torch_device = torch.device(device)
+
+    if compare_to_expert and not expert_config:
+        raise ValueError("expert_config must be provided when compare_to_expert is True")
 
     policy_model.eval()
     critic_model.eval()
@@ -76,7 +84,7 @@ def run_policy_value_eval_vectorized(
         map_type=map_type,
         opponent_configs=list(opponent_configs),
         num_envs=num_envs,
-        expert_config=None,
+        expert_config=expert_config if compare_to_expert else None,
     )
 
     driver_env = envs.driver_env
@@ -94,10 +102,12 @@ def run_policy_value_eval_vectorized(
     turns_list: List[int] = []
     all_value_preds: List[float] = []
     all_returns: List[float] = []
+    all_expert_labels: List[int] = []
+    all_expert_preds: List[int] = []
 
     ep_buffers = init_episode_buffers(num_envs)
 
-    observations, _ = envs.reset()
+    observations, infos = envs.reset()
 
     try:
         while episodes_completed < num_games:
@@ -119,8 +129,9 @@ def run_policy_value_eval_vectorized(
 
             with torch.no_grad():
                 actor_tensor = torch.from_numpy(actor_batch).float().to(torch_device)
-                policy_logits = _get_policy_logits(policy_model, actor_tensor, model_type)
-
+                policy_logits = _get_policy_logits(
+                    policy_model, actor_tensor, model_type
+                )
                 mask_tensor = torch.as_tensor(
                     action_masks, dtype=torch.bool, device=torch_device
                 )
@@ -134,7 +145,18 @@ def run_policy_value_eval_vectorized(
                 dist = torch.distributions.Categorical(probs=probs)
                 actions = dist.sample().cpu().numpy()
 
-            next_observations, rewards, terminations, truncations, _ = envs.step(actions)
+            if compare_to_expert:
+                expert_actions = extract_expert_actions_from_infos(infos, batch_size)
+                non_single_mask = action_masks.sum(axis=1) > 1
+                pred_actions = torch.argmax(masked_logits, dim=-1).cpu().numpy()
+                for idx in range(batch_size):
+                    if non_single_mask[idx]:
+                        all_expert_labels.append(int(expert_actions[idx]))
+                        all_expert_preds.append(int(pred_actions[idx]))
+
+            next_observations, rewards, terminations, truncations, infos = envs.step(
+                actions
+            )
             rewards = rewards.astype(np.float32)
             dones = np.logical_or(terminations, truncations)
 
@@ -183,4 +205,4 @@ def run_policy_value_eval_vectorized(
     finally:
         envs.close()
 
-    return wins, turns_list, all_value_preds, all_returns
+    return wins, turns_list, all_value_preds, all_returns, all_expert_labels, all_expert_preds
