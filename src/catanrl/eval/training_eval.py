@@ -145,10 +145,19 @@ def eval_policy_value_against_baselines(
     all_returns = []
 
     all_expert_labels = []
-    all_expert_preds = []
+    all_expert_masked_preds = []
+    all_expert_raw_preds = []
 
     for opponent_name, opponent_configs in opponent_configs_list:
-        wins, turns_list, value_preds, returns, expert_labels, expert_preds = (
+        (
+            wins,
+            turns_list,
+            value_preds,
+            returns,
+            expert_labels,
+            expert_masked_preds,
+            expert_raw_preds,
+        ) = (
             run_policy_value_eval_vectorized(
                 policy_model=policy_model,
                 critic_model=critic_model,
@@ -170,7 +179,8 @@ def eval_policy_value_against_baselines(
         all_value_preds.extend(value_preds)
         all_returns.extend(returns)
         all_expert_labels.extend(expert_labels)
-        all_expert_preds.extend(expert_preds)
+        all_expert_masked_preds.extend(expert_masked_preds)
+        all_expert_raw_preds.extend(expert_raw_preds)
 
     # Compute critic metrics
     if len(all_value_preds) > 0:
@@ -198,10 +208,17 @@ def eval_policy_value_against_baselines(
 
     if compare_to_expert and all_expert_labels:
         labels = np.array(all_expert_labels, dtype=np.int64)
-        preds = np.array(all_expert_preds, dtype=np.int64)
-        metrics["eval/acc_vs_expert"] = float(np.mean(labels == preds))
-        metrics["eval/f1_score_vs_expert"] = float(
-            f1_score(labels, preds, average="macro", zero_division=0.0)
+        masked_preds = np.array(all_expert_masked_preds, dtype=np.int64)
+        raw_preds = np.array(all_expert_raw_preds, dtype=np.int64)
+        metrics["eval/acc_vs_expert_masked_logits"] = float(
+            np.mean(labels == masked_preds)
+        )
+        metrics["eval/acc_vs_expert_raw_logits"] = float(np.mean(labels == raw_preds))
+        metrics["eval/f1_score_vs_expert_masked_logits"] = float(
+            f1_score(labels, masked_preds, average="macro", zero_division=0.0)
+        )
+        metrics["eval/f1_score_vs_expert_raw_logits"] = float(
+            f1_score(labels, raw_preds, average="macro", zero_division=0.0)
         )
 
     if log_to_wandb and global_step is not None:

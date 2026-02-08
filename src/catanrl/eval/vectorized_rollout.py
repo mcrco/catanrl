@@ -48,7 +48,7 @@ def run_policy_value_eval_vectorized(
     num_envs: Optional[int] = None,
     compare_to_expert: bool = False,
     expert_config: Optional[str] = None,
-) -> Tuple[int, List[int], List[float], List[float], List[int], List[int]]:
+) -> Tuple[int, List[int], List[float], List[float], List[int], List[int], List[int]]:
     """Run vectorized eval for a policy/critic against a single opponent set.
 
     Returns:
@@ -57,7 +57,8 @@ def run_policy_value_eval_vectorized(
         value_preds: critic predictions across all episodes
         returns: discounted returns across all episodes
         expert_labels: expert action labels (filtered)
-        expert_preds: predicted actions (filtered)
+        expert_masked_preds: predicted actions from masked logits (filtered)
+        expert_raw_preds: predicted actions from raw logits (filtered)
     """
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -103,7 +104,8 @@ def run_policy_value_eval_vectorized(
     all_value_preds: List[float] = []
     all_returns: List[float] = []
     all_expert_labels: List[int] = []
-    all_expert_preds: List[int] = []
+    all_expert_masked_preds: List[int] = []
+    all_expert_raw_preds: List[int] = []
 
     ep_buffers = init_episode_buffers(num_envs)
 
@@ -148,11 +150,13 @@ def run_policy_value_eval_vectorized(
             if compare_to_expert:
                 expert_actions = extract_expert_actions_from_infos(infos, batch_size)
                 non_single_mask = action_masks.sum(axis=1) > 1
-                pred_actions = torch.argmax(masked_logits, dim=-1).cpu().numpy()
+                pred_masked = torch.argmax(masked_logits, dim=-1).cpu().numpy()
+                pred_raw = torch.argmax(policy_logits, dim=-1).cpu().numpy()
                 for idx in range(batch_size):
                     if non_single_mask[idx]:
                         all_expert_labels.append(int(expert_actions[idx]))
-                        all_expert_preds.append(int(pred_actions[idx]))
+                        all_expert_masked_preds.append(int(pred_masked[idx]))
+                        all_expert_raw_preds.append(int(pred_raw[idx]))
 
             next_observations, rewards, terminations, truncations, infos = envs.step(
                 actions
@@ -205,4 +209,12 @@ def run_policy_value_eval_vectorized(
     finally:
         envs.close()
 
-    return wins, turns_list, all_value_preds, all_returns, all_expert_labels, all_expert_preds
+    return (
+        wins,
+        turns_list,
+        all_value_preds,
+        all_returns,
+        all_expert_labels,
+        all_expert_masked_preds,
+        all_expert_raw_preds,
+    )
