@@ -11,6 +11,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
+from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE
 from catanrl.features.catanatron_utils import get_actor_indices_from_critic
 
 
@@ -54,6 +55,7 @@ class AggregatedDataset(Dataset):
         self.actions = np.zeros((self.max_size,), dtype=np.int64)
         self.returns = np.zeros((self.max_size,), dtype=np.float32)
         self.is_single_action = np.zeros((self.max_size,), dtype=np.bool_)
+        self.action_masks = np.zeros((self.max_size, ACTION_SPACE_SIZE), dtype=np.bool_)
 
         self.size = 0
         self.head = 0  # Write pointer for FIFO eviction
@@ -63,20 +65,22 @@ class AggregatedDataset(Dataset):
 
     def __getitem__(
         self, idx: int
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         if idx >= self.size:
             raise IndexError(f"Index {idx} out of bounds for size {self.size}")
+        idx_int = int(idx)
 
-        critic = self.critic_states[idx]
+        critic = self.critic_states[idx_int]
         # derive actor state on demand
         actor = critic[self.actor_indices]
 
         return (
             torch.from_numpy(actor.copy()),
             torch.from_numpy(critic),
-            torch.tensor(self.actions[idx], dtype=torch.long),
-            torch.tensor(self.returns[idx], dtype=torch.float32),
-            torch.tensor(self.is_single_action[idx], dtype=torch.bool),
+            torch.tensor(np.take(self.actions, idx_int), dtype=torch.long),
+            torch.tensor(np.take(self.returns, idx_int), dtype=torch.float32),
+            torch.tensor(np.take(self.is_single_action, idx_int), dtype=torch.bool),
+            torch.from_numpy(np.take(self.action_masks, idx_int, axis=0)),
         )
 
     def add_samples(
@@ -85,6 +89,7 @@ class AggregatedDataset(Dataset):
         expert_actions: np.ndarray | List[int],
         returns: np.ndarray | List[float],
         is_single_action: np.ndarray | List[bool],
+        action_masks: np.ndarray | List[np.ndarray],
     ) -> None:
         """Add precomputed transition samples using the configured eviction strategy."""
         if self.eviction_strategy == EvictionStrategy.CORRECT:
@@ -96,12 +101,14 @@ class AggregatedDataset(Dataset):
         expert_actions = np.asarray(expert_actions, dtype=np.int64)
         returns = np.asarray(returns, dtype=np.float32)
         is_single_action = np.asarray(is_single_action, dtype=np.bool_)
+        action_masks = np.asarray(action_masks, dtype=np.bool_)
 
         self._add_samples(
             critic_states=critic_states,
             expert_actions=expert_actions,
             returns=returns,
             is_single_action=is_single_action,
+            action_masks=action_masks,
         )
 
     def _add_samples(
@@ -110,6 +117,7 @@ class AggregatedDataset(Dataset):
         expert_actions: np.ndarray,
         returns: np.ndarray,
         is_single_action: np.ndarray,
+        action_masks: np.ndarray,
     ) -> None:
         num_samples = len(critic_states)
         if num_samples == 0:
@@ -118,6 +126,7 @@ class AggregatedDataset(Dataset):
             len(expert_actions) != num_samples
             or len(returns) != num_samples
             or len(is_single_action) != num_samples
+            or len(action_masks) != num_samples
         ):
             raise ValueError("Mismatched sample counts in add_samples inputs.")
 
@@ -129,6 +138,7 @@ class AggregatedDataset(Dataset):
             self.actions[start:end] = expert_actions
             self.returns[start:end] = returns
             self.is_single_action[start:end] = is_single_action
+            self.action_masks[start:end] = action_masks
             self.size += num_samples
             self.head = self.size % self.capacity  # Update head for when we switch to eviction
             return
@@ -141,6 +151,7 @@ class AggregatedDataset(Dataset):
             self.actions[start:end] = expert_actions[:available_space]
             self.returns[start:end] = returns[:available_space]
             self.is_single_action[start:end] = is_single_action[:available_space]
+            self.action_masks[start:end] = action_masks[:available_space]
             self.size = self.capacity
 
         # Evict and replace remaining samples
@@ -162,6 +173,7 @@ class AggregatedDataset(Dataset):
         self.actions[replace_indices] = expert_actions[offset:]
         self.returns[replace_indices] = returns[offset:]
         self.is_single_action[replace_indices] = is_single_action[offset:]
+        self.action_masks[replace_indices] = action_masks[offset:]
 
 
 __all__ = ["AggregatedDataset", "EvictionStrategy"]

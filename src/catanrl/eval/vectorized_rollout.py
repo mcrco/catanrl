@@ -36,6 +36,39 @@ def _get_policy_logits(
     raise ValueError(f"Unknown model_type '{model_type}'")
 
 
+def _assert_actions_are_unmasked(
+    actions: np.ndarray,
+    action_masks: np.ndarray,
+    context: str,
+) -> None:
+    """Raise if any action is invalid under the provided mask."""
+    if actions.shape[0] != action_masks.shape[0]:
+        raise ValueError(
+            f"Mismatched batch sizes for action validity check in {context}: "
+            f"{actions.shape[0]} actions vs {action_masks.shape[0]} masks."
+        )
+    if np.any(actions < 0) or np.any(actions >= action_masks.shape[1]):
+        raise RuntimeError(
+            f"Out-of-range action found in {context}. "
+            f"Action space size={action_masks.shape[1]}."
+        )
+
+    valid = action_masks[np.arange(actions.shape[0]), actions]
+    if np.all(valid):
+        return
+
+    bad_indices = np.flatnonzero(~valid)
+    preview = bad_indices[:10]
+    examples = ", ".join(
+        f"(idx={int(i)}, action={int(actions[i])}, valid_count={int(action_masks[i].sum())})"
+        for i in preview
+    )
+    raise RuntimeError(
+        f"Found {bad_indices.size} masked expert actions in {context}. "
+        f"Examples: {examples}"
+    )
+
+
 def run_policy_value_eval_vectorized(
     policy_model: PolicyNetworkWrapper,
     critic_model: ValueNetworkWrapper,
@@ -48,7 +81,7 @@ def run_policy_value_eval_vectorized(
     num_envs: Optional[int] = None,
     compare_to_expert: bool = False,
     expert_config: Optional[str] = None,
-) -> Tuple[int, List[int], List[float], List[float], List[int], List[int], List[int]]:
+) -> Tuple[int, List[int], List[float], List[float], List[int], List[int]]:
     """Run vectorized eval for a policy/critic against a single opponent set.
 
     Returns:
@@ -58,7 +91,6 @@ def run_policy_value_eval_vectorized(
         returns: discounted returns across all episodes
         expert_labels: expert action labels (filtered)
         expert_masked_preds: predicted actions from masked logits (filtered)
-        expert_raw_preds: predicted actions from raw logits (filtered)
     """
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -105,7 +137,6 @@ def run_policy_value_eval_vectorized(
     all_returns: List[float] = []
     all_expert_labels: List[int] = []
     all_expert_masked_preds: List[int] = []
-    all_expert_raw_preds: List[int] = []
 
     ep_buffers = init_episode_buffers(num_envs)
 
@@ -149,14 +180,17 @@ def run_policy_value_eval_vectorized(
 
             if compare_to_expert:
                 expert_actions = extract_expert_actions_from_infos(infos, batch_size)
+                _assert_actions_are_unmasked(
+                    actions=expert_actions,
+                    action_masks=action_masks,
+                    context="evaluation",
+                )
                 non_single_mask = action_masks.sum(axis=1) > 1
                 pred_masked = torch.argmax(masked_logits, dim=-1).cpu().numpy()
-                pred_raw = torch.argmax(policy_logits, dim=-1).cpu().numpy()
                 for idx in range(batch_size):
                     if non_single_mask[idx]:
                         all_expert_labels.append(int(expert_actions[idx]))
                         all_expert_masked_preds.append(int(pred_masked[idx]))
-                        all_expert_raw_preds.append(int(pred_raw[idx]))
 
             next_observations, rewards, terminations, truncations, infos = envs.step(
                 actions
@@ -216,5 +250,4 @@ def run_policy_value_eval_vectorized(
         all_returns,
         all_expert_labels,
         all_expert_masked_preds,
-        all_expert_raw_preds,
     )

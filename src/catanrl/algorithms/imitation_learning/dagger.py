@@ -176,6 +176,39 @@ def _select_policy_actions_batch(
     return actions, log_probs
 
 
+def _assert_actions_are_unmasked(
+    actions: np.ndarray,
+    action_masks: np.ndarray,
+    context: str,
+) -> None:
+    """Raise if any action is invalid under the provided mask."""
+    if actions.shape[0] != action_masks.shape[0]:
+        raise ValueError(
+            f"Mismatched batch sizes for action validity check in {context}: "
+            f"{actions.shape[0]} actions vs {action_masks.shape[0]} masks."
+        )
+    if np.any(actions < 0) or np.any(actions >= action_masks.shape[1]):
+        raise RuntimeError(
+            f"Out-of-range action found in {context}. "
+            f"Action space size={action_masks.shape[1]}."
+        )
+
+    valid = action_masks[np.arange(actions.shape[0]), actions]
+    if np.all(valid):
+        return
+
+    bad_indices = np.flatnonzero(~valid)
+    preview = bad_indices[:10]
+    examples = ", ".join(
+        f"(idx={int(i)}, action={int(actions[i])}, valid_count={int(action_masks[i].sum())})"
+        for i in preview
+    )
+    raise RuntimeError(
+        f"Found {bad_indices.size} masked expert actions in {context}. "
+        f"Examples: {examples}"
+    )
+
+
 @dataclass
 class DAggerCollectStats:
     episodes: int
@@ -220,6 +253,7 @@ def _collect_dagger_rollouts_vectorized(
     expert_actions_tmj = np.zeros((num_steps, num_envs), dtype=np.int64)
     rewards_tmj = np.zeros((num_steps, num_envs), dtype=np.float32)
     is_single_action_tmj = np.zeros((num_steps, num_envs), dtype=np.bool_)
+    action_masks_tmj = np.zeros((num_steps, num_envs, ACTION_SPACE_SIZE), dtype=np.bool_)
     dones_tmj = np.zeros((num_steps, num_envs), dtype=np.bool_)
 
     episode_rewards: List[float] = []
@@ -255,6 +289,11 @@ def _collect_dagger_rollouts_vectorized(
 
         # Get expert actions from info dict (computed by the env)
         expert_actions = extract_expert_actions_from_infos(infos, batch_size)
+        _assert_actions_are_unmasked(
+            actions=expert_actions,
+            action_masks=action_masks,
+            context="DAgger collection",
+        )
 
         # Determine which steps are single-action steps (only 1 valid action)
         num_valid_actions = action_masks.sum(axis=1)
@@ -272,6 +311,7 @@ def _collect_dagger_rollouts_vectorized(
         critic_states_tmj[step_idx] = critic_batch
         expert_actions_tmj[step_idx] = expert_actions
         is_single_action_tmj[step_idx] = is_single_action_batch
+        action_masks_tmj[step_idx] = action_masks
 
         # Step environments
         next_observations, rewards, terminations, truncations, infos = envs.step(actions_to_play)
@@ -319,6 +359,7 @@ def _collect_dagger_rollouts_vectorized(
         expert_actions=expert_actions_tmj.reshape(-1),
         returns=returns_tmj.reshape(-1),
         is_single_action=is_single_action_tmj.reshape(-1),
+        action_masks=action_masks_tmj.reshape(-1, ACTION_SPACE_SIZE),
     )
 
     mean_reward = float(np.mean(episode_rewards)) if episode_rewards else 0.0
@@ -368,20 +409,38 @@ def _train_on_dataset(
         all_labels = []
         all_preds = []
         n_updates = 0
-        for actor_features, critic_features, actions, returns, is_single_action in loader:
+        for actor_features, critic_features, actions, returns, is_single_action, action_masks in loader:
             actor_features = actor_features.to(device)
             critic_features = critic_features.to(device)
             actions = actions.to(device)
             returns = returns.to(device)
             is_single_action = is_single_action.to(device)
+            action_masks = action_masks.to(device=device, dtype=torch.bool)
+
+            action_is_valid = action_masks.gather(1, actions.unsqueeze(1)).squeeze(1)
+            if not bool(action_is_valid.all()):
+                invalid_count = int((~action_is_valid).sum().item())
+                raise RuntimeError(
+                    f"Encountered {invalid_count} masked expert actions during training."
+                )
 
             # Policy update (only on non-single-action steps since end-turn steps dominate otherwise)
             policy_optimizer.zero_grad()
             policy_logits = _get_policy_logits(policy_model, actor_features, model_type)
+            no_valid = ~action_masks.any(dim=1, keepdim=True)
+            safe_action_masks = torch.where(no_valid, torch.ones_like(action_masks), action_masks)
+            masked_policy_logits = torch.where(
+                safe_action_masks,
+                policy_logits,
+                torch.full_like(policy_logits, float("-inf")),
+            )
+            masked_policy_logits = torch.clamp(masked_policy_logits, min=-100, max=100)
             non_single_mask = ~is_single_action
             if non_single_mask.any():
                 # Compute loss only for non-single-action steps
-                policy_loss_per_sample = F.cross_entropy(policy_logits, actions, reduction="none")
+                policy_loss_per_sample = F.cross_entropy(
+                    masked_policy_logits, actions, reduction="none"
+                )
                 policy_loss = policy_loss_per_sample[non_single_mask].mean()
                 policy_loss.backward()
                 torch.nn.utils.clip_grad_norm_(policy_model.parameters(), max_norm=max_grad_norm)
@@ -404,7 +463,7 @@ def _train_on_dataset(
             total_policy_loss += float(policy_loss.item())
             total_value_loss += float(value_loss.item())
 
-            predictions = torch.argmax(policy_logits, dim=-1)
+            predictions = torch.argmax(masked_policy_logits, dim=-1)
             # Once again, only compute accuracy for non-single-action steps since end-turn steps dominate otherwise
             if non_single_mask.any():
                 correct += int(((predictions == actions) & non_single_mask).sum().item())
