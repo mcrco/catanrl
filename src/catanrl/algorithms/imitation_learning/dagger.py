@@ -452,7 +452,7 @@ def train(
     beta_decay: float = 0.9,
     beta_min: float = 0.05,
     max_dataset_size: Optional[int] = None,
-    eviction_strategy: EvictionStrategy = EvictionStrategy.RANDOM,
+    eviction_strategy: EvictionStrategy = EvictionStrategy.FIFO,
     save_path: Optional[str] = None,
     device: Optional[str] = None,
     wandb_config: Optional[Dict[str, Any]] = None,
