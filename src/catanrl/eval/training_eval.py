@@ -10,6 +10,7 @@ from typing import Dict, Optional, Literal
 import numpy as np
 import torch
 import wandb
+from tqdm import tqdm
 from catanatron.models.player import RandomPlayer
 from catanatron.players.value import ValueFunctionPlayer
 from sklearn.metrics import f1_score
@@ -98,6 +99,7 @@ def eval_policy_value_against_baselines(
     device: Optional[str] = None,
     compare_to_expert: bool = False,
     expert_config: Optional[str] = None,
+    progress_desc: Optional[str] = None,
 ) -> Dict[str, float]:
     """
     Evaluate policy against baselines and critic prediction accuracy in a single loop.
@@ -147,37 +149,83 @@ def eval_policy_value_against_baselines(
     all_expert_labels = []
     all_expert_masked_preds = []
 
-    for opponent_name, opponent_configs in opponent_configs_list:
-        (
-            wins,
-            turns_list,
-            value_preds,
-            returns,
-            expert_labels,
-            expert_masked_preds,
-        ) = run_policy_value_eval_vectorized(
-            policy_model=policy_model,
-            critic_model=critic_model,
-            model_type=model_type,
-            map_type=map_type,
-            num_games=num_games,
-            gamma=gamma,
-            opponent_configs=opponent_configs,
-            device=device,
-            compare_to_expert=compare_to_expert,
-            expert_config=expert_config,
-        )
+    eval_total_games = len(opponent_configs_list) * num_games
+    if progress_desc and eval_total_games > 0:
+        with tqdm(
+            total=eval_total_games,
+            desc=progress_desc,
+            unit="game",
+            leave=False,
+            position=1,
+        ) as eval_pbar:
+            for opponent_name, opponent_configs in opponent_configs_list:
+                (
+                    wins,
+                    turns_list,
+                    value_preds,
+                    returns,
+                    expert_labels,
+                    expert_masked_preds,
+                ) = run_policy_value_eval_vectorized(
+                    policy_model=policy_model,
+                    critic_model=critic_model,
+                    model_type=model_type,
+                    map_type=map_type,
+                    num_games=num_games,
+                    gamma=gamma,
+                    opponent_configs=opponent_configs,
+                    device=device,
+                    compare_to_expert=compare_to_expert,
+                    expert_config=expert_config,
+                    progress_callback=eval_pbar.update,
+                )
 
-        # Log policy metrics for this opponent
-        metrics[f"eval/win_rate_vs_{opponent_name}"] = wins / num_games if num_games > 0 else 0.0
-        metrics[f"eval/avg_turns_vs_{opponent_name}"] = (
-            sum(turns_list) / len(turns_list) if turns_list else 0.0
-        )
+                # Log policy metrics for this opponent
+                metrics[f"eval/win_rate_vs_{opponent_name}"] = (
+                    wins / num_games if num_games > 0 else 0.0
+                )
+                metrics[f"eval/avg_turns_vs_{opponent_name}"] = (
+                    sum(turns_list) / len(turns_list) if turns_list else 0.0
+                )
 
-        all_value_preds.extend(value_preds)
-        all_returns.extend(returns)
-        all_expert_labels.extend(expert_labels)
-        all_expert_masked_preds.extend(expert_masked_preds)
+                all_value_preds.extend(value_preds)
+                all_returns.extend(returns)
+                all_expert_labels.extend(expert_labels)
+                all_expert_masked_preds.extend(expert_masked_preds)
+    else:
+        for opponent_name, opponent_configs in opponent_configs_list:
+            (
+                wins,
+                turns_list,
+                value_preds,
+                returns,
+                expert_labels,
+                expert_masked_preds,
+            ) = run_policy_value_eval_vectorized(
+                policy_model=policy_model,
+                critic_model=critic_model,
+                model_type=model_type,
+                map_type=map_type,
+                num_games=num_games,
+                gamma=gamma,
+                opponent_configs=opponent_configs,
+                device=device,
+                compare_to_expert=compare_to_expert,
+                expert_config=expert_config,
+            )
+
+            # Log policy metrics for this opponent
+            metrics[f"eval/win_rate_vs_{opponent_name}"] = (
+                wins / num_games if num_games > 0 else 0.0
+            )
+            metrics[f"eval/avg_turns_vs_{opponent_name}"] = (
+                sum(turns_list) / len(turns_list) if turns_list else 0.0
+            )
+
+            all_value_preds.extend(value_preds)
+            all_returns.extend(returns)
+            all_expert_labels.extend(expert_labels)
+            all_expert_masked_preds.extend(expert_masked_preds)
 
     # Compute critic metrics
     if len(all_value_preds) > 0:

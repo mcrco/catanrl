@@ -4,7 +4,7 @@ Vectorized rollout helpers for policy/value evaluation.
 
 from __future__ import annotations
 
-from typing import List, Optional, Sequence, Tuple, Literal
+from typing import Callable, List, Optional, Sequence, Tuple, Literal
 
 import numpy as np
 import torch
@@ -81,6 +81,7 @@ def run_policy_value_eval_vectorized(
     num_envs: Optional[int] = None,
     compare_to_expert: bool = False,
     expert_config: Optional[str] = None,
+    progress_callback: Optional[Callable[[int], None]] = None,
 ) -> Tuple[int, List[int], List[float], List[float], List[int], List[int]]:
     """Run vectorized eval for a policy/critic against a single opponent set.
 
@@ -202,6 +203,8 @@ def run_policy_value_eval_vectorized(
                 ep_buffers[idx].rewards.append(rewards[idx])
 
                 if dones[idx]:
+                    if episodes_completed >= num_games:
+                        continue
                     ep_rewards = np.array(ep_buffers[idx].rewards, dtype=np.float32)
                     ep_critic_states = np.array(
                         ep_buffers[idx].critic_states, dtype=np.float32
@@ -234,6 +237,8 @@ def run_policy_value_eval_vectorized(
                     all_value_preds.extend(value_preds.tolist())
                     all_returns.extend(returns.tolist())
                     episodes_completed += 1
+                    if progress_callback is not None:
+                        progress_callback(1)
 
                     ep_buffers[idx] = EpisodeBuffer(
                         critic_states=[], rewards=[], steps=0

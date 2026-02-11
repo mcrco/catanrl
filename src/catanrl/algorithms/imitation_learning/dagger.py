@@ -732,11 +732,6 @@ def train(
             for iteration in range(1, n_iterations + 1):
                 pbar.set_postfix({"iter": f"{iteration}/{n_iterations}", "beta": f"{beta:.2f}"})
 
-                def _update_env_progress(step_delta: int) -> None:
-                    pbar.update(step_delta)
-                    # Keep the parent bar responsive after nested training bars close.
-                    pbar.refresh()
-
                 collect_stats = _collect_dagger_rollouts_vectorized(
                     envs=envs,
                     policy_model=policy_model,
@@ -749,7 +744,7 @@ def train(
                     device=torch_device,
                     actor_dim=actor_dim,
                     critic_dim=critic_dim,
-                    progress_callback=_update_env_progress,
+                    progress_callback=pbar.update,
                 )
                 global_step += collect_stats.steps
 
@@ -766,7 +761,6 @@ def train(
                     max_grad_norm=max_grad_norm,
                     progress_desc=f"Train {iteration}/{n_iterations}",
                 )
-                pbar.refresh()
 
                 # Evaluate policy against baselines and critic value predictions
                 policy_model.eval()
@@ -788,6 +782,7 @@ def train(
                         device=device,
                         compare_to_expert=eval_compare_to_expert,
                         expert_config=eval_expert_cfg,
+                        progress_desc=f"Eval {iteration}/{n_iterations}",
                     )
                 policy_model.train()
                 critic_model.train()
