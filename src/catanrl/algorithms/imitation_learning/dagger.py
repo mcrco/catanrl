@@ -8,7 +8,7 @@ import os
 import random
 import sys
 from dataclasses import dataclass
-from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Literal, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -230,6 +230,7 @@ def _collect_dagger_rollouts_vectorized(
     device: torch.device,
     actor_dim: int,
     critic_dim: int,
+    progress_callback: Optional[Callable[[int], None]] = None,
 ) -> DAggerCollectStats:
     """Run batched policy/environment interaction and aggregate expert-labeled data.
 
@@ -327,6 +328,8 @@ def _collect_dagger_rollouts_vectorized(
             episode_reward_accum[dones] = 0.0
 
         steps_collected += batch_size
+        if progress_callback is not None:
+            progress_callback(batch_size)
 
         observations = next_observations
 
@@ -384,6 +387,7 @@ def _train_on_dataset(
     model_type: str,
     device: torch.device,
     max_grad_norm: float = 5.0,
+    progress_desc: str = "Train",
 ) -> Dict[str, float]:
     """Run supervised updates on the aggregated dataset with separate policy/critic."""
     if len(dataset) == 0 or epochs <= 0:
@@ -396,82 +400,91 @@ def _train_on_dataset(
         }
 
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=False)
+    total_batches = epochs * len(loader)
     policy_model.train()
     critic_model.train()
 
-    for _ in range(epochs):
-        # Reset all metric counters each epoch (only report last epoch)
-        total_loss = 0.0
-        total_policy_loss = 0.0
-        total_value_loss = 0.0
-        correct = 0
-        total_samples = 0
-        all_labels = []
-        all_preds = []
-        n_updates = 0
-        for actor_features, critic_features, actions, returns, is_single_action, action_masks in loader:
-            actor_features = actor_features.to(device)
-            critic_features = critic_features.to(device)
-            actions = actions.to(device)
-            returns = returns.to(device)
-            is_single_action = is_single_action.to(device)
-            action_masks = action_masks.to(device=device, dtype=torch.bool)
+    with tqdm(
+        total=total_batches,
+        desc=progress_desc,
+        unit="batch",
+        leave=False,
+        position=1,
+    ) as train_pbar:
+        for _ in range(epochs):
+            # Reset all metric counters each epoch (only report last epoch)
+            total_loss = 0.0
+            total_policy_loss = 0.0
+            total_value_loss = 0.0
+            correct = 0
+            total_samples = 0
+            all_labels = []
+            all_preds = []
+            n_updates = 0
+            for actor_features, critic_features, actions, returns, is_single_action, action_masks in loader:
+                actor_features = actor_features.to(device)
+                critic_features = critic_features.to(device)
+                actions = actions.to(device)
+                returns = returns.to(device)
+                is_single_action = is_single_action.to(device)
+                action_masks = action_masks.to(device=device, dtype=torch.bool)
 
-            action_is_valid = action_masks.gather(1, actions.unsqueeze(1)).squeeze(1)
-            if not bool(action_is_valid.all()):
-                invalid_count = int((~action_is_valid).sum().item())
-                raise RuntimeError(
-                    f"Encountered {invalid_count} masked expert actions during training."
+                action_is_valid = action_masks.gather(1, actions.unsqueeze(1)).squeeze(1)
+                if not bool(action_is_valid.all()):
+                    invalid_count = int((~action_is_valid).sum().item())
+                    raise RuntimeError(
+                        f"Encountered {invalid_count} masked expert actions during training."
+                    )
+
+                # Policy update (only on non-single-action steps since end-turn steps dominate otherwise)
+                policy_optimizer.zero_grad()
+                policy_logits = _get_policy_logits(policy_model, actor_features, model_type)
+                no_valid = ~action_masks.any(dim=1, keepdim=True)
+                safe_action_masks = torch.where(no_valid, torch.ones_like(action_masks), action_masks)
+                masked_policy_logits = torch.where(
+                    safe_action_masks,
+                    policy_logits,
+                    torch.full_like(policy_logits, float("-inf")),
                 )
+                masked_policy_logits = torch.clamp(masked_policy_logits, min=-100, max=100)
+                non_single_mask = ~is_single_action
+                if non_single_mask.any():
+                    # Compute loss only for non-single-action steps
+                    policy_loss_per_sample = F.cross_entropy(
+                        masked_policy_logits, actions, reduction="none"
+                    )
+                    policy_loss = policy_loss_per_sample[non_single_mask].mean()
+                    policy_loss.backward()
+                    torch.nn.utils.clip_grad_norm_(policy_model.parameters(), max_norm=max_grad_norm)
+                    policy_optimizer.step()
+                else:
+                    # All samples are single-action steps, skip policy update
+                    policy_loss = torch.tensor(0.0, device=device)
 
-            # Policy update (only on non-single-action steps since end-turn steps dominate otherwise)
-            policy_optimizer.zero_grad()
-            policy_logits = _get_policy_logits(policy_model, actor_features, model_type)
-            no_valid = ~action_masks.any(dim=1, keepdim=True)
-            safe_action_masks = torch.where(no_valid, torch.ones_like(action_masks), action_masks)
-            masked_policy_logits = torch.where(
-                safe_action_masks,
-                policy_logits,
-                torch.full_like(policy_logits, float("-inf")),
-            )
-            masked_policy_logits = torch.clamp(masked_policy_logits, min=-100, max=100)
-            non_single_mask = ~is_single_action
-            if non_single_mask.any():
-                # Compute loss only for non-single-action steps
-                policy_loss_per_sample = F.cross_entropy(
-                    masked_policy_logits, actions, reduction="none"
-                )
-                policy_loss = policy_loss_per_sample[non_single_mask].mean()
-                policy_loss.backward()
-                torch.nn.utils.clip_grad_norm_(policy_model.parameters(), max_norm=max_grad_norm)
-                policy_optimizer.step()
-            else:
-                # All samples are single-action steps, skip policy update
-                policy_loss = torch.tensor(0.0, device=device)
+                # Critic update
+                critic_optimizer.zero_grad()
+                value_pred = critic_model(critic_features).squeeze(-1)
+                value_loss = F.mse_loss(value_pred, returns)
+                value_loss.backward()
+                torch.nn.utils.clip_grad_norm_(critic_model.parameters(), max_norm=max_grad_norm)
+                critic_optimizer.step()
 
-            # Critic update
-            critic_optimizer.zero_grad()
-            value_pred = critic_model(critic_features).squeeze(-1)
-            value_loss = F.mse_loss(value_pred, returns)
-            value_loss.backward()
-            torch.nn.utils.clip_grad_norm_(critic_model.parameters(), max_norm=max_grad_norm)
-            critic_optimizer.step()
+                # Metrics
+                batch_total_loss = policy_loss + value_loss
+                total_loss += float(batch_total_loss.item())
+                total_policy_loss += float(policy_loss.item())
+                total_value_loss += float(value_loss.item())
 
-            # Metrics
-            batch_total_loss = policy_loss + value_loss
-            total_loss += float(batch_total_loss.item())
-            total_policy_loss += float(policy_loss.item())
-            total_value_loss += float(value_loss.item())
-
-            predictions = torch.argmax(masked_policy_logits, dim=-1)
-            # Once again, only compute accuracy for non-single-action steps since end-turn steps dominate otherwise
-            if non_single_mask.any():
-                correct += int(((predictions == actions) & non_single_mask).sum().item())
-                total_samples += int(non_single_mask.sum().item())
-                # Collect labels and predictions for F1 calculation
-                all_labels.extend(actions[non_single_mask].cpu().numpy().tolist())
-                all_preds.extend(predictions[non_single_mask].cpu().numpy().tolist())
-            n_updates += 1
+                predictions = torch.argmax(masked_policy_logits, dim=-1)
+                # Once again, only compute accuracy for non-single-action steps since end-turn steps dominate otherwise
+                if non_single_mask.any():
+                    correct += int(((predictions == actions) & non_single_mask).sum().item())
+                    total_samples += int(non_single_mask.sum().item())
+                    # Collect labels and predictions for F1 calculation
+                    all_labels.extend(actions[non_single_mask].cpu().numpy().tolist())
+                    all_preds.extend(predictions[non_single_mask].cpu().numpy().tolist())
+                n_updates += 1
+                train_pbar.update(1)
 
     n_updates = max(n_updates, 1)
     accuracy = correct / total_samples if total_samples else 0.0
@@ -731,9 +744,9 @@ def train(
                     device=torch_device,
                     actor_dim=actor_dim,
                     critic_dim=critic_dim,
+                    progress_callback=pbar.update,
                 )
                 global_step += collect_stats.steps
-                pbar.update(collect_stats.steps)
 
                 train_stats = _train_on_dataset(
                     dataset=dataset,
@@ -746,6 +759,7 @@ def train(
                     model_type=model_type,
                     device=torch_device,
                     max_grad_norm=max_grad_norm,
+                    progress_desc=f"Train {iteration}/{n_iterations}",
                 )
 
                 # Evaluate policy against baselines and critic value predictions
