@@ -21,7 +21,7 @@ from pufferlib.emulation import nativize
 
 from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE
 
-from .dataset import AggregatedDataset, EvictionStrategy, _discount_rewards
+from .dataset import AggregatedDataset, EvictionStrategy
 
 from ...envs.gym.single_env import (
     compute_single_agent_dims,
@@ -61,7 +61,6 @@ def _observation_to_state_vector(observation: Dict[str, np.ndarray]) -> np.ndarr
     board_ch_last = np.transpose(board, (1, 2, 0))
     board_flat = board_ch_last.reshape(-1)
     return np.concatenate([numeric, board_flat], axis=0)
-
 
 
 def _extract_valid_actions(info: Dict[str, Any] | None) -> np.ndarray:
@@ -143,9 +142,7 @@ def _select_policy_actions_batch(
         policy_logits = _get_policy_logits(policy_model, states, model_type)
 
         # Mask invalid actions
-        mask_tensor = torch.as_tensor(
-            valid_action_masks, dtype=torch.bool, device=device
-        )
+        mask_tensor = torch.as_tensor(valid_action_masks, dtype=torch.bool, device=device)
         if mask_tensor.ndim == 1:
             mask_tensor = mask_tensor.unsqueeze(0)
         # Handle case where no actions are valid (shouldn't happen)
@@ -191,6 +188,7 @@ class DAggerCollectStats:
 def _collect_dagger_rollouts_vectorized(
     envs: Any,
     policy_model: PolicyNetworkWrapper,
+    critic_model: ValueNetworkWrapper,
     dataset: AggregatedDataset,
     num_steps: int,
     beta: float,
@@ -217,33 +215,22 @@ def _collect_dagger_rollouts_vectorized(
     else:
         obs_dtype = np.float32
 
-    # Preallocated buffers for each environment
-    # Each buffer is resized if needed, but we start with a reasonable size
-    initial_buffer_size = 2000  # TURNS_LIMIT=1000, ~2 steps per turn max
-
-    # We maintain a list of buffers (dictionaries of arrays)
-    ep_buffers = []
-    for _ in range(num_envs):
-        ep_buffers.append(
-            {
-                "actor": np.zeros((initial_buffer_size, actor_dim), dtype=np.float32),
-                "critic": np.zeros((initial_buffer_size, critic_dim), dtype=np.float32),
-                "label": np.zeros(initial_buffer_size, dtype=np.int64),
-                "reward": np.zeros(initial_buffer_size, dtype=np.float32),
-                "is_single": np.zeros(initial_buffer_size, dtype=np.bool_),
-                "size": 0,
-                "capacity": initial_buffer_size,
-            }
-        )
+    # Preallocated buffers for the full collection phase (time x env)
+    critic_states_tmj = np.zeros((num_steps, num_envs, critic_dim), dtype=np.float32)
+    expert_actions_tmj = np.zeros((num_steps, num_envs), dtype=np.int64)
+    rewards_tmj = np.zeros((num_steps, num_envs), dtype=np.float32)
+    is_single_action_tmj = np.zeros((num_steps, num_envs), dtype=np.bool_)
+    dones_tmj = np.zeros((num_steps, num_envs), dtype=np.bool_)
 
     episode_rewards: List[float] = []
+    episode_reward_accum = np.zeros(num_envs, dtype=np.float32)
     steps_collected = 0
     expert_actions_used = 0
     total_actions = 0
 
     observations, infos = envs.reset()
 
-    for _ in range(num_steps):
+    for step_idx in range(num_steps):
         batch_size = observations.shape[0]
         actor_batch = np.zeros((batch_size, actor_dim), dtype=np.float32)
         critic_batch = np.zeros((batch_size, critic_dim), dtype=np.float32)
@@ -281,76 +268,58 @@ def _collect_dagger_rollouts_vectorized(
         expert_actions_used += np.sum(use_expert)
         total_actions += batch_size
 
-        # Store experience in buffers
-        for idx in range(batch_size):
-            buf = ep_buffers[idx]
-            pos = buf["size"]
-
-            # Resize if needed
-            if pos >= buf["capacity"]:
-                new_cap = buf["capacity"] * 2
-
-                new_actor = np.zeros((new_cap, actor_dim), dtype=np.float32)
-                new_actor[: buf["capacity"]] = buf["actor"]
-                buf["actor"] = new_actor
-
-                new_critic = np.zeros((new_cap, critic_dim), dtype=np.float32)
-                new_critic[: buf["capacity"]] = buf["critic"]
-                buf["critic"] = new_critic
-
-                new_label = np.zeros(new_cap, dtype=np.int64)
-                new_label[: buf["capacity"]] = buf["label"]
-                buf["label"] = new_label
-
-                new_reward = np.zeros(new_cap, dtype=np.float32)
-                new_reward[: buf["capacity"]] = buf["reward"]
-                buf["reward"] = new_reward
-
-                new_is_single = np.zeros(new_cap, dtype=np.bool_)
-                new_is_single[: buf["capacity"]] = buf["is_single"]
-                buf["is_single"] = new_is_single
-
-                buf["capacity"] = new_cap
-
-            # Write to buffer
-            buf["actor"][pos] = actor_batch[idx]
-            buf["critic"][pos] = critic_batch[idx]
-            buf["label"][pos] = expert_actions[idx]
-            buf["is_single"][pos] = is_single_action_batch[idx]
-            buf["size"] += 1
+        # Store experience in time-major buffers
+        critic_states_tmj[step_idx] = critic_batch
+        expert_actions_tmj[step_idx] = expert_actions
+        is_single_action_tmj[step_idx] = is_single_action_batch
 
         # Step environments
-        next_observations, rewards, terminations, truncations, infos = envs.step(
-            actions_to_play
-        )
+        next_observations, rewards, terminations, truncations, infos = envs.step(actions_to_play)
         rewards = rewards.astype(np.float32)
         dones = np.logical_or(terminations, truncations)
 
-        for idx in range(batch_size):
-            # Assign reward to the previous step (which is at size-1)
-            buf = ep_buffers[idx]
-            pos = buf["size"] - 1
-            buf["reward"][pos] = rewards[idx]
+        rewards_tmj[step_idx] = rewards
+        dones_tmj[step_idx] = dones
 
-            steps_collected += 1
+        episode_reward_accum += rewards
+        if np.any(dones):
+            episode_rewards.extend(episode_reward_accum[dones].tolist())
+            episode_reward_accum[dones] = 0.0
 
-            if dones[idx]:
-                # Episode finished - add to dataset
-                size = buf["size"]
-                dataset.add_episode(
-                    actor_states=buf["actor"][:size],
-                    critic_states=buf["critic"][:size],
-                    expert_actions=buf["label"][:size],
-                    rewards=buf["reward"][:size],
-                    gamma=gamma,
-                    is_single_action=buf["is_single"][:size],
-                )
-                episode_rewards.append(float(np.sum(buf["reward"][:size])))
-
-                # Reset buffer
-                buf["size"] = 0
+        steps_collected += batch_size
 
         observations = next_observations
+
+    # Bootstrap returns for unfinished episodes using critic value
+    was_training = critic_model.training
+    critic_model.eval()
+    last_critic_states = np.zeros((num_envs, critic_dim), dtype=np.float32)
+    for idx in range(num_envs):
+        structured = nativize(observations[idx], obs_space, obs_dtype)
+        _, last_critic_states[idx] = flatten_puffer_observation(structured)
+
+    with torch.no_grad():
+        last_critic_tensor = torch.from_numpy(last_critic_states).float().to(device)
+        bootstrap_values = critic_model(last_critic_tensor).squeeze(-1).cpu().numpy()
+    bootstrap_values = bootstrap_values.astype(np.float32, copy=False)
+    bootstrap_values = np.where(dones_tmj[-1], 0.0, bootstrap_values)
+    if was_training:
+        critic_model.train()
+
+    # Compute discounted returns (time-major), resetting at episode boundaries
+    returns_tmj = np.zeros_like(rewards_tmj)
+    running_returns = bootstrap_values.copy()
+    for step_idx in reversed(range(num_steps)):
+        running_returns = rewards_tmj[step_idx] + gamma * running_returns
+        returns_tmj[step_idx] = running_returns
+        running_returns = np.where(dones_tmj[step_idx], 0.0, running_returns)
+
+    dataset.add_samples(
+        critic_states=critic_states_tmj.reshape(-1, critic_dim),
+        expert_actions=expert_actions_tmj.reshape(-1),
+        returns=returns_tmj.reshape(-1),
+        is_single_action=is_single_action_tmj.reshape(-1),
+    )
 
     mean_reward = float(np.mean(episode_rewards)) if episode_rewards else 0.0
     expert_fraction = expert_actions_used / total_actions if total_actions else 0.0
@@ -377,7 +346,13 @@ def _train_on_dataset(
 ) -> Dict[str, float]:
     """Run supervised updates on the aggregated dataset with separate policy/critic."""
     if len(dataset) == 0 or epochs <= 0:
-        return {"total_loss": 0.0, "policy_loss": 0.0, "value_loss": 0.0, "accuracy": 0.0, "f1_score": 0.0}
+        return {
+            "total_loss": 0.0,
+            "policy_loss": 0.0,
+            "value_loss": 0.0,
+            "accuracy": 0.0,
+            "f1_score": 0.0,
+        }
 
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=False)
     policy_model.train()
@@ -406,9 +381,7 @@ def _train_on_dataset(
             non_single_mask = ~is_single_action
             if non_single_mask.any():
                 # Compute loss only for non-single-action steps
-                policy_loss_per_sample = F.cross_entropy(
-                    policy_logits, actions, reduction="none"
-                )
+                policy_loss_per_sample = F.cross_entropy(policy_logits, actions, reduction="none")
                 policy_loss = policy_loss_per_sample[non_single_mask].mean()
                 policy_loss.backward()
                 torch.nn.utils.clip_grad_norm_(policy_model.parameters(), max_norm=max_grad_norm)
@@ -484,7 +457,7 @@ def train(
     device: Optional[str] = None,
     wandb_config: Optional[Dict[str, Any]] = None,
     eval_games_per_opponent: int = 250,
-    eval_compare_to_expert: bool = False,
+    eval_compare_to_expert: bool = True,
     eval_expert_config: Optional[str] = None,
     seed: int = 42,
     num_envs: int = 4,
@@ -575,7 +548,9 @@ def train(
     print(f"Backbone: {backbone_type} | Model type: {model_type}")
     print(f"Actor input dim: {actor_dim} | Critic input dim: {critic_dim}")
     if backbone_type == "xdim":
-        print(f"Board shape (C, W, H): ({board_channels}, {BOARD_WIDTH}, {BOARD_HEIGHT}) | Numeric dim: {numeric_dim}")
+        print(
+            f"Board shape (C, W, H): ({board_channels}, {BOARD_WIDTH}, {BOARD_HEIGHT}) | Numeric dim: {numeric_dim}"
+        )
     print(f"Parallel environments: {num_envs}")
     print(f"Steps per iteration: {steps_per_iteration}")
 
@@ -606,9 +581,9 @@ def train(
             backbone_config=policy_backbone_config, num_actions=num_actions
         ).to(torch_device)
     elif model_type == "hierarchical":
-        policy_model = build_hierarchical_policy_network(
-            backbone_config=policy_backbone_config
-        ).to(torch_device)
+        policy_model = build_hierarchical_policy_network(backbone_config=policy_backbone_config).to(
+            torch_device
+        )
     else:
         raise ValueError(f"Unknown model_type '{model_type}'")
 
@@ -663,6 +638,9 @@ def train(
         expert_config=expert_config,
     )
 
+    if max_dataset_size is None:
+        max_dataset_size = 100_000_000
+
     dataset = AggregatedDataset(
         critic_dim=critic_dim,
         num_players=num_players,
@@ -680,13 +658,12 @@ def train(
     try:
         with tqdm(total=total_steps, desc="DAgger", unit="step", unit_scale=True) as pbar:
             for iteration in range(1, n_iterations + 1):
-                pbar.set_postfix(
-                    {"iter": f"{iteration}/{n_iterations}", "beta": f"{beta:.2f}"}
-                )
+                pbar.set_postfix({"iter": f"{iteration}/{n_iterations}", "beta": f"{beta:.2f}"})
 
                 collect_stats = _collect_dagger_rollouts_vectorized(
                     envs=envs,
                     policy_model=policy_model,
+                    critic_model=critic_model,
                     dataset=dataset,
                     num_steps=steps_per_iteration,
                     beta=beta,
@@ -759,7 +736,6 @@ def train(
                     critic_path = os.path.join(save_path, "critic_best.pt")
                     torch.save(critic_model.state_dict(), critic_path)
 
-
                 # Save periodic checkpoints
                 os.makedirs(save_path, exist_ok=True)
                 policy_path = os.path.join(save_path, f"policy_iter_{iteration}.pt")
@@ -792,8 +768,7 @@ def train(
         wandb.run.summary["best_eval_win_rate_vs_value"] = best_eval_win_rate
 
     print(
-        f"\n[DAgger] Training complete. "
-        f"Best eval win rate vs value: {best_eval_win_rate:.3f}"
+        f"\n[DAgger] Training complete. " f"Best eval win rate vs value: {best_eval_win_rate:.3f}"
     )
     return policy_model, critic_model
 

@@ -21,16 +21,6 @@ class EvictionStrategy(str, Enum):
     CORRECT = "correct"  # Evict samples the model predicts correctly (not yet implemented)
 
 
-def _discount_rewards(rewards: List[float], gamma: float) -> List[float]:
-    """Return discounted returns for one episode."""
-    discounted: List[float] = [0.0] * len(rewards)
-    running = 0.0
-    for idx in reversed(range(len(rewards))):
-        running = rewards[idx] + gamma * running
-        discounted[idx] = running
-    return discounted
-
-
 class AggregatedDataset(Dataset):
     """In-memory dataset for aggregated DAgger trajectories with configurable eviction.
     
@@ -89,31 +79,47 @@ class AggregatedDataset(Dataset):
             torch.tensor(self.is_single_action[idx], dtype=torch.bool),
         )
 
-    def add_episode(
+    def add_samples(
         self,
-        actor_states: np.ndarray | List[np.ndarray],
         critic_states: np.ndarray | List[np.ndarray],
         expert_actions: np.ndarray | List[int],
-        rewards: List[float],
-        gamma: float,
+        returns: np.ndarray | List[float],
         is_single_action: np.ndarray | List[bool],
     ) -> None:
-        """Add a full episode to the dataset using the configured eviction strategy."""
+        """Add precomputed transition samples using the configured eviction strategy."""
         if self.eviction_strategy == EvictionStrategy.CORRECT:
             raise NotImplementedError(
                 "CORRECT eviction strategy requires model access and is not yet implemented"
             )
 
-        returns_list = _discount_rewards(rewards, gamma)
-        returns = np.array(returns_list, dtype=np.float32)
-
         critic_states = np.asarray(critic_states, dtype=np.float32)
         expert_actions = np.asarray(expert_actions, dtype=np.int64)
+        returns = np.asarray(returns, dtype=np.float32)
         is_single_action = np.asarray(is_single_action, dtype=np.bool_)
 
+        self._add_samples(
+            critic_states=critic_states,
+            expert_actions=expert_actions,
+            returns=returns,
+            is_single_action=is_single_action,
+        )
+
+    def _add_samples(
+        self,
+        critic_states: np.ndarray,
+        expert_actions: np.ndarray,
+        returns: np.ndarray,
+        is_single_action: np.ndarray,
+    ) -> None:
         num_samples = len(critic_states)
         if num_samples == 0:
             return
+        if (
+            len(expert_actions) != num_samples
+            or len(returns) != num_samples
+            or len(is_single_action) != num_samples
+        ):
+            raise ValueError("Mismatched sample counts in add_samples inputs.")
 
         available_space = self.capacity - self.size
         if num_samples <= available_space:
@@ -125,40 +131,37 @@ class AggregatedDataset(Dataset):
             self.is_single_action[start:end] = is_single_action
             self.size += num_samples
             self.head = self.size % self.capacity  # Update head for when we switch to eviction
+            return
+
+        # Fill remaining space first
+        if available_space > 0:
+            start = self.size
+            end = start + available_space
+            self.critic_states[start:end] = critic_states[:available_space]
+            self.actions[start:end] = expert_actions[:available_space]
+            self.returns[start:end] = returns[:available_space]
+            self.is_single_action[start:end] = is_single_action[:available_space]
+            self.size = self.capacity
+
+        # Evict and replace remaining samples
+        remaining = num_samples - available_space
+        if remaining <= 0:
+            return
+
+        offset = available_space
+        if self.eviction_strategy == EvictionStrategy.RANDOM:
+            replace_indices = np.random.choice(self.capacity, size=remaining, replace=False)
+        elif self.eviction_strategy == EvictionStrategy.FIFO:
+            # Ring buffer: write at head and advance
+            replace_indices = np.arange(self.head, self.head + remaining) % self.capacity
+            self.head = (self.head + remaining) % self.capacity
         else:
-            # Fill remaining space first
-            if available_space > 0:
-                start = self.size
-                end = start + available_space
-                self.critic_states[start:end] = critic_states[:available_space]
-                self.actions[start:end] = expert_actions[:available_space]
-                self.returns[start:end] = returns[:available_space]
-                self.is_single_action[start:end] = is_single_action[:available_space]
-                self.size = self.capacity
-            
-            # Evict and replace remaining samples
-            remaining = num_samples - available_space
-            if remaining > 0:
-                offset = available_space
-                
-                if self.eviction_strategy == EvictionStrategy.RANDOM:
-                    replace_indices = np.random.choice(
-                        self.capacity, size=remaining, replace=False
-                    )
-                elif self.eviction_strategy == EvictionStrategy.FIFO:
-                    # Ring buffer: write at head and advance
-                    replace_indices = np.arange(self.head, self.head + remaining) % self.capacity
-                    self.head = (self.head + remaining) % self.capacity
-                else:
-                    raise ValueError(f"Unknown eviction strategy: {self.eviction_strategy}")
-                
-                self.critic_states[replace_indices] = critic_states[offset:]
-                self.actions[replace_indices] = expert_actions[offset:]
-                self.returns[replace_indices] = returns[offset:]
-                self.is_single_action[replace_indices] = is_single_action[offset:]
+            raise ValueError(f"Unknown eviction strategy: {self.eviction_strategy}")
 
-    def _add_sample(self, *args):
-        raise NotImplementedError("Use add_episode with batched data instead.")
+        self.critic_states[replace_indices] = critic_states[offset:]
+        self.actions[replace_indices] = expert_actions[offset:]
+        self.returns[replace_indices] = returns[offset:]
+        self.is_single_action[replace_indices] = is_single_action[offset:]
 
 
-__all__ = ["AggregatedDataset", "EvictionStrategy", "_discount_rewards"]
+__all__ = ["AggregatedDataset", "EvictionStrategy"]

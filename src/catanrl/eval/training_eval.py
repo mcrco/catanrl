@@ -157,24 +157,24 @@ def eval_policy_value_against_baselines(
             expert_labels,
             expert_masked_preds,
             expert_raw_preds,
-        ) = (
-            run_policy_value_eval_vectorized(
-                policy_model=policy_model,
-                critic_model=critic_model,
-                model_type=model_type,
-                map_type=map_type,
-                num_games=num_games,
-                gamma=gamma,
-                opponent_configs=opponent_configs,
-                device=device,
-                compare_to_expert=compare_to_expert,
-                expert_config=expert_config,
-            )
+        ) = run_policy_value_eval_vectorized(
+            policy_model=policy_model,
+            critic_model=critic_model,
+            model_type=model_type,
+            map_type=map_type,
+            num_games=num_games,
+            gamma=gamma,
+            opponent_configs=opponent_configs,
+            device=device,
+            compare_to_expert=compare_to_expert,
+            expert_config=expert_config,
         )
 
         # Log policy metrics for this opponent
         metrics[f"eval/win_rate_vs_{opponent_name}"] = wins / num_games if num_games > 0 else 0.0
-        metrics[f"eval/avg_turns_vs_{opponent_name}"] = sum(turns_list) / len(turns_list) if turns_list else 0.0
+        metrics[f"eval/avg_turns_vs_{opponent_name}"] = (
+            sum(turns_list) / len(turns_list) if turns_list else 0.0
+        )
 
         all_value_preds.extend(value_preds)
         all_returns.extend(returns)
@@ -210,9 +210,7 @@ def eval_policy_value_against_baselines(
         labels = np.array(all_expert_labels, dtype=np.int64)
         masked_preds = np.array(all_expert_masked_preds, dtype=np.int64)
         raw_preds = np.array(all_expert_raw_preds, dtype=np.int64)
-        metrics["eval/acc_vs_expert_masked_logits"] = float(
-            np.mean(labels == masked_preds)
-        )
+        metrics["eval/acc_vs_expert_masked_logits"] = float(np.mean(labels == masked_preds))
         metrics["eval/acc_vs_expert_raw_logits"] = float(np.mean(labels == raw_preds))
         metrics["eval/f1_score_vs_expert_masked_logits"] = float(
             f1_score(labels, masked_preds, average="macro", zero_division=0.0)
