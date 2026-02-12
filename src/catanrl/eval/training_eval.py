@@ -97,6 +97,7 @@ def eval_policy_value_against_baselines(
     log_to_wandb: bool = True,
     global_step: Optional[int] = None,
     device: Optional[str] = None,
+    deterministic: bool = True,
     compare_to_expert: bool = False,
     expert_config: Optional[str] = None,
     progress_desc: Optional[str] = None,
@@ -175,6 +176,7 @@ def eval_policy_value_against_baselines(
                     gamma=gamma,
                     opponent_configs=opponent_configs,
                     device=device,
+                    deterministic=deterministic,
                     compare_to_expert=compare_to_expert,
                     expert_config=expert_config,
                     progress_callback=eval_pbar.update,
@@ -210,6 +212,7 @@ def eval_policy_value_against_baselines(
                 gamma=gamma,
                 opponent_configs=opponent_configs,
                 device=device,
+                deterministic=deterministic,
                 compare_to_expert=compare_to_expert,
                 expert_config=expert_config,
             )

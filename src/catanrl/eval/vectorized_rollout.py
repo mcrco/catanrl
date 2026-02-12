@@ -79,6 +79,7 @@ def run_policy_value_eval_vectorized(
     opponent_configs: Sequence[str],
     device: Optional[str] = None,
     num_envs: Optional[int] = None,
+    deterministic: bool = True,
     compare_to_expert: bool = False,
     expert_config: Optional[str] = None,
     progress_callback: Optional[Callable[[int], None]] = None,
@@ -175,9 +176,12 @@ def run_policy_value_eval_vectorized(
                     torch.full_like(policy_logits, float("-inf")),
                 )
                 masked_logits = torch.clamp(masked_logits, min=-100, max=100)
-                probs = torch.softmax(masked_logits, dim=-1)
-                dist = torch.distributions.Categorical(probs=probs)
-                actions = dist.sample().cpu().numpy()
+                if deterministic:
+                    actions = torch.argmax(masked_logits, dim=-1).cpu().numpy()
+                else:
+                    probs = torch.softmax(masked_logits, dim=-1)
+                    dist = torch.distributions.Categorical(probs=probs)
+                    actions = dist.sample().cpu().numpy()
 
             if compare_to_expert:
                 expert_actions = extract_expert_actions_from_infos(infos, batch_size)
