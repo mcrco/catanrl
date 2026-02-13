@@ -1,3 +1,5 @@
+from typing import Literal
+
 import numpy as np
 import torch
 from catanatron.gym.envs.catanatron_env import ACTIONS_ARRAY, normalize_action
@@ -21,12 +23,14 @@ class NNPolicyPlayer(Player):
         color: Color,
         model_type: str,
         model: PolicyNetworkWrapper,
+        map_type: Literal["BASE", "MINI", "TOURNAMENT"] = "BASE",
         **kwargs,
     ):
         super().__init__(color, is_bot=True, **kwargs)
 
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.model_type = model_type
+        self.map_type = map_type
         self.model = model.to(self.device)
         self.model.eval()
 
@@ -42,7 +46,7 @@ class NNPolicyPlayer(Player):
 
         # Convert game state to features
         game_tensor = torch.from_numpy(
-            game_to_features(game, self.color, len(game.state.colors), "BASE").reshape(1, -1)
+            game_to_features(game, self.color, len(game.state.colors), self.map_type).reshape(1, -1)
         ).to(self.device)
 
         # Get policy logits

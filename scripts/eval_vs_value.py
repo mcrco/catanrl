@@ -6,7 +6,7 @@ allowing plug-and-play evaluation of DAgger-trained models.
 """
 
 import argparse
-from typing import List, Literal, Optional, Sequence
+from typing import Literal, Sequence
 
 import torch
 from catanatron.players.value import ValueFunctionPlayer
@@ -20,6 +20,7 @@ from catanrl.models.backbones import (
     CrossDimensionalBackboneConfig,
 )
 from catanrl.models.models import build_flat_policy_network, build_hierarchical_policy_network
+from catanrl.models.wrappers import PolicyNetworkWrapper
 from catanrl.players import NNPolicyPlayer
 
 
@@ -34,7 +35,7 @@ def build_policy_model(
     num_players: int,
     map_type: Literal["BASE", "MINI", "TOURNAMENT"],
     device: torch.device,
-) -> torch.nn.Module:
+) -> PolicyNetworkWrapper:
     """Build a policy network with the same configuration as dagger.py."""
     dims = compute_single_agent_dims(num_players, map_type)
     actor_dim = dims["actor_dim"]
@@ -187,7 +188,12 @@ def main():
     opponents = [ValueFunctionPlayer(COLOR_ORDER[i + 1]) for i in range(len(args.opponent_configs))]
 
     # Create NN player
-    nn_player = NNPolicyPlayer(color=COLOR_ORDER[0], model_type=args.model_type, model=model)
+    nn_player = NNPolicyPlayer(
+        color=COLOR_ORDER[0],
+        model_type=args.model_type,
+        model=model,
+        map_type=args.map_type,
+    )
 
     # Run evaluation
     print(f"\nRunning {args.num_games} games...")

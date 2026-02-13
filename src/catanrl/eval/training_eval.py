@@ -52,6 +52,7 @@ def eval_policy_against_baselines(
         COLOR_ORDER[0],
         model_type=model_type,
         model=policy_model,
+        map_type=map_type,
     )
 
     # Evaluate against RandomPlayer
@@ -159,7 +160,7 @@ def eval_policy_value_against_baselines(
             leave=False,
             position=1,
         ) as eval_pbar:
-            for opponent_name, opponent_configs in opponent_configs_list:
+            for opponent_idx, (opponent_name, opponent_configs) in enumerate(opponent_configs_list):
                 (
                     wins,
                     turns_list,
@@ -179,6 +180,7 @@ def eval_policy_value_against_baselines(
                     deterministic=deterministic,
                     compare_to_expert=compare_to_expert,
                     expert_config=expert_config,
+                    seed=seed + opponent_idx,
                     progress_callback=eval_pbar.update,
                 )
 
@@ -195,7 +197,7 @@ def eval_policy_value_against_baselines(
                 all_expert_labels.extend(expert_labels)
                 all_expert_masked_preds.extend(expert_masked_preds)
     else:
-        for opponent_name, opponent_configs in opponent_configs_list:
+        for opponent_idx, (opponent_name, opponent_configs) in enumerate(opponent_configs_list):
             (
                 wins,
                 turns_list,
@@ -215,6 +217,7 @@ def eval_policy_value_against_baselines(
                 deterministic=deterministic,
                 compare_to_expert=compare_to_expert,
                 expert_config=expert_config,
+                seed=seed + opponent_idx,
             )
 
             # Log policy metrics for this opponent

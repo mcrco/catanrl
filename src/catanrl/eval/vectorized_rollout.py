@@ -4,7 +4,7 @@ Vectorized rollout helpers for policy/value evaluation.
 
 from __future__ import annotations
 
-from typing import Callable, List, Optional, Sequence, Tuple, Literal
+from typing import Any, Callable, List, Optional, Sequence, Tuple, Literal, cast
 
 import numpy as np
 import torch
@@ -21,6 +21,44 @@ from ..envs.gym.puffer_rollout_utils import (
 )
 from ..envs.gym.single_env import compute_single_agent_dims, make_puffer_vectorized_envs
 from ..models.wrappers import PolicyNetworkWrapper, ValueNetworkWrapper
+
+
+def _extract_nn_won_from_infos(infos: object, batch_size: int) -> Tuple[Any, Any]:
+    """Extract per-env win flags from vectorized infos.
+
+    Returns:
+        nn_won: bool array with inferred win flags.
+        has_signal: bool array indicating whether nn_won[idx] came from infos.
+    """
+    nn_won = np.zeros(batch_size, dtype=np.bool_)
+    has_signal = np.zeros(batch_size, dtype=np.bool_)
+
+    if isinstance(infos, dict):
+        infos_dict = cast(dict[str, Any], infos)
+        won = infos_dict.get("nn_won")
+        if won is None:
+            return nn_won, has_signal
+        won_arr = np.asarray(won, dtype=np.bool_)
+        if won_arr.ndim == 0:
+            nn_won[:] = bool(won_arr.item())
+            has_signal[:] = True
+        else:
+            flat = won_arr.reshape(-1)
+            size = min(batch_size, flat.shape[0])
+            nn_won[:size] = flat[:size]
+            has_signal[:size] = True
+        return nn_won, has_signal
+
+    if isinstance(infos, (list, tuple)):
+        for idx, info in enumerate(infos):
+            if idx >= batch_size:
+                break
+            if isinstance(info, dict) and "nn_won" in info:
+                nn_won[idx] = bool(info["nn_won"])
+                has_signal[idx] = True
+        return nn_won, has_signal
+
+    return nn_won, has_signal
 
 
 def _get_policy_logits(
@@ -82,6 +120,7 @@ def run_policy_value_eval_vectorized(
     deterministic: bool = True,
     compare_to_expert: bool = False,
     expert_config: Optional[str] = None,
+    seed: Optional[int] = None,
     progress_callback: Optional[Callable[[int], None]] = None,
 ) -> Tuple[int, List[int], List[float], List[float], List[int], List[int]]:
     """Run vectorized eval for a policy/critic against a single opponent set.
@@ -142,7 +181,13 @@ def run_policy_value_eval_vectorized(
 
     ep_buffers = init_episode_buffers(num_envs)
 
-    observations, infos = envs.reset()
+    if seed is not None:
+        try:
+            observations, infos = envs.reset(seed=seed)
+        except TypeError:
+            observations, infos = envs.reset()
+    else:
+        observations, infos = envs.reset()
 
     try:
         while episodes_completed < num_games:
@@ -202,6 +247,7 @@ def run_policy_value_eval_vectorized(
             )
             rewards = rewards.astype(np.float32)
             dones = np.logical_or(terminations, truncations)
+            nn_won_batch, nn_won_has_signal = _extract_nn_won_from_infos(infos, batch_size)
 
             for idx in range(batch_size):
                 ep_buffers[idx].rewards.append(rewards[idx])
@@ -214,8 +260,14 @@ def run_policy_value_eval_vectorized(
                         ep_buffers[idx].critic_states, dtype=np.float32
                     )
 
+                    # Prefer explicit winner signal from env info; only fall back to reward
+                    # for compatibility with older environments that do not expose nn_won.
                     final_reward = ep_rewards[-1]
-                    nn_won = abs(final_reward - 1.0) < 1e-5
+                    nn_won = (
+                        bool(nn_won_batch[idx])
+                        if nn_won_has_signal[idx]
+                        else abs(final_reward - 1.0) < 1e-5
+                    )
                     if nn_won:
                         wins += 1
 
