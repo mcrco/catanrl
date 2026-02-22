@@ -105,6 +105,11 @@ class ExperienceBuffer:
     def __len__(self) -> int:
         return self.index * self.num_envs
 
+    @property
+    def steps_collected(self) -> int:
+        """Number of time steps currently stored (T dimension)."""
+        return self.index
+
 
 class CentralCriticExperienceBuffer(ExperienceBuffer):
     """Stores actor and critic observations for multi-agent PPO updates."""

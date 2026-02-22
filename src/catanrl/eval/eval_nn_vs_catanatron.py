@@ -25,12 +25,15 @@ def eval(
     turns = []
 
     players = [nn_player] + opponents
-    map = build_map(map_type)
     rng = random.Random(seed)
     for _ in tqdm(range(num_games), disable=not show_tqdm):
+        # Ensure each game starts from a clean player state and fresh map.
+        # Reusing player internals or a previously-mutated map can skew win rates.
+        for player in players:
+            player.reset_state()
         game = Game(
             players=players,
-            catan_map=map,
+            catan_map=build_map(map_type),
             seed=rng.randint(
                 0,
                 sys.maxsize,

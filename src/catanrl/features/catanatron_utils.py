@@ -167,6 +167,7 @@ def full_game_to_features(
     game: Game,
     num_players: int,
     map_type: Literal["BASE", "MINI", "TOURNAMENT"],
+    base_color: Color | None = None,
 ) -> np.ndarray:
     """
     Convert the full game state into a perfect-information flattened feature vector.
@@ -180,7 +181,7 @@ def full_game_to_features(
             f"Expected game with {num_players} players, found {len(colors)} players instead."
         )
 
-    base_color = game.state.current_color()
+    base_color = base_color or game.state.current_color()
     if base_color not in colors:  # pragma: no cover - defensive
         raise ValueError(f"Current color {base_color} not present in game state {colors}.")
 

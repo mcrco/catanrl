@@ -252,8 +252,9 @@ class SingleAgentCatanatronEnv(gym.Env):
         """Get actor observation (local info only). Used in shared_critic mode."""
         vector = game_to_features(self.game, self.p0.color, self.num_players, self.map_type)
         numeric = vector[: self.numeric_dim]
-        board_flat = vector[self.numeric_dim :]
-        board = board_flat.reshape(self.board_tensor_shape)
+        board = create_board_tensor(self.game, self.p0.color, channels_first=True).astype(
+            np.float32, copy=False
+        )
         return {
             "numeric": numeric.astype(np.float32),
             "board": board.astype(np.float32),

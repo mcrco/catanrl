@@ -66,6 +66,18 @@ def main():
         help="Number of evaluation games per opponent (RandomPlayer and ValueFunctionPlayer).",
     )
     parser.add_argument(
+        "--trend-eval-games",
+        type=int,
+        default=None,
+        help="Games per opponent for fixed-seed trend eval (default: same as --eval-games).",
+    )
+    parser.add_argument(
+        "--trend-eval-seed",
+        type=int,
+        default=67,
+        help="Fixed seed used for trend-detection eval runs.",
+    )
+    parser.add_argument(
         "--load-policy-weights",
         type=str,
         default=None,
@@ -79,6 +91,12 @@ def main():
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max-grad-norm", type=float, default=0.5)
+    parser.add_argument(
+        "--target-kl",
+        type=float,
+        default=None,
+        help="Optional PPO KL target for early stopping (disabled when unset).",
+    )
     parser.add_argument(
         "--deterministic-policy",
         action="store_true",
@@ -127,8 +145,11 @@ def main():
         "model_type": args.model_type,
         "backbone_type": args.backbone_type,
         "max_grad_norm": args.max_grad_norm,
+        "target_kl": args.target_kl,
         "deterministic_policy": args.deterministic_policy,
         "seed": args.seed,
+        "trend_eval_games": args.trend_eval_games,
+        "trend_eval_seed": args.trend_eval_seed,
     }
     if args.wandb:
         wandb_config = {
@@ -167,6 +188,9 @@ def main():
         max_grad_norm=args.max_grad_norm,
         deterministic_policy=args.deterministic_policy,
         eval_games_per_opponent=args.eval_games,
+        trend_eval_games_per_opponent=args.trend_eval_games,
+        trend_eval_seed=args.trend_eval_seed,
+        target_kl=args.target_kl,
         num_envs=args.num_envs,
         reward_function=args.reward_function,
         metric_window=args.metric_window,

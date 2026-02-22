@@ -13,14 +13,39 @@ from typing import Any, Dict, List, Tuple
 import numpy as np
 
 
+BOARD_WIDTH = 21
+BOARD_HEIGHT = 11
+
+
+def _flatten_actor_components(numeric: np.ndarray, board: np.ndarray) -> np.ndarray:
+    """Flatten actor features to match game_to_features ordering.
+
+    Canonical ordering is [numeric, board_flat] where board_flat is flattened from
+    board shape (W, H, C). If board arrives as channels-first (C, W, H), convert it.
+    """
+    numeric_flat = np.asarray(numeric, dtype=np.float32).reshape(-1)
+    board_arr = np.asarray(board, dtype=np.float32)
+    if board_arr.ndim != 3:
+        raise ValueError(f"Expected 3D board tensor, got shape {board_arr.shape}")
+
+    if board_arr.shape[0] == BOARD_WIDTH and board_arr.shape[1] == BOARD_HEIGHT:
+        board_wh_last = board_arr
+    elif board_arr.shape[1] == BOARD_WIDTH and board_arr.shape[2] == BOARD_HEIGHT:
+        board_wh_last = np.transpose(board_arr, (1, 2, 0))
+    else:
+        raise ValueError(
+            "Unrecognized board tensor layout; expected (W,H,C) or (C,W,H), "
+            f"got {board_arr.shape}"
+        )
+
+    board_flat = board_wh_last.reshape(-1)
+    return np.concatenate([numeric_flat, board_flat], axis=0)
+
+
 def flatten_puffer_observation(obs: Dict[str, Any]) -> Tuple[np.ndarray, np.ndarray]:
     """Convert a Puffer observation dict to flattened actor/critic vectors."""
     actor_obs = obs["observation"]
-    numeric = np.asarray(actor_obs["numeric"], dtype=np.float32).reshape(-1)
-    board = np.asarray(actor_obs["board"], dtype=np.float32)
-    board_wh_last = np.transpose(board, (1, 2, 0))
-    board_flat = board_wh_last.reshape(-1)
-    actor_vec = np.concatenate([numeric, board_flat], axis=0)
+    actor_vec = _flatten_actor_components(actor_obs["numeric"], actor_obs["board"])
     critic_vec = np.asarray(obs["critic"], dtype=np.float32).reshape(-1)
     return actor_vec, critic_vec
 

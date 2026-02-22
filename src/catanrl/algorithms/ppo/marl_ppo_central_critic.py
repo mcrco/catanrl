@@ -4,7 +4,7 @@ import os
 import sys
 import random
 from collections import deque
-from typing import Dict, Optional, Sequence, Tuple, Literal
+from typing import Dict, Optional, Sequence, Tuple, Literal, cast
 
 import numpy as np
 import torch
@@ -48,7 +48,7 @@ def _build_action_type_mapping() -> Tuple[Dict[str, list], np.ndarray]:
         action_type_to_indices[action_type.name].append(action_idx)
         action_to_type_idx[action_idx] = ACTION_TYPES.index(action_type)
 
-    return action_type_to_indices, action_to_type_idx
+    return action_type_to_indices, cast(np.ndarray, action_to_type_idx)
 
 
 # Pre-compute action type mapping at module load time
@@ -236,6 +236,7 @@ def ppo_update(
     gamma: float,
     gae_lambda: float,
     max_grad_norm: float,
+    target_kl: Optional[float] = None,
 ) -> Dict[str, float]:
     """Run PPO updates over the centralized buffer."""
     if len(buffer) == 0:
@@ -245,6 +246,11 @@ def ppo_update(
             "entropy_loss": 0.0,
             "activity_loss": 0.0,
             "total_loss": 0.0,
+            "approx_kl": 0.0,
+            "clipfrac": 0.0,
+            "ratio_mean": 0.0,
+            "ratio_std": 0.0,
+            "early_stop": 0.0,
         }
 
     (
@@ -283,27 +289,31 @@ def ppo_update(
     returns = returns_tmj.reshape(-1)
     valid_action_masks = valid_action_masks_tmj.reshape(time_steps * num_envs, -1)
 
-    # Filter out experiences with only one available action
-    multi_action_mask = valid_action_masks.sum(axis=-1) > 1
-    actor_states = actor_states[multi_action_mask]
-    critic_states = critic_states[multi_action_mask]
-    actions = actions[multi_action_mask]
-    old_log_probs = old_log_probs[multi_action_mask]
-    advantages = advantages[multi_action_mask]
-    returns = returns[multi_action_mask]
-    valid_action_masks = valid_action_masks[multi_action_mask]
-
-    if len(advantages) == 0:
+    # Identify decision points: steps where the agent had >1 available action.
+    #
+    # IMPORTANT: We still keep *all* steps for critic training and for stable
+    # bootstrapping across timesteps in turn-based multi-agent games.
+    # We only mask out non-decision steps from the policy loss.
+    is_decision = valid_action_masks.sum(axis=-1) > 1
+    if not np.any(is_decision):
         return {
             "policy_loss": 0.0,
             "value_loss": 0.0,
             "entropy_loss": 0.0,
             "activity_loss": 0.0,
             "total_loss": 0.0,
+            "approx_kl": 0.0,
+            "clipfrac": 0.0,
+            "ratio_mean": 0.0,
+            "ratio_std": 0.0,
+            "early_stop": 0.0,
         }
 
-    if advantages.std() > 1e-8:
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+    adv_decision = advantages[is_decision]
+    if adv_decision.std() > 1e-8:
+        adv_decision = (adv_decision - adv_decision.mean()) / (adv_decision.std() + 1e-8)
+    advantages_norm = np.zeros_like(advantages, dtype=np.float32)
+    advantages_norm[is_decision] = adv_decision.astype(np.float32, copy=False)
 
     # Keep data on CPU, only move mini-batches to GPU during training
     # This allows scaling to large rollout buffers without GPU OOM
@@ -311,7 +321,7 @@ def ppo_update(
     critic_states_t = torch.from_numpy(critic_states).float()
     actions_t = torch.from_numpy(actions).long()
     old_log_probs_t = torch.from_numpy(old_log_probs).float()
-    advantages_t = torch.from_numpy(advantages).float()
+    advantages_t = torch.from_numpy(advantages_norm).float()
     returns_t = torch.from_numpy(returns).float()
 
     total_policy_loss = 0.0
@@ -319,7 +329,12 @@ def ppo_update(
     total_entropy_loss = 0.0
     total_activity_loss = 0.0
     total_loss = 0.0
+    total_approx_kl = 0.0
+    total_clipfrac = 0.0
+    total_ratio_mean = 0.0
+    total_ratio_std = 0.0
     n_updates = 0
+    early_stop = False
 
     for _ in range(n_epochs):
         indices = np.random.permutation(len(actor_states))
@@ -337,31 +352,58 @@ def ppo_update(
             batch_advantages = advantages_t[batch_idx].to(device)
             batch_returns = returns_t[batch_idx].to(device)
             batch_valid_masks = valid_action_masks[batch_idx]
+            batch_is_decision = is_decision[batch_idx]
 
-            log_probs, entropy, policy_logits = policy_agent.evaluate_actions(
-                batch_actor_states, batch_actions, batch_valid_masks
-            )
-            ratio = torch.exp(log_probs - batch_old_log_probs)
-            surr1 = ratio * batch_advantages
-            surr2 = torch.clamp(ratio, 1 - clip_epsilon, 1 + clip_epsilon) * batch_advantages
-            policy_loss = -torch.min(surr1, surr2).mean()
-            entropy_loss = -entropy.mean()
+            # Policy update: only on decision points (where >1 action was available).
+            # Non-decision points are still used for critic bootstrapping/training.
+            decision_count = int(np.sum(batch_is_decision))
+            if decision_count > 0:
+                log_probs, entropy, policy_logits = policy_agent.evaluate_actions(
+                    batch_actor_states, batch_actions, batch_valid_masks
+                )
+                decision_mask_t = torch.as_tensor(batch_is_decision, device=device, dtype=torch.bool)
 
-            # Activity loss: L2 penalty on policy logits to prevent extreme values
-            # This keeps all actions "alive" by preventing logits from going to -inf
-            activity_loss = (policy_logits**2).mean()
+                log_probs_d = log_probs[decision_mask_t]
+                entropy_d = entropy[decision_mask_t]
+                logits_d = policy_logits[decision_mask_t]
+                old_log_probs_d = batch_old_log_probs[decision_mask_t]
+                advantages_d = batch_advantages[decision_mask_t]
 
-            policy_optimizer.zero_grad()
-            (policy_loss + entropy_coef * entropy_loss + activity_coef * activity_loss).backward()
-            torch.nn.utils.clip_grad_norm_(policy_agent.model.parameters(), max_grad_norm)
-            if any(
-                param.grad is not None and torch.isnan(param.grad).any()
-                for param in policy_agent.model.parameters()
-            ):
+                ratio = torch.exp(log_probs_d - old_log_probs_d)
+                surr1 = ratio * advantages_d
+                surr2 = (
+                    torch.clamp(ratio, 1 - clip_epsilon, 1 + clip_epsilon) * advantages_d
+                )
+                policy_loss = -torch.min(surr1, surr2).mean()
+                entropy_loss = -entropy_d.mean()
+                approx_kl = float((old_log_probs_d - log_probs_d).mean().item())
+                clipfrac = float(((ratio - 1.0).abs() > clip_epsilon).float().mean().item())
+                ratio_mean = float(ratio.mean().item())
+                ratio_std = float(ratio.std(unbiased=False).item())
+
+                # Activity loss: L2 penalty on raw policy logits to prevent extreme values.
+                activity_loss = (logits_d**2).mean()
+
                 policy_optimizer.zero_grad()
-                print("NaN grad in policy optimizer")
-                continue
-            policy_optimizer.step()
+                (policy_loss + entropy_coef * entropy_loss + activity_coef * activity_loss).backward()
+                torch.nn.utils.clip_grad_norm_(policy_agent.model.parameters(), max_grad_norm)
+                if any(
+                    param.grad is not None and torch.isnan(param.grad).any()
+                    for param in policy_agent.model.parameters()
+                ):
+                    policy_optimizer.zero_grad()
+                    print("NaN grad in policy optimizer")
+                    continue
+                policy_optimizer.step()
+            else:
+                # No decision points in this mini-batch (e.g., all forced END_TURN steps).
+                policy_loss = torch.tensor(0.0, device=device)
+                entropy_loss = torch.tensor(0.0, device=device)
+                activity_loss = torch.tensor(0.0, device=device)
+                approx_kl = 0.0
+                clipfrac = 0.0
+                ratio_mean = 0.0
+                ratio_std = 0.0
 
             critic_optimizer.zero_grad()
             values = critic_model(batch_critic_states).squeeze(-1)
@@ -387,7 +429,18 @@ def ppo_update(
                 + activity_coef * activity_loss.item()
                 + value_coef * value_loss.item()
             )
+            total_approx_kl += approx_kl
+            total_clipfrac += clipfrac
+            total_ratio_mean += ratio_mean
+            total_ratio_std += ratio_std
             n_updates += 1
+
+            if target_kl is not None and approx_kl > 1.5 * target_kl:
+                # PPO safety valve to avoid destructive updates.
+                early_stop = True
+                break
+        if early_stop:
+            break
 
     if n_updates == 0:
         return {
@@ -396,6 +449,11 @@ def ppo_update(
             "entropy_loss": 0.0,
             "activity_loss": 0.0,
             "total_loss": 0.0,
+            "approx_kl": 0.0,
+            "clipfrac": 0.0,
+            "ratio_mean": 0.0,
+            "ratio_std": 0.0,
+            "early_stop": 1.0 if early_stop else 0.0,
         }
 
     return {
@@ -404,6 +462,11 @@ def ppo_update(
         "entropy_loss": total_entropy_loss / n_updates,
         "activity_loss": total_activity_loss / n_updates,
         "total_loss": total_loss / n_updates,
+        "approx_kl": total_approx_kl / n_updates,
+        "clipfrac": total_clipfrac / n_updates,
+        "ratio_mean": total_ratio_mean / n_updates,
+        "ratio_std": total_ratio_std / n_updates,
+        "early_stop": 1.0 if early_stop else 0.0,
     }
 
 
@@ -434,6 +497,9 @@ def train(
     max_grad_norm: float = 0.5,
     deterministic_policy: bool = False,
     eval_games_per_opponent: int = 250,
+    trend_eval_games_per_opponent: Optional[int] = None,
+    trend_eval_seed: Optional[int] = 42,
+    target_kl: Optional[float] = None,
     num_envs: int = 2,
     reward_function: Literal["shaped", "win"] = "shaped",
     metric_window: int = 200,
@@ -586,12 +652,17 @@ def train(
         return actor_batch, critic_batch, action_masks
 
     metric_window = max(1, metric_window)
+    trend_eval_games = (
+        eval_games_per_opponent
+        if trend_eval_games_per_opponent is None
+        else max(1, trend_eval_games_per_opponent)
+    )
     best_eval_win_rate = -float("inf")
     best_eval_critic_mse = float("inf")
     global_step = 0
     total_episodes = 0
     ppo_update_count = 0
-    episode_lengths = np.zeros(num_envs, dtype=np.int32)
+    episode_lengths: list[int] = [0 for _ in range(num_envs)]
     length_window = deque(maxlen=metric_window)
 
     # Track raw policy preferences (argmax before masking) for diagnostics
@@ -634,10 +705,11 @@ def train(
 
                 for env_idx, start in enumerate(env_offsets):
                     end = start + agents_per_env[env_idx]
-                    episode_lengths[env_idx] += 1
+                    idx = int(env_idx)
+                    episode_lengths[idx] += 1
                     if dones[start:end].all():
                         total_episodes += 1
-                        length_window.append(episode_lengths[env_idx])
+                        length_window.append(episode_lengths[idx])
                         avg_length = float(np.mean(length_window))
                         wandb.log(
                             {
@@ -646,11 +718,11 @@ def train(
                             },
                             step=global_step,
                         )
-                        episode_lengths[env_idx] = 0
+                        episode_lengths[idx] = 0
 
                 observations = next_observations
 
-                if len(buffer) >= max(batch_size * 2, rollout_steps):
+                if buffer.steps_collected >= rollout_steps and len(buffer) >= batch_size * 2:
                     # Log raw policy preference distribution (argmax before masking)
                     # This reveals what the network inherently prefers, regardless of action validity
                     all_raw_argmax = np.concatenate(raw_policy_argmax_buffer)
@@ -659,6 +731,12 @@ def train(
                         f"raw_policy/type_{name}": freq
                         for name, freq in raw_action_type_dist.items()
                     }
+                    raw_policy_log.update(
+                        {
+                            "train/rollout_steps_collected": int(buffer.steps_collected),
+                            "train/rollout_samples_collected": int(len(buffer)),
+                        }
+                    )
                     wandb.log(raw_policy_log, step=global_step)
                     raw_policy_argmax_buffer.clear()
 
@@ -681,6 +759,7 @@ def train(
                         gamma=gamma,
                         gae_lambda=gae_lambda,
                         max_grad_norm=max_grad_norm,
+                        target_kl=target_kl,
                     )
                     buffer.clear()
                     policy_agent.model.eval()
@@ -694,6 +773,11 @@ def train(
                             "train/entropy": -metrics["entropy_loss"],
                             "train/activity_loss": metrics["activity_loss"],
                             "train/total_loss": metrics["total_loss"],
+                            "train/approx_kl": metrics["approx_kl"],
+                            "train/clipfrac": metrics["clipfrac"],
+                            "train/ratio_mean": metrics["ratio_mean"],
+                            "train/ratio_std": metrics["ratio_std"],
+                            "train/early_stop_kl": metrics["early_stop"],
                         },
                         step=global_step,
                     )
@@ -714,7 +798,7 @@ def train(
                     policy_agent.model.eval()
                     critic_model.eval()
                     with torch.no_grad():
-                        eval_metrics = eval_policy_value_against_baselines(
+                        fresh_eval_metrics = eval_policy_value_against_baselines(
                             policy_model=policy_model,
                             critic_model=critic_model,
                             model_type=model_type,
@@ -722,13 +806,40 @@ def train(
                             num_games=eval_games_per_opponent,
                             gamma=gamma,
                             seed=random.randint(0, sys.maxsize),  # different random games each time
-                            log_to_wandb=True,
+                            log_to_wandb=False,
+                            global_step=global_step,
+                            device=device,
+                        )
+                        trend_eval_metrics = eval_policy_value_against_baselines(
+                            policy_model=policy_model,
+                            critic_model=critic_model,
+                            model_type=model_type,
+                            map_type=map_type,
+                            num_games=trend_eval_games,
+                            gamma=gamma,
+                            seed=trend_eval_seed if trend_eval_seed is not None else 0,
+                            log_to_wandb=False,
                             global_step=global_step,
                             device=device,
                         )
 
+                    fresh_log = {}
+                    for key, value in fresh_eval_metrics.items():
+                        suffix = key.split("/", 1)[1] if "/" in key else key
+                        fresh_log[f"eval_fresh/{suffix}"] = value
+
+                    trend_log = {}
+                    for key, value in trend_eval_metrics.items():
+                        suffix = key.split("/", 1)[1] if "/" in key else key
+                        trend_log[f"eval_trend/{suffix}"] = value
+                    trend_log["eval_trend/seed"] = (
+                        trend_eval_seed if trend_eval_seed is not None else 0
+                    )
+                    trend_log["eval_trend/games_per_opponent"] = trend_eval_games
+                    wandb.log({**fresh_log, **trend_log}, step=global_step)
+
                     if save_path:
-                        eval_win_rate = float(eval_metrics.get("eval/win_rate_vs_value", 0.0))
+                        eval_win_rate = float(trend_eval_metrics.get("eval/win_rate_vs_value", 0.0))
                         if eval_win_rate > best_eval_win_rate:
                             best_eval_win_rate = eval_win_rate
                             save_dir = save_path
@@ -739,7 +850,7 @@ def train(
                                 wandb.run.summary["best_eval_win_rate_vs_value"] = best_eval_win_rate
                             print(f"  → Saved best policy (eval win rate vs value: {best_eval_win_rate:.3f})")
 
-                        eval_critic_mse = eval_metrics.get("eval/value_mse", float("inf"))
+                        eval_critic_mse = trend_eval_metrics.get("eval/value_mse", float("inf"))
                         if eval_critic_mse < best_eval_critic_mse:
                             best_eval_critic_mse = eval_critic_mse
                             save_dir = save_path

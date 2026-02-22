@@ -12,7 +12,7 @@ from catanatron.game import Game, TURNS_LIMIT
 from catanatron.models.player import Color, Player
 from catanatron.models.map import build_map
 from catanatron.models.enums import ActionType
-from catanatron.gym.board_tensor_features import get_channels
+from catanatron.gym.board_tensor_features import get_channels, create_board_tensor
 from catanatron.gym.envs.catanatron_env import (
     ACTION_SPACE_SIZE,
     ACTIONS_ARRAY,
@@ -176,20 +176,24 @@ class ParallelCatanatronEnv(ParallelEnv):
         return {
             "observation": self._actor_observation(color),
             "action_mask": self._action_mask(agent),
-            "critic": self._state(),
+            # Critic observation should be consistent per-agent (P0=agent).
+            # This avoids bootstrapping across timesteps using mixed perspectives.
+            "critic": full_game_to_features(self.game, self.num_players, self.map_type, base_color=color),
         }
 
     def _actor_observation(self, color: Color) -> LocalObservation:
         vector = game_to_features(self.game, color, self.num_players, self.map_type)
         numeric = vector[: self.numeric_dim]
-        board_flat = vector[self.numeric_dim :]
-        board = board_flat.reshape(self.board_tensor_shape)
+        board = create_board_tensor(self.game, color, channels_first=True).astype(
+            np.float32, copy=False
+        )
         return {
             "numeric": numeric,
             "board": board,
         }
 
     def _state(self) -> np.ndarray:
+        # Global state defaults to the current player perspective.
         return full_game_to_features(self.game, self.num_players, self.map_type)
 
     def _action_mask(self, agent: str) -> np.ndarray:
@@ -209,5 +213,8 @@ class ParallelCatanatronEnv(ParallelEnv):
         valid_actions = np.where(self._action_mask(agent) == 1)[0]
         info = {"valid_actions": valid_actions}
         if self.shared_critic:
-            info["critic_observation"] = self._state()
+            color = self.agent_name_to_color[agent]
+            info["critic_observation"] = full_game_to_features(
+                self.game, self.num_players, self.map_type, base_color=color
+            )
         return info

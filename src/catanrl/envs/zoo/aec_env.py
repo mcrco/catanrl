@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Union, cast
 import numpy as np
 from gymnasium import spaces
 from pettingzoo.utils.env import AECEnv
@@ -10,12 +10,11 @@ import sys
 from catanatron.models.player import Color, Player
 from catanatron.models.map import build_map
 from catanatron.game import Game, TURNS_LIMIT
-from catanatron.gym.board_tensor_features import get_channels
+from catanatron.gym.board_tensor_features import get_channels, create_board_tensor
 
 from catanrl.envs.zoo.rewards import ShapedReward, WinReward
 from catanrl.envs.zoo.multi_env import (
     MultiAgentCatanatronEnvConfig,
-    ActorObservation,
     SharedCriticObservation,
     LocalObservation,
 )
@@ -140,14 +139,19 @@ class AecCatanatronEnv(AECEnv):
         self.reward_function.after_reset(self)
         self._update_infos_for_current()
 
-    def observe(self, agent: str) -> Union[ActorObservation, SharedCriticObservation]:
+    def observe(self, agent: str) -> SharedCriticObservation:
         assert self.game is not None, "Environment must be reset before calling observe."
         color = self.agent_name_to_color[agent]
-        return {
+        return cast(  # pyright/ty: TypedDict literal typing is overly strict here
+            SharedCriticObservation,
+            {
             "observation": self._actor_observation(color),
             "action_mask": self._action_mask(),
-            "critic": self.state(),
-        }
+            # Per-agent critic perspective (P0=agent) is more consistent for learning,
+            # even though AEC typically queries only the acting agent.
+            "critic": full_game_to_features(self.game, self.num_players, self.map_type, base_color=color),
+            },
+        )
 
     def state(self) -> np.ndarray:
         assert self.game is not None
@@ -203,8 +207,9 @@ class AecCatanatronEnv(AECEnv):
         assert self.game is not None
         vector = game_to_features(self.game, color, self.num_players, self.map_type)
         numeric = vector[: self.numeric_dim]
-        board_flat = vector[self.numeric_dim :]
-        board = board_flat.reshape(self.board_tensor_shape)
+        board = create_board_tensor(self.game, color, channels_first=True).astype(
+            np.float32, copy=False
+        )
         return {
             "numeric": numeric,
             "board": board,
@@ -244,4 +249,4 @@ class AecCatanatronEnv(AECEnv):
         mask = np.zeros(ACTION_SPACE_SIZE, dtype=np.int8)
         valid_actions = list(map(to_action_space, self.game.state.playable_actions))
         mask[valid_actions] = 1
-        return mask
+        return np.asarray(mask, dtype=np.int8)
