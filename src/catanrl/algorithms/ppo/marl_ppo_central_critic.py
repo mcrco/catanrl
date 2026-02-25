@@ -842,6 +842,7 @@ def train(
                                 log_to_wandb=False,
                                 global_step=global_step,
                                 device=device,
+                                num_envs=num_envs,
                             )
                             trend_eval_metrics = eval_policy_value_against_baselines(
                                 policy_model=policy_model,
@@ -854,6 +855,7 @@ def train(
                                 log_to_wandb=False,
                                 global_step=global_step,
                                 device=device,
+                                num_envs=num_envs,
                             )
 
                         fresh_log = {}
@@ -872,9 +874,14 @@ def train(
                         wandb.log({**fresh_log, **trend_log}, step=global_step)
 
                         if save_path:
-                            eval_win_rate = float(
-                                trend_eval_metrics.get("eval/win_rate_vs_value", 0.0)
-                            )
+                            if trend_eval_games_per_opponent is not None and trend_eval_games_per_opponent > 0:
+                                eval_win_rate = float(
+                                    trend_eval_metrics.get("eval/win_rate_vs_value", 0.0)
+                                )
+                            elif eval_games_per_opponent is not None and eval_games_per_opponent > 0:
+                                eval_win_rate = float(
+                                    fresh_eval_metrics.get("eval/win_rate_vs_value", 0.0)
+                                )
                             if eval_win_rate > best_eval_win_rate:
                                 best_eval_win_rate = eval_win_rate
                                 save_dir = save_path

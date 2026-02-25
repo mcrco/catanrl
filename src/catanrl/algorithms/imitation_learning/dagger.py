@@ -817,6 +817,7 @@ def train(
                         log_to_wandb=False,
                         global_step=global_step,
                         device=device,
+                        num_envs=num_envs,
                         compare_to_expert=eval_compare_to_expert,
                         expert_config=eval_expert_cfg,
                         progress_desc=f"Eval {iteration}/{n_iterations}",

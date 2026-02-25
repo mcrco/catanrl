@@ -112,11 +112,11 @@ def run_policy_value_eval_vectorized(
     critic_model: ValueNetworkWrapper,
     model_type: str,
     map_type: Literal["BASE", "TOURNAMENT", "MINI"],
+    num_envs: int,
     num_games: int,
     gamma: float,
     opponent_configs: Sequence[str],
     device: Optional[str] = None,
-    num_envs: Optional[int] = None,
     deterministic: bool = True,
     compare_to_expert: bool = False,
     expert_config: Optional[str] = None,
@@ -148,10 +148,9 @@ def run_policy_value_eval_vectorized(
     actor_dim = dims["actor_dim"]
     critic_dim = dims["critic_dim"]
 
-    if num_envs is None:
-        num_envs = min(8, num_games)
-    else:
-        num_envs = min(num_envs, num_games)
+    if num_envs < 1:
+        raise ValueError(f"num_envs must be >= 1, got {num_envs}")
+    num_envs = min(num_envs, num_games)
 
     envs = make_puffer_vectorized_envs(
         reward_function="shaped",
