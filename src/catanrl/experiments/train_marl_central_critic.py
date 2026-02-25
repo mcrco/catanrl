@@ -68,7 +68,7 @@ def main():
     parser.add_argument(
         "--trend-eval-games",
         type=int,
-        default=None,
+        default=0,
         help="Games per opponent for fixed-seed trend eval (default: same as --eval-games).",
     )
     parser.add_argument(
