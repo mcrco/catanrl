@@ -290,10 +290,7 @@ def ppo_update(
     valid_action_masks = valid_action_masks_tmj.reshape(time_steps * num_envs, -1)
 
     # Identify decision points: steps where the agent had >1 available action.
-    #
-    # IMPORTANT: We still keep *all* steps for critic training and for stable
-    # bootstrapping across timesteps in turn-based multi-agent games.
-    # We only mask out non-decision steps from the policy loss.
+    # Only train actor on decision points.
     is_decision = valid_action_masks.sum(axis=-1) > 1
     if not np.any(is_decision):
         return {
