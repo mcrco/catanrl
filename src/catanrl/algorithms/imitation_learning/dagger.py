@@ -535,6 +535,7 @@ def train(
     eval_games_per_opponent: int = 250,
     eval_compare_to_expert: bool = True,
     eval_expert_config: Optional[str] = None,
+    eval_every_iterations: int = 1,
     seed: int = 42,
     num_envs: int = 4,
     reward_function: Literal["shaped", "win"] = "shaped",
@@ -579,6 +580,7 @@ def train(
         eval_games_per_opponent: Number of games to play against each baseline opponent
         eval_compare_to_expert: Whether to compute expert-accuracy/F1 during eval
         eval_expert_config: Expert config to use for eval labels (defaults to expert_config)
+        eval_every_iterations: Run eval every N DAgger iterations (always evals on final iteration)
         seed: Random seed
         num_envs: Number of parallel environments
         reward_function: Reward function type ("shaped" or "win")
@@ -604,6 +606,9 @@ def train(
         wandb.init(**wandb_config)
     else:
         wandb.init(mode="disabled")
+
+    if eval_every_iterations < 1:
+        raise ValueError("eval_every_iterations must be >= 1")
 
     assert backbone_type in ("mlp", "xdim", "xdim_res"), f"Unknown backbone_type '{backbone_type}'"
     xdim_cnn_channels = list(xdim_cnn_channels)
@@ -640,6 +645,7 @@ def train(
         )
     print(f"Parallel environments: {num_envs}")
     print(f"Steps per iteration: {steps_per_iteration}")
+    print(f"Eval cadence: every {eval_every_iterations} iteration(s)")
 
     # Build policy backbone config based on backbone_type
     if backbone_type == "mlp":
@@ -799,50 +805,60 @@ def train(
                     progress_desc=f"Train {iteration}/{n_iterations}",
                 )
 
-                # Evaluate policy against baselines and critic value predictions
-                policy_model.eval()
-                critic_model.eval()
-                eval_expert_cfg = (
-                    eval_expert_config if eval_expert_config is not None else expert_config
+                should_eval = (
+                    iteration % eval_every_iterations == 0 or iteration == n_iterations
                 )
-                with torch.no_grad():
-                    eval_metrics = eval_policy_value_against_baselines(
-                        policy_model=policy_model,
-                        critic_model=critic_model,
-                        model_type=model_type,
-                        map_type=map_type,
-                        num_games=eval_games_per_opponent,
-                        gamma=gamma,
-                        seed=random.randint(0, sys.maxsize),
-                        log_to_wandb=False,
-                        global_step=global_step,
-                        device=device,
-                        num_envs=num_envs,
-                        compare_to_expert=eval_compare_to_expert,
-                        expert_config=eval_expert_cfg,
-                        progress_desc=f"Eval {iteration}/{n_iterations}",
+                eval_metrics: Dict[str, float] = {}
+                eval_win_rate: Optional[float] = None
+                if should_eval:
+                    # Evaluate policy against baselines and critic value predictions
+                    policy_model.eval()
+                    critic_model.eval()
+                    eval_expert_cfg = (
+                        eval_expert_config if eval_expert_config is not None else expert_config
                     )
-                policy_model.train()
-                critic_model.train()
+                    with torch.no_grad():
+                        eval_metrics = eval_policy_value_against_baselines(
+                            policy_model=policy_model,
+                            critic_model=critic_model,
+                            model_type=model_type,
+                            map_type=map_type,
+                            num_games=eval_games_per_opponent,
+                            gamma=gamma,
+                            seed=random.randint(0, sys.maxsize),
+                            log_to_wandb=False,
+                            global_step=global_step,
+                            device=device,
+                            num_envs=num_envs,
+                            compare_to_expert=eval_compare_to_expert,
+                            expert_config=eval_expert_cfg,
+                            progress_desc=f"Eval {iteration}/{n_iterations}",
+                        )
+                    policy_model.train()
+                    critic_model.train()
+                    eval_win_rate = float(eval_metrics.get("eval/win_rate_vs_value", 0.0))
 
-                eval_win_rate = float(eval_metrics.get("eval/win_rate_vs_value", 0.0))
                 pbar.set_postfix(
                     {
                         "iter": f"{iteration}/{n_iterations}",
                         "beta": f"{beta:.2f}",
                         "acc": f"{train_stats['accuracy'] * 100:.1f}%",
-                        "wr_val": f"{eval_win_rate * 100:.1f}%",
+                        "wr_val": (
+                            f"{eval_win_rate * 100:.1f}%"
+                            if eval_win_rate is not None
+                            else "skipped"
+                        ),
                     }
                 )
 
-                if eval_win_rate > best_eval_win_rate:
+                if eval_win_rate is not None and eval_win_rate > best_eval_win_rate:
                     best_eval_win_rate = eval_win_rate
                     os.makedirs(save_path, exist_ok=True)
                     policy_path = os.path.join(save_path, "policy_best.pt")
                     torch.save(policy_model.state_dict(), policy_path)
 
                 eval_critic_mse = eval_metrics.get("eval/value_mse", float("inf"))
-                if eval_critic_mse < best_eval_critic_mse:
+                if should_eval and eval_critic_mse < best_eval_critic_mse:
                     best_eval_critic_mse = eval_critic_mse
                     os.makedirs(save_path, exist_ok=True)
                     critic_path = os.path.join(save_path, "critic_best.pt")
@@ -866,6 +882,7 @@ def train(
                         "dagger/train_accuracy": train_stats["accuracy"],
                         "dagger/train_f1_score": train_stats["f1_score"],
                         "dagger/beta": beta,
+                        "dagger/eval_ran": float(should_eval),
                         **eval_metrics,
                     },
                     step=global_step,

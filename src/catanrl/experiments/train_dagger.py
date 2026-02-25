@@ -222,6 +222,15 @@ def main():
         default=1000,
         help="Games to play against each baseline opponent for evaluation (default: 1000)",
     )
+    parser.add_argument(
+        "--eval-every-iterations",
+        type=int,
+        default=1,
+        help=(
+            "Run evaluation every N DAgger iterations "
+            "(always evaluates on final iteration) (default: 1)"
+        ),
+    )
 
     # Misc
     parser.add_argument(
@@ -338,6 +347,7 @@ def main():
                 "max_dataset_size": args.max_dataset_size,
                 "eviction_strategy": args.eviction_strategy,
                 "eval_games_per_opponent": args.eval_games_per_opponent,
+                "eval_every_iterations": args.eval_every_iterations,
                 "seed": args.seed,
             },
         }
@@ -374,6 +384,7 @@ def main():
         device=args.device,
         wandb_config=wandb_config,
         eval_games_per_opponent=args.eval_games_per_opponent,
+        eval_every_iterations=args.eval_every_iterations,
         seed=args.seed,
         num_envs=args.num_envs,
         reward_function=args.reward_function,
