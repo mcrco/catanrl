@@ -143,6 +143,9 @@ def run_policy_value_eval_vectorized(
     policy_model.eval()
     critic_model.eval()
 
+    if num_games <= 0:
+        return (0, [], [], [], [], [])
+
     num_players = len(opponent_configs) + 1
     dims = compute_single_agent_dims(num_players, map_type)
     actor_dim = dims["actor_dim"]

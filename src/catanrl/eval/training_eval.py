@@ -145,6 +145,9 @@ def eval_policy_value_against_baselines(
         ("value", ["F"]),
     ]
 
+    if num_games <= 0:
+        return metrics
+
     # We will collect value predictions and returns across all games
     all_value_preds = []
     all_returns = []
