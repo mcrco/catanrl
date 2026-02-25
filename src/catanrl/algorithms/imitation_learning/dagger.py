@@ -508,6 +508,10 @@ def train(
     backbone_type: str = "mlp",
     policy_hidden_dims: Sequence[int] = (512, 512),
     critic_hidden_dims: Sequence[int] = (512, 512),
+    xdim_cnn_channels: Sequence[int] = (64, 128, 128),
+    xdim_cnn_kernel_size: Tuple[int, int] = (3, 5),
+    xdim_policy_fusion_hidden_dim: Optional[int] = None,
+    xdim_critic_fusion_hidden_dim: Optional[int] = None,
     load_policy_weights: Optional[str] = None,
     load_critic_weights: Optional[str] = None,
     n_iterations: int = 10,
@@ -545,9 +549,13 @@ def train(
     Args:
         num_actions: Size of action space
         model_type: "flat" or "hierarchical" policy head
-        backbone_type: "mlp" or "xdim" (cross-dimensional with CNN for board)
+        backbone_type: "mlp", "xdim", or "xdim_res" (residual cross-dimensional)
         policy_hidden_dims: Hidden layer sizes for policy backbone
         critic_hidden_dims: Hidden layer sizes for critic backbone
+        xdim_cnn_channels: CNN channel widths for xdim/xdim_res board branch
+        xdim_cnn_kernel_size: Kernel size (height, width) for xdim/xdim_res CNN
+        xdim_policy_fusion_hidden_dim: Optional policy fusion hidden dimension override
+        xdim_critic_fusion_hidden_dim: Optional critic fusion hidden dimension override
         load_policy_weights: Path to load initial policy weights
         load_critic_weights: Path to load initial critic weights
         n_iterations: Number of DAgger iterations
@@ -597,7 +605,10 @@ def train(
     else:
         wandb.init(mode="disabled")
 
-    assert backbone_type in ("mlp", "xdim"), f"Unknown backbone_type '{backbone_type}'"
+    assert backbone_type in ("mlp", "xdim", "xdim_res"), f"Unknown backbone_type '{backbone_type}'"
+    xdim_cnn_channels = list(xdim_cnn_channels)
+    if not xdim_cnn_channels:
+        raise ValueError("xdim_cnn_channels cannot be empty")
 
     # Compute dimensions
     num_players = len(opponent_configs) + 1
@@ -619,9 +630,13 @@ def train(
     print(f"Map type: {map_type} | Players: {num_players}")
     print(f"Backbone: {backbone_type} | Model type: {model_type}")
     print(f"Actor input dim: {actor_dim} | Critic input dim: {critic_dim}")
-    if backbone_type == "xdim":
+    if backbone_type in ("xdim", "xdim_res"):
         print(
             f"Board shape (C, W, H): ({board_channels}, {BOARD_WIDTH}, {BOARD_HEIGHT}) | Numeric dim: {numeric_dim}"
+        )
+        print(
+            f"XDim config: cnn_channels={xdim_cnn_channels}, kernel={xdim_cnn_kernel_size}, "
+            f"policy_fusion={xdim_policy_fusion_hidden_dim}, critic_fusion={xdim_critic_fusion_hidden_dim}"
         )
     print(f"Parallel environments: {num_envs}")
     print(f"Steps per iteration: {steps_per_iteration}")
@@ -632,19 +647,30 @@ def train(
             architecture="mlp",
             args=MLPBackboneConfig(input_dim=actor_dim, hidden_dims=list(policy_hidden_dims)),
         )
-    else:  # xdim
+    else:  # xdim / xdim_res
+        policy_output_dim = policy_hidden_dims[-1] if policy_hidden_dims else 256
+        policy_fusion_hidden_dim = (
+            xdim_policy_fusion_hidden_dim
+            if xdim_policy_fusion_hidden_dim is not None
+            else policy_output_dim
+        )
+        xdim_architecture = (
+            "residual_cross_dimensional"
+            if backbone_type == "xdim_res"
+            else "cross_dimensional"
+        )
         policy_backbone_config = BackboneConfig(
-            architecture="cross_dimensional",
+            architecture=xdim_architecture,
             args=CrossDimensionalBackboneConfig(
                 board_height=BOARD_HEIGHT,
                 board_width=BOARD_WIDTH,
                 board_channels=board_channels,
                 numeric_dim=numeric_dim,
-                cnn_channels=[64, 128, 128],
-                cnn_kernel_size=(3, 5),
+                cnn_channels=xdim_cnn_channels,
+                cnn_kernel_size=xdim_cnn_kernel_size,
                 numeric_hidden_dims=list(policy_hidden_dims),
-                fusion_hidden_dim=policy_hidden_dims[-1] if policy_hidden_dims else 256,
-                output_dim=policy_hidden_dims[-1] if policy_hidden_dims else 256,
+                fusion_hidden_dim=policy_fusion_hidden_dim,
+                output_dim=policy_output_dim,
             ),
         )
 
@@ -665,19 +691,30 @@ def train(
             architecture="mlp",
             args=MLPBackboneConfig(input_dim=critic_dim, hidden_dims=list(critic_hidden_dims)),
         )
-    else:  # xdim
+    else:  # xdim / xdim_res
+        critic_output_dim = critic_hidden_dims[-1] if critic_hidden_dims else 256
+        critic_fusion_hidden_dim = (
+            xdim_critic_fusion_hidden_dim
+            if xdim_critic_fusion_hidden_dim is not None
+            else critic_output_dim
+        )
+        xdim_architecture = (
+            "residual_cross_dimensional"
+            if backbone_type == "xdim_res"
+            else "cross_dimensional"
+        )
         critic_backbone_config = BackboneConfig(
-            architecture="cross_dimensional",
+            architecture=xdim_architecture,
             args=CrossDimensionalBackboneConfig(
                 board_height=BOARD_HEIGHT,
                 board_width=BOARD_WIDTH,
                 board_channels=board_channels,
                 numeric_dim=full_numeric_dim,  # critic uses full numeric features
-                cnn_channels=[64, 128, 128],
-                cnn_kernel_size=(3, 5),
+                cnn_channels=xdim_cnn_channels,
+                cnn_kernel_size=xdim_cnn_kernel_size,
                 numeric_hidden_dims=list(critic_hidden_dims),
-                fusion_hidden_dim=critic_hidden_dims[-1] if critic_hidden_dims else 256,
-                output_dim=critic_hidden_dims[-1] if critic_hidden_dims else 256,
+                fusion_hidden_dim=critic_fusion_hidden_dim,
+                output_dim=critic_output_dim,
             ),
         )
     critic_model = build_value_network(backbone_config=critic_backbone_config).to(torch_device)

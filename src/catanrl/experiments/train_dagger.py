@@ -26,9 +26,45 @@ def main():
     parser.add_argument(
         "--backbone-type",
         type=str,
-        choices=["mlp", "xdim"],
+        choices=["mlp", "xdim", "xdim_res"],
         default="mlp",
-        help="Backbone architecture: 'mlp' or 'xdim' (cross-dimensional with CNN) (default: mlp)",
+        help=(
+            "Backbone architecture: 'mlp', 'xdim' (cross-dimensional), "
+            "or 'xdim_res' (residual cross-dimensional) (default: mlp)"
+        ),
+    )
+    parser.add_argument(
+        "--xdim-cnn-channels",
+        type=str,
+        default="64,128,128",
+        help=(
+            "Comma-separated CNN channels for xdim/xdim_res backbones "
+            "(default: 64,128,128)"
+        ),
+    )
+    parser.add_argument(
+        "--xdim-cnn-kernel-size",
+        type=str,
+        default="3,5",
+        help="Kernel size for xdim/xdim_res CNN as 'height,width' (default: 3,5)",
+    )
+    parser.add_argument(
+        "--xdim-policy-fusion-hidden-dim",
+        type=int,
+        default=None,
+        help=(
+            "Fusion hidden dim for policy xdim/xdim_res backbone "
+            "(default: last policy hidden dim)"
+        ),
+    )
+    parser.add_argument(
+        "--xdim-critic-fusion-hidden-dim",
+        type=int,
+        default=None,
+        help=(
+            "Fusion hidden dim for critic xdim/xdim_res backbone "
+            "(default: last critic hidden dim)"
+        ),
     )
     parser.add_argument(
         "--policy-hidden-dims",
@@ -258,6 +294,15 @@ def main():
     critic_hidden_dims = [
         int(dim.strip()) for dim in args.critic_hidden_dims.split(",") if dim.strip()
     ]
+    xdim_cnn_channels = [
+        int(ch.strip()) for ch in args.xdim_cnn_channels.split(",") if ch.strip()
+    ]
+    xdim_kernel_parts = [int(k.strip()) for k in args.xdim_cnn_kernel_size.split(",") if k.strip()]
+    if len(xdim_kernel_parts) != 2:
+        raise ValueError(
+            f"--xdim-cnn-kernel-size must have exactly 2 values (got: {args.xdim_cnn_kernel_size})"
+        )
+    xdim_cnn_kernel_size = (xdim_kernel_parts[0], xdim_kernel_parts[1])
 
     # Setup W&B
     wandb_config = None
@@ -271,6 +316,10 @@ def main():
                 "backbone_type": args.backbone_type,
                 "policy_hidden_dims": policy_hidden_dims,
                 "critic_hidden_dims": critic_hidden_dims,
+                "xdim_cnn_channels": xdim_cnn_channels,
+                "xdim_cnn_kernel_size": xdim_cnn_kernel_size,
+                "xdim_policy_fusion_hidden_dim": args.xdim_policy_fusion_hidden_dim,
+                "xdim_critic_fusion_hidden_dim": args.xdim_critic_fusion_hidden_dim,
                 "iterations": args.iterations,
                 "steps_per_iteration": args.steps_per_iter,
                 "train_epochs": args.train_epochs,
@@ -300,6 +349,10 @@ def main():
         backbone_type=args.backbone_type,
         policy_hidden_dims=policy_hidden_dims,
         critic_hidden_dims=critic_hidden_dims,
+        xdim_cnn_channels=xdim_cnn_channels,
+        xdim_cnn_kernel_size=xdim_cnn_kernel_size,
+        xdim_policy_fusion_hidden_dim=args.xdim_policy_fusion_hidden_dim,
+        xdim_critic_fusion_hidden_dim=args.xdim_critic_fusion_hidden_dim,
         load_policy_weights=args.load_policy_weights,
         load_critic_weights=args.load_critic_weights,
         n_iterations=args.iterations,

@@ -472,6 +472,10 @@ def train(
     map_type: Literal["BASE", "TOURNAMENT", "MINI"] = "BASE",
     model_type: str = "flat",
     backbone_type: str = "mlp",
+    xdim_cnn_channels: Sequence[int] = (64, 128, 128),
+    xdim_cnn_kernel_size: Tuple[int, int] = (3, 5),
+    xdim_policy_fusion_hidden_dim: Optional[int] = None,
+    xdim_critic_fusion_hidden_dim: Optional[int] = None,
     total_timesteps: int = 1_000_000,
     rollout_steps: int = 4096,
     policy_lr: float = 3e-4,
@@ -506,7 +510,10 @@ def train(
 
     assert 2 <= num_players <= 4, "num_players must be between 2 and 4"
     assert num_envs >= 1, "num_envs must be >= 1"
-    assert backbone_type in ("mlp", "xdim"), f"Unknown backbone_type '{backbone_type}'"
+    assert backbone_type in ("mlp", "xdim", "xdim_res"), f"Unknown backbone_type '{backbone_type}'"
+    xdim_cnn_channels = list(xdim_cnn_channels)
+    if not xdim_cnn_channels:
+        raise ValueError("xdim_cnn_channels cannot be empty")
 
     set_global_seeds(seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -524,8 +531,12 @@ def train(
     print(f"Map type: {map_type} | Players: {num_players}")
     print(f"Backbone: {backbone_type} | Model type: {model_type}")
     print(f"Actor input dim: {actor_input_dim} | Critic input dim: {critic_input_dim}")
-    if backbone_type == "xdim":
+    if backbone_type in ("xdim", "xdim_res"):
         print(f"Board shape (C, W, H): {board_shape} | Numeric dim: {numeric_dim}")
+        print(
+            f"XDim config: cnn_channels={xdim_cnn_channels}, kernel={xdim_cnn_kernel_size}, "
+            f"policy_fusion={xdim_policy_fusion_hidden_dim}, critic_fusion={xdim_critic_fusion_hidden_dim}"
+        )
     print(f"Total timesteps: {total_timesteps:,} | Rollout steps: {rollout_steps}")
     print(f"Parallel environments: {num_envs}")
 
@@ -545,22 +556,33 @@ def train(
             architecture="mlp",
             args=MLPBackboneConfig(input_dim=actor_input_dim, hidden_dims=list(policy_hidden_dims)),
         )
-    else:  # xdim
+    else:  # xdim / xdim_res
         # board_shape is (C, W, H) from catanatron, but we need (H, W, C)
         assert board_shape is not None
         board_channels, board_width, board_height = board_shape
+        policy_output_dim = policy_hidden_dims[-1] if policy_hidden_dims else 256
+        policy_fusion_hidden_dim = (
+            xdim_policy_fusion_hidden_dim
+            if xdim_policy_fusion_hidden_dim is not None
+            else policy_output_dim
+        )
+        xdim_architecture = (
+            "residual_cross_dimensional"
+            if backbone_type == "xdim_res"
+            else "cross_dimensional"
+        )
         policy_backbone_config = BackboneConfig(
-            architecture="cross_dimensional",
+            architecture=xdim_architecture,
             args=CrossDimensionalBackboneConfig(
                 board_height=board_height,
                 board_width=board_width,
                 board_channels=board_channels,
                 numeric_dim=numeric_dim,
-                cnn_channels=[64, 128, 128],
-                cnn_kernel_size=(3, 5),
+                cnn_channels=xdim_cnn_channels,
+                cnn_kernel_size=xdim_cnn_kernel_size,
                 numeric_hidden_dims=list(policy_hidden_dims),
-                fusion_hidden_dim=policy_hidden_dims[-1] if policy_hidden_dims else 256,
-                output_dim=policy_hidden_dims[-1] if policy_hidden_dims else 256,
+                fusion_hidden_dim=policy_fusion_hidden_dim,
+                output_dim=policy_output_dim,
             ),
         )
 
@@ -581,21 +603,32 @@ def train(
             architecture="mlp",
             args=MLPBackboneConfig(input_dim=critic_input_dim, hidden_dims=list(critic_hidden_dims)),
         )
-    else:  # xdim
+    else:  # xdim / xdim_res
         assert board_shape is not None
         board_channels, board_width, board_height = board_shape
+        critic_output_dim = critic_hidden_dims[-1] if critic_hidden_dims else 256
+        critic_fusion_hidden_dim = (
+            xdim_critic_fusion_hidden_dim
+            if xdim_critic_fusion_hidden_dim is not None
+            else critic_output_dim
+        )
+        xdim_architecture = (
+            "residual_cross_dimensional"
+            if backbone_type == "xdim_res"
+            else "cross_dimensional"
+        )
         critic_backbone_config = BackboneConfig(
-            architecture="cross_dimensional",
+            architecture=xdim_architecture,
             args=CrossDimensionalBackboneConfig(
                 board_height=board_height,
                 board_width=board_width,
                 board_channels=board_channels,
                 numeric_dim=full_numeric_len,  # critic uses full numeric features
-                cnn_channels=[64, 128, 128],
-                cnn_kernel_size=(3, 5),
+                cnn_channels=xdim_cnn_channels,
+                cnn_kernel_size=xdim_cnn_kernel_size,
                 numeric_hidden_dims=list(critic_hidden_dims),
-                fusion_hidden_dim=critic_hidden_dims[-1] if critic_hidden_dims else 256,
-                output_dim=critic_hidden_dims[-1] if critic_hidden_dims else 256,
+                fusion_hidden_dim=critic_fusion_hidden_dim,
+                output_dim=critic_output_dim,
             ),
         )
     critic_model = build_value_network(backbone_config=critic_backbone_config).to(device)
