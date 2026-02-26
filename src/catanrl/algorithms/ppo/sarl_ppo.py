@@ -1038,15 +1038,6 @@ def train(
                             )
                 current_lr = lr_after_scheduler
 
-                print(
-                    f"\n  → PPO Update | "
-                    f"Policy Loss: {metrics['policy_loss']:.4f} | "
-                    f"Value Loss: {metrics['value_loss']:.4f} | "
-                    f"Entropy: {-metrics['entropy_loss']:.4f} | "
-                    f"Activity: {metrics['activity_loss']:.4f} | "
-                    f"LR: {current_lr:.6f}"
-                )
-
                 log_dict = {
                     "train/policy_loss": metrics["policy_loss"],
                     "train/value_loss": metrics["value_loss"],
