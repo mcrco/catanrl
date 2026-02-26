@@ -97,9 +97,15 @@ class SARLAgent:
 
     def _policy_logits(self, states: torch.Tensor) -> torch.Tensor:
         if self.model_type == "flat":
-            policy_logits, _ = self.model(states)
+            if self.uses_privileged_critic:
+                policy_logits = self.model(states)
+            else:
+                policy_logits, _ = self.model(states)
         elif self.model_type == "hierarchical":
-            action_type_logits, param_logits, _ = self.model(states)
+            if self.uses_privileged_critic:
+                action_type_logits, param_logits = self.model(states)
+            else:
+                action_type_logits, param_logits, _ = self.model(states)
             policy_logits = self.model.get_flat_action_logits(action_type_logits, param_logits)
         else:  # pragma: no cover
             raise ValueError(f"Unknown model_type '{self.model_type}'")
