@@ -21,7 +21,13 @@ from tqdm import tqdm
 
 import wandb
 
-from ...envs.gym.single_env import create_opponents, make_vectorized_envs
+from ...envs.gym.single_env import (
+    BOARD_HEIGHT,
+    BOARD_WIDTH,
+    compute_single_agent_dims,
+    create_opponents,
+    make_vectorized_envs,
+)
 from ...eval.training_eval import eval_policy_against_baselines
 from ...models import (
     PolicyValueNetworkWrapper,
@@ -29,7 +35,7 @@ from ...models import (
     build_hierarchical_policy_value_network,
     policy_value_to_policy_only,
 )
-from ...models.backbones import BackboneConfig, MLPBackboneConfig
+from ...models.backbones import BackboneConfig, CrossDimensionalBackboneConfig, MLPBackboneConfig
 from .buffers import ExperienceBuffer
 from .gae import compute_gae_batched
 
@@ -416,12 +422,17 @@ def ppo_update(
 
 
 def train(
-    input_dim: int,
+    input_dim: int | None = None,
     num_actions: int = ACTION_SPACE_SIZE,
     model_type: str = "flat",
+    backbone_type: str = "mlp",
+    xdim_cnn_channels: Sequence[int] = (64, 128, 128),
+    xdim_cnn_kernel_size: Tuple[int, int] = (3, 5),
+    xdim_fusion_hidden_dim: int | None = None,
     hidden_dims: Sequence[int] = (512, 512),
     load_weights: str | None = None,
-    n_episodes: int = 1000,
+    total_timesteps: int = 1_000_000,
+    n_episodes: int | None = None,
     rollout_steps: int = 4096,
     lr: float = 1e-4,
     gamma: float = 0.99,
@@ -452,21 +463,38 @@ def train(
     target_kl: float | None = None,
 ):
     """Train the shared policy/value network using single-agent PPO."""
+    if total_timesteps <= 0:
+        raise ValueError("total_timesteps must be > 0")
+    if num_envs <= 0:
+        raise ValueError("num_envs must be > 0")
 
     print(f"\n{'=' * 60}")
     print("Training Policy-Value Network with Single Agent Reinforcement Learning (PPO)")
     print(f"{'=' * 60}")
     print(f"Device: {device}")
     print(f"Map type: {map_type}")
-    print(f"Episodes: {n_episodes}")
+    print(f"Total timesteps: {total_timesteps:,}")
+    if n_episodes is not None:
+        print(f"Episode cap: {n_episodes}")
     print(f"Rollout steps: {rollout_steps}")
     print(f"Parallel environments: {num_envs}")
 
     opponent_configs = opponent_configs or ["random"]
     opponents = create_opponents(opponent_configs)
     num_players = len(opponents) + 1  # add the learning agent
+    dims = compute_single_agent_dims(num_players, map_type)
+    actor_input_dim = dims["actor_dim"]
+    numeric_dim = dims["numeric_dim"]
+    board_channels = dims["board_channels"]
+    if input_dim is not None and int(input_dim) != actor_input_dim:
+        print(
+            f"Warning: input_dim={input_dim} does not match computed actor dim {actor_input_dim}. "
+            f"Using computed dim {actor_input_dim}."
+        )
+
     print(f"Number of players: {num_players}")
     print(f"Opponents: {[repr(o) for o in opponents]}")
+    print(f"Backbone: {backbone_type} | Model type: {model_type}")
 
     if wandb.run is None:
         if wandb_config:
@@ -482,10 +510,41 @@ def train(
     if save_path == default_save_dir and wandb.run is not None and getattr(wandb.run, "name", None):
         save_path = os.path.join("weights", wandb.run.name)
 
-    backbone_config = BackboneConfig(
-        architecture="mlp",
-        args=MLPBackboneConfig(input_dim=input_dim, hidden_dims=list(hidden_dims)),
-    )
+    xdim_cnn_channels = list(xdim_cnn_channels)
+    if backbone_type not in ("mlp", "xdim", "xdim_res"):
+        raise ValueError(f"Unknown backbone_type '{backbone_type}'")
+    if backbone_type != "mlp" and not xdim_cnn_channels:
+        raise ValueError("xdim_cnn_channels cannot be empty")
+
+    if backbone_type == "mlp":
+        backbone_config = BackboneConfig(
+            architecture="mlp",
+            args=MLPBackboneConfig(input_dim=actor_input_dim, hidden_dims=list(hidden_dims)),
+        )
+    else:
+        xdim_output_dim = hidden_dims[-1] if hidden_dims else 256
+        fusion_hidden_dim = (
+            xdim_fusion_hidden_dim if xdim_fusion_hidden_dim is not None else xdim_output_dim
+        )
+        xdim_architecture = (
+            "residual_cross_dimensional"
+            if backbone_type == "xdim_res"
+            else "cross_dimensional"
+        )
+        backbone_config = BackboneConfig(
+            architecture=xdim_architecture,
+            args=CrossDimensionalBackboneConfig(
+                board_height=BOARD_HEIGHT,
+                board_width=BOARD_WIDTH,
+                board_channels=board_channels,
+                numeric_dim=numeric_dim,
+                cnn_channels=xdim_cnn_channels,
+                cnn_kernel_size=xdim_cnn_kernel_size,
+                numeric_hidden_dims=list(hidden_dims),
+                fusion_hidden_dim=fusion_hidden_dim,
+                output_dim=xdim_output_dim,
+            ),
+        )
     if model_type == "flat":
         model = build_flat_policy_value_network(
             backbone_config=backbone_config, num_actions=num_actions
@@ -512,7 +571,12 @@ def train(
         scheduler_kwargs = lr_scheduler_kwargs or {}
         start_factor = scheduler_kwargs.get("start_factor", 1.0)
         end_factor = scheduler_kwargs.get("end_factor", 0.0)
-        total_iters = scheduler_kwargs.get("total_iters", n_episodes)
+        default_total_iters = (
+            max(1, total_timesteps // max(1, num_envs))
+            if n_episodes is None
+            else max(1, n_episodes)
+        )
+        total_iters = scheduler_kwargs.get("total_iters", default_total_iters)
         scheduler_total_iters = total_iters
         scheduler = lr_scheduler.LinearLR(
             optimizer, start_factor=start_factor, end_factor=end_factor, total_iters=total_iters
@@ -527,7 +591,7 @@ def train(
 
     buffer = ExperienceBuffer(
         num_rollouts=rollout_steps,
-        state_dim=input_dim,
+        state_dim=actor_input_dim,
         action_space_size=num_actions,
         num_envs=num_envs,
     )
@@ -572,9 +636,19 @@ def train(
 
     def flatten_observations(observation_batch: Dict[str, np.ndarray]) -> np.ndarray:
         numeric_obs = observation_batch["numeric"].astype(np.float32)
-        board_obs = observation_batch["board"].astype(np.float32)  # [N, C, W, H]
-        board_obs_ch_last = np.transpose(board_obs, (0, 2, 3, 1))
-        board_flat = board_obs_ch_last.reshape(board_obs_ch_last.shape[0], -1)
+        board_obs = observation_batch["board"].astype(np.float32)
+        if board_obs.ndim != 4:
+            raise ValueError(f"Expected board batch rank 4, got shape {board_obs.shape}")
+        # Canonical flatten order is [numeric, board(W,H,C).reshape(-1)].
+        if board_obs.shape[2] == BOARD_WIDTH and board_obs.shape[3] == BOARD_HEIGHT:
+            board_obs_wh_last = np.transpose(board_obs, (0, 2, 3, 1))  # [N, C, W, H] -> [N, W, H, C]
+        elif board_obs.shape[1] == BOARD_WIDTH and board_obs.shape[2] == BOARD_HEIGHT:
+            board_obs_wh_last = board_obs  # already [N, W, H, C]
+        else:
+            raise ValueError(
+                f"Unrecognized board layout {board_obs.shape}; expected [N,C,W,H] or [N,W,H,C]"
+            )
+        board_flat = board_obs_wh_last.reshape(board_obs_wh_last.shape[0], -1)
         return np.concatenate([numeric_obs, board_flat], axis=1)
 
     env_episode_rewards = np.zeros(num_envs)
@@ -583,8 +657,8 @@ def train(
     print("\nStarting training...")
     observations, infos = envs.reset()
 
-    with tqdm(total=n_episodes, desc="Episodes") as pbar:
-        while total_episodes < n_episodes:
+    with tqdm(total=total_timesteps, desc="Steps", unit="step", unit_scale=True) as pbar:
+        while global_step < total_timesteps and (n_episodes is None or total_episodes < n_episodes):
             states = flatten_observations(observations)
 
             info_valid = infos.get("valid_actions")
@@ -615,6 +689,7 @@ def train(
                 dones,
             )
             global_step += num_envs
+            pbar.update(num_envs)
 
             done_indices = np.where(dones)[0]
             if len(done_indices) > 0:
@@ -625,7 +700,6 @@ def train(
                 episode_rewards.extend(batch_completed_episodes_rewards.tolist())
                 episode_lengths.extend(batch_completed_episodes_lengths.tolist())
                 total_episodes += completed_episodes
-                pbar.update(completed_episodes)
 
                 avg_reward = float(np.mean(episode_rewards)) if episode_rewards else 0.0
                 avg_length = float(np.mean(episode_lengths)) if episode_lengths else 0.0

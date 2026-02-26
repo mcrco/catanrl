@@ -1,13 +1,9 @@
 import argparse
 import os
 import wandb
-from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE, COLOR_ORDER
-from catanatron.game import Game
-from catanatron.models.map import build_map
-from catanatron.models.player import RandomPlayer, Color
+from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE
 
-from ..features.catanatron_utils import game_to_features
-from ..envs.gym.single_env import create_opponents
+from ..envs.gym.single_env import compute_single_agent_dims, create_opponents
 from ..algorithms.ppo.sarl_ppo import train
 
 
@@ -30,7 +26,16 @@ def main():
         help="Path to pre-trained weights from supervised learning",
     )
     parser.add_argument(
-        "--episodes", type=int, default=1000, help="Number of episodes to train (default: 1000)"
+        "--total-timesteps",
+        type=int,
+        default=1_000_000,
+        help="Total number of environment steps to train for (default: 1000000)",
+    )
+    parser.add_argument(
+        "--episodes",
+        type=int,
+        default=None,
+        help="Optional cap on number of completed episodes (default: none)",
     )
     parser.add_argument(
         "--rollout-steps",
@@ -68,10 +73,35 @@ def main():
         "--hidden-dims", type=str, default="512,512", help="Hidden dimensions (default: 512,512)"
     )
     parser.add_argument(
+        "--backbone-type",
+        type=str,
+        choices=["mlp", "xdim", "xdim_res"],
+        default="mlp",
+        help="Backbone architecture: mlp, xdim, or xdim_res (default: mlp)",
+    )
+    parser.add_argument(
+        "--xdim-cnn-channels",
+        type=str,
+        default="64,128,128",
+        help="Comma-separated CNN channels for xdim/xdim_res (default: 64,128,128)",
+    )
+    parser.add_argument(
+        "--xdim-cnn-kernel-size",
+        type=str,
+        default="3,5",
+        help="Kernel size for xdim/xdim_res CNN as 'height,width' (default: 3,5)",
+    )
+    parser.add_argument(
+        "--xdim-fusion-hidden-dim",
+        type=int,
+        default=None,
+        help="Fusion hidden dim for xdim backbones (default: last hidden dim)",
+    )
+    parser.add_argument(
         "--save-path",
         type=str,
         default=None,
-        help="Path to save model (default: weights/{wandb-run-name}/best.pt if using wandb, else weights/policy_value_rl_best.pt)",
+        help="Directory to save policy snapshots/checkpoints (default: weights/{wandb-run-name} with wandb, else weights/sarl_ppo)",
     )
     parser.add_argument(
         "--save-every-updates",
@@ -149,7 +179,7 @@ def main():
         "--lr-scheduler-total-iters",
         type=int,
         default=None,
-        help="Total iterations for LinearLR scheduler (default: n_episodes)",
+        help="Total iterations for LinearLR scheduler (default: episodes cap, else total_timesteps/num_envs)",
     )
     parser.add_argument(
         "--metric-window",
@@ -228,18 +258,21 @@ def main():
     temp_opponents = create_opponents(args.opponents)
     num_players = len(temp_opponents) + 1  # +1 for the RL agent (BLUE)
 
-    # Calculate input dimension based on actual number of players
-
-    # Create dummy players matching the actual game setup
-    dummy_players = [RandomPlayer(color) for color in COLOR_ORDER[:num_players]]
-    dummy_game = Game(dummy_players, catan_map=build_map(args.map_type))
-    dummy_tensor = game_to_features(dummy_game, Color.RED, num_players, args.map_type)
-    input_dim = dummy_tensor.shape[0]
+    # Compute feature dimensions for this player/map setup.
+    dims = compute_single_agent_dims(num_players, args.map_type)
+    input_dim = dims["actor_dim"]
     print(f"Number of players: {num_players}")
     print(f"Input dimension: {input_dim}")
 
     # Parse hidden dimensions
     hidden_dims = [int(dim) for dim in args.hidden_dims.split(",")]
+    xdim_cnn_channels = [int(ch) for ch in args.xdim_cnn_channels.split(",") if ch.strip()]
+    xdim_kernel_parts = [int(k) for k in args.xdim_cnn_kernel_size.split(",") if k.strip()]
+    if len(xdim_kernel_parts) != 2:
+        raise ValueError(
+            f"--xdim-cnn-kernel-size must have exactly 2 values (got: {args.xdim_cnn_kernel_size})"
+        )
+    xdim_cnn_kernel_size = (xdim_kernel_parts[0], xdim_kernel_parts[1])
 
     # Prepare LR scheduler kwargs
     lr_scheduler_kwargs = None
@@ -259,7 +292,8 @@ def main():
             "name": args.wandb_run_name,
             "config": {
                 "algorithm": "PPO",
-                "episodes": args.episodes,
+                "total_timesteps": args.total_timesteps,
+                "episodes_cap": args.episodes,
                 "rollout_steps": args.rollout_steps,
                 "reward_function": args.reward,
                 "lr": args.lr,
@@ -272,6 +306,10 @@ def main():
                 "n_epochs": args.n_epochs,
                 "batch_size": args.batch_size,
                 "hidden_dims": hidden_dims,
+                "backbone_type": args.backbone_type,
+                "xdim_cnn_channels": xdim_cnn_channels,
+                "xdim_cnn_kernel_size": xdim_cnn_kernel_size,
+                "xdim_fusion_hidden_dim": args.xdim_fusion_hidden_dim,
                 "map_type": args.map_type,
                 "load_weights": args.load_weights,
                 "opponents": args.opponents,
@@ -294,8 +332,13 @@ def main():
         input_dim=input_dim,
         num_actions=ACTION_SPACE_SIZE,
         model_type=args.model_type,
+        backbone_type=args.backbone_type,
+        xdim_cnn_channels=xdim_cnn_channels,
+        xdim_cnn_kernel_size=xdim_cnn_kernel_size,
+        xdim_fusion_hidden_dim=args.xdim_fusion_hidden_dim,
         hidden_dims=hidden_dims,
         load_weights=args.load_weights,
+        total_timesteps=args.total_timesteps,
         n_episodes=args.episodes,
         rollout_steps=args.rollout_steps,
         lr=args.lr,
