@@ -536,6 +536,7 @@ def train(
     eval_compare_to_expert: bool = True,
     eval_expert_config: Optional[str] = None,
     eval_every_iterations: int = 1,
+    save_every_iterations: int = 1,
     seed: int = 42,
     num_envs: int = 4,
     reward_function: Literal["shaped", "win"] = "shaped",
@@ -581,6 +582,7 @@ def train(
         eval_compare_to_expert: Whether to compute expert-accuracy/F1 during eval
         eval_expert_config: Expert config to use for eval labels (defaults to expert_config)
         eval_every_iterations: Run eval every N DAgger iterations (always evals on final iteration)
+        save_every_iterations: Save periodic checkpoints every N iterations
         seed: Random seed
         num_envs: Number of parallel environments
         reward_function: Reward function type ("shaped" or "win")
@@ -609,6 +611,20 @@ def train(
 
     if eval_every_iterations < 1:
         raise ValueError("eval_every_iterations must be >= 1")
+    if save_every_iterations < 1:
+        raise ValueError("save_every_iterations must be >= 1")
+
+    update_every_iterations = 1
+    if save_every_iterations % update_every_iterations != 0:
+        raise ValueError(
+            "save_every_iterations must be a multiple of update frequency "
+            f"({update_every_iterations})"
+        )
+    if save_every_iterations % eval_every_iterations != 0:
+        raise ValueError(
+            "save_every_iterations must be a multiple of eval_every_iterations "
+            f"({eval_every_iterations})"
+        )
 
     assert backbone_type in ("mlp", "xdim", "xdim_res"), f"Unknown backbone_type '{backbone_type}'"
     xdim_cnn_channels = list(xdim_cnn_channels)
@@ -646,6 +662,7 @@ def train(
     print(f"Parallel environments: {num_envs}")
     print(f"Steps per iteration: {steps_per_iteration}")
     print(f"Eval cadence: every {eval_every_iterations} iteration(s)")
+    print(f"Save cadence: every {save_every_iterations} iteration(s)")
 
     # Build policy backbone config based on backbone_type
     if backbone_type == "mlp":
@@ -864,12 +881,13 @@ def train(
                     critic_path = os.path.join(save_path, "critic_best.pt")
                     torch.save(critic_model.state_dict(), critic_path)
 
-                # Save periodic checkpoints
-                os.makedirs(save_path, exist_ok=True)
-                policy_path = os.path.join(save_path, f"policy_iter_{iteration}.pt")
-                critic_path = os.path.join(save_path, f"critic_iter_{iteration}.pt")
-                torch.save(policy_model.state_dict(), policy_path)
-                torch.save(critic_model.state_dict(), critic_path)
+                # Save periodic checkpoints aligned with eval/update cadence.
+                if iteration % save_every_iterations == 0:
+                    os.makedirs(save_path, exist_ok=True)
+                    policy_path = os.path.join(save_path, f"policy_iter_{iteration}.pt")
+                    critic_path = os.path.join(save_path, f"critic_iter_{iteration}.pt")
+                    torch.save(policy_model.state_dict(), policy_path)
+                    torch.save(critic_model.state_dict(), critic_path)
 
                 wandb.log(
                     {

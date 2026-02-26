@@ -501,6 +501,7 @@ def train(
     trend_eval_games_per_opponent: Optional[int] = None,
     trend_eval_seed: Optional[int] = 42,
     eval_every_updates: int = 1,
+    save_every_updates: int = 1,
     target_kl: Optional[float] = None,
     num_envs: int = 2,
     reward_function: Literal["shaped", "win"] = "shaped",
@@ -684,6 +685,20 @@ def train(
 
     metric_window = max(1, metric_window)
     eval_every_updates = max(1, int(eval_every_updates))
+    save_every_updates = max(1, int(save_every_updates))
+    update_every_updates = 1
+    if save_every_updates % update_every_updates != 0:
+        raise ValueError(
+            "save_every_updates must be a multiple of update frequency "
+            f"({update_every_updates})"
+        )
+    if save_every_updates % eval_every_updates != 0:
+        raise ValueError(
+            "save_every_updates must be a multiple of eval_every_updates "
+            f"({eval_every_updates})"
+        )
+    print(f"Eval cadence: every {eval_every_updates} update(s)")
+    print(f"Save cadence: every {save_every_updates} update(s)")
     trend_eval_games = (
         eval_games_per_opponent
         if trend_eval_games_per_opponent is None
@@ -814,10 +829,10 @@ def train(
                         step=global_step,
                     )
 
-                    if save_path:
+                    if save_path and ppo_update_count % save_every_updates == 0:
                         save_dir = save_path
                         os.makedirs(save_dir, exist_ok=True)
-                        snapshot_name = f"policy_update_{ppo_update_count + 1}.pt"
+                        snapshot_name = f"policy_update_{ppo_update_count}.pt"
                         policy_path = os.path.join(save_dir, snapshot_name)
                         critic_path = os.path.join(
                             save_dir,
