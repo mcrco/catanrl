@@ -8,7 +8,7 @@ import os
 import random
 import sys
 from collections import deque
-from typing import Any, Dict, List, Literal, Sequence, Tuple, cast
+from typing import Dict, List, Literal, Sequence, Tuple, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -30,14 +30,17 @@ from ...envs.gym.single_env import (
 )
 from ...envs import decode_puffer_batch
 from ...eval.training_eval import eval_policy_against_baselines
-from ...models import (
-    PolicyValueNetworkWrapper,
-    build_flat_policy_value_network,
-    build_hierarchical_policy_value_network,
-    policy_value_to_policy_only,
-)
+from ...models import policy_value_to_policy_only
 from ...models.backbones import BackboneConfig, CrossDimensionalBackboneConfig, MLPBackboneConfig
-from .buffers import ExperienceBuffer
+from ...models.models import (
+    build_flat_policy_network,
+    build_flat_policy_value_network,
+    build_hierarchical_policy_network,
+    build_hierarchical_policy_value_network,
+    build_value_network,
+)
+from ...models.wrappers import PolicyNetworkWrapper, PolicyValueNetworkWrapper, ValueNetworkWrapper
+from .buffers import CentralCriticExperienceBuffer, ExperienceBuffer
 from .gae import compute_gae_batched
 
 
@@ -81,13 +84,16 @@ class SARLAgent:
 
     def __init__(
         self,
-        model: PolicyValueNetworkWrapper,
+        model: PolicyValueNetworkWrapper | PolicyNetworkWrapper,
         model_type: str,
         device: str | torch.device,
+        critic_model: ValueNetworkWrapper | None = None,
     ):
         self.model = model
         self.model_type = model_type
         self.device = device
+        self.critic_model = critic_model
+        self.uses_privileged_critic = critic_model is not None
 
     def _policy_logits(self, states: torch.Tensor) -> torch.Tensor:
         if self.model_type == "flat":
@@ -114,6 +120,7 @@ class SARLAgent:
         self,
         states: torch.Tensor,
         valid_action_masks: npt.NDArray[np.bool_],
+        critic_states: torch.Tensor | None = None,
         deterministic: bool = False,
     ) -> Tuple[
         npt.NDArray[np.int16],
@@ -123,15 +130,24 @@ class SARLAgent:
     ]:
         """Vectorized action selection for multiple parallel environments."""
         self.model.eval()
+        if self.critic_model is not None:
+            self.critic_model.eval()
 
         with torch.no_grad():
-            if self.model_type == "flat":
-                policy_logits, values = self.model(states)
-            elif self.model_type == "hierarchical":
-                action_type_logits, param_logits, values = self.model(states)
-                policy_logits = self.model.get_flat_action_logits(action_type_logits, param_logits)
-            else:  # pragma: no cover
-                raise ValueError(f"Unknown model_type '{self.model_type}'")
+            if self.uses_privileged_critic:
+                policy_logits = self._policy_logits(states)
+                if critic_states is None:
+                    raise ValueError("critic_states must be provided when using privileged critic.")
+                assert self.critic_model is not None
+                values = self.critic_model(critic_states)
+            else:
+                if self.model_type == "flat":
+                    policy_logits, values = self.model(states)
+                elif self.model_type == "hierarchical":
+                    action_type_logits, param_logits, values = self.model(states)
+                    policy_logits = self.model.get_flat_action_logits(action_type_logits, param_logits)
+                else:  # pragma: no cover
+                    raise ValueError(f"Unknown model_type '{self.model_type}'")
 
             batch_size, num_actions = policy_logits.shape
 
@@ -161,17 +177,9 @@ class SARLAgent:
         states: torch.Tensor,
         actions: torch.Tensor,
         valid_action_masks: npt.NDArray[np.bool_],
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Evaluate actions for PPO updates."""
-        if self.model_type == "flat":
-            policy_logits, values = self.model(states)
-        elif self.model_type == "hierarchical":
-            action_type_logits, param_logits, values = self.model(states)
-            policy_logits = cast(Any, self.model).get_flat_action_logits(
-                action_type_logits, param_logits
-            )
-        else:  # pragma: no cover
-            raise ValueError(f"Unknown model_type '{self.model_type}'")
+        policy_logits = self._policy_logits(states)
 
         masked_logits, _ = self._mask_logits(policy_logits, valid_action_masks)
         log_probs_all = F.log_softmax(masked_logits, dim=-1)
@@ -180,13 +188,33 @@ class SARLAgent:
         log_probs = log_probs_all.gather(1, actions.unsqueeze(1)).squeeze(1)
         entropy = -(probs * log_probs_all).sum(dim=-1)
 
-        return log_probs, values.squeeze(-1), entropy, policy_logits
+        return log_probs, entropy, policy_logits
+
+    def predict_values(
+        self,
+        actor_states: torch.Tensor,
+        critic_states: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Predict value estimates for PPO targets."""
+        if self.uses_privileged_critic:
+            if critic_states is None:
+                raise ValueError("critic_states must be provided when using privileged critic.")
+            assert self.critic_model is not None
+            return self.critic_model(critic_states).squeeze(-1)
+
+        if self.model_type == "flat":
+            _, values = self.model(actor_states)
+        elif self.model_type == "hierarchical":
+            _, _, values = self.model(actor_states)
+        else:  # pragma: no cover
+            raise ValueError(f"Unknown model_type '{self.model_type}'")
+        return values.squeeze(-1)
 
 
 def ppo_update(
     agent: SARLAgent,
-    optimizer: torch.optim.Optimizer,
-    buffer: ExperienceBuffer,
+    policy_optimizer: torch.optim.Optimizer,
+    buffer: ExperienceBuffer | CentralCriticExperienceBuffer,
     clip_epsilon: float,
     value_coef: float,
     entropy_coef: float,
@@ -194,7 +222,9 @@ def ppo_update(
     n_epochs: int,
     batch_size: int,
     device: str | torch.device,
-    last_states: np.ndarray,
+    last_actor_states: np.ndarray,
+    last_critic_states: np.ndarray | None = None,
+    critic_optimizer: torch.optim.Optimizer | None = None,
     gamma: float = 0.99,
     gae_lambda: float = 0.95,
     max_grad_norm: float = 0.5,
@@ -220,33 +250,66 @@ def ppo_update(
             "early_stop": 0.0,
         }
 
-    (
-        states_tmj,
-        actions_tmj,
-        rewards_tmj,
-        old_values_tmj,
-        old_log_probs_tmj,
-        valid_action_masks_tmj,
-        dones_tmj,
-    ) = buffer.get()
+    if agent.uses_privileged_critic:
+        if critic_optimizer is None:
+            raise ValueError("critic_optimizer is required when using privileged critic.")
+        if last_critic_states is None:
+            raise ValueError("last_critic_states is required when using privileged critic.")
+        (
+            actor_states_tmj,
+            critic_states_tmj,
+            actions_tmj,
+            rewards_tmj,
+            old_values_tmj,
+            old_log_probs_tmj,
+            valid_action_masks_tmj,
+            dones_tmj,
+        ) = buffer.get()
+    else:
+        (
+            actor_states_tmj,
+            actions_tmj,
+            rewards_tmj,
+            old_values_tmj,
+            old_log_probs_tmj,
+            valid_action_masks_tmj,
+            dones_tmj,
+        ) = buffer.get()
+        critic_states_tmj = None
     time_steps, num_envs = actions_tmj.shape
 
     agent.model.eval()
+    if agent.critic_model is not None:
+        agent.critic_model.eval()
     with torch.no_grad():
-        next_state = torch.from_numpy(last_states).float().to(device)  # [num_envs, state_dim]
-        if agent.model_type == "flat":
-            _, next_value = agent.model(next_state)
-        elif agent.model_type == "hierarchical":
-            _, _, next_value = agent.model(next_state)
-        next_values = next_value.squeeze(-1).detach().cpu().numpy()
+        next_actor_state_t = torch.from_numpy(last_actor_states).float().to(device)
+        next_critic_state_t = (
+            torch.from_numpy(last_critic_states).float().to(device)
+            if last_critic_states is not None
+            else None
+        )
+        next_values = (
+            agent.predict_values(next_actor_state_t, next_critic_state_t)
+            .detach()
+            .cpu()
+            .numpy()
+            .astype(np.float32, copy=False)
+        )
     agent.model.train()
+    if agent.critic_model is not None:
+        agent.critic_model.train()
 
     advantages_tmj, returns_tmj = compute_gae_batched(
         rewards_tmj, old_values_tmj, dones_tmj, next_values, gamma, gae_lambda
     )
 
     # experiences start time-major (T, E, ...); flatten to (T*E, ...) for batching
-    states = states_tmj.reshape(time_steps * num_envs, -1)
+    actor_states = actor_states_tmj.reshape(time_steps * num_envs, -1)
+    critic_states = (
+        critic_states_tmj.reshape(time_steps * num_envs, -1)
+        if critic_states_tmj is not None
+        else None
+    )
     actions = actions_tmj.reshape(-1)
     old_log_probs = old_log_probs_tmj.reshape(-1)
     advantages = advantages_tmj.reshape(-1)
@@ -279,7 +342,8 @@ def ppo_update(
     advantages_norm[is_decision] = adv_decision.astype(np.float32, copy=False)
 
     # Keep rollout tensors on CPU; move only mini-batches to the training device.
-    states_t = torch.from_numpy(states).float()
+    actor_states_t = torch.from_numpy(actor_states).float()
+    critic_states_t = torch.from_numpy(critic_states).float() if critic_states is not None else None
     actions_t = torch.from_numpy(actions).long()
     old_log_probs_t = torch.from_numpy(old_log_probs).float()
     advantages_t = torch.from_numpy(advantages_norm).float()
@@ -298,15 +362,18 @@ def ppo_update(
     early_stop = False
 
     for _ in range(n_epochs):
-        indices = np.random.permutation(len(states))
-        for start in range(0, len(states), batch_size):
+        indices = np.random.permutation(len(actor_states))
+        for start in range(0, len(actor_states), batch_size):
             end = start + batch_size
             batch_indices = indices[start:end]
             if len(batch_indices) <= 1:
                 print(f"Skipping small batch: {len(batch_indices)}")
                 continue
 
-            batch_states = states_t[batch_indices].to(device)
+            batch_actor_states = actor_states_t[batch_indices].to(device)
+            batch_critic_states = (
+                critic_states_t[batch_indices].to(device) if critic_states_t is not None else None
+            )
             batch_actions = actions_t[batch_indices].to(device)
             batch_old_log_probs = old_log_probs_t[batch_indices].to(device)
             batch_advantages = advantages_t[batch_indices].to(device)
@@ -314,9 +381,10 @@ def ppo_update(
             batch_valid_action_masks = valid_action_masks[batch_indices]
             batch_is_decision = is_decision[batch_indices]
 
-            log_probs, values, entropy, policy_logits = agent.evaluate_actions(
-                batch_states, batch_actions, batch_valid_action_masks
+            log_probs, entropy, policy_logits = agent.evaluate_actions(
+                batch_actor_states, batch_actions, batch_valid_action_masks
             )
+            values = agent.predict_values(batch_actor_states, batch_critic_states)
 
             decision_count = int(np.sum(batch_is_decision))
             if decision_count > 0:
@@ -348,27 +416,64 @@ def ppo_update(
                 ratio_std = 0.0
 
             value_loss = F.mse_loss(values, batch_returns)
-            loss = (
-                policy_loss
-                + value_coef * value_loss
-                + entropy_coef * entropy_loss
-                + activity_coef * activity_loss
-            )
+            if agent.uses_privileged_critic:
+                assert critic_optimizer is not None
 
-            optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(agent.model.parameters(), max_grad_norm)
+                if decision_count > 0:
+                    policy_optimizer.zero_grad()
+                    (policy_loss + entropy_coef * entropy_loss + activity_coef * activity_loss).backward()
+                    torch.nn.utils.clip_grad_norm_(agent.model.parameters(), max_grad_norm)
+                    has_nan_policy_grad = any(
+                        param.grad is not None and torch.isnan(param.grad).any()
+                        for param in agent.model.parameters()
+                    )
+                    if has_nan_policy_grad:
+                        print("  WARNING: NaN policy gradients detected! Skipping batch update.")
+                        policy_optimizer.zero_grad()
+                        continue
+                    policy_optimizer.step()
 
-            has_nan_grad = any(
-                param.grad is not None and torch.isnan(param.grad).any()
-                for param in agent.model.parameters()
-            )
-            if has_nan_grad:
-                print("  WARNING: NaN gradients detected! Skipping batch update.")
-                optimizer.zero_grad()
-                continue
+                critic_optimizer.zero_grad()
+                (value_coef * value_loss).backward()
+                assert agent.critic_model is not None
+                torch.nn.utils.clip_grad_norm_(agent.critic_model.parameters(), max_grad_norm)
+                has_nan_critic_grad = any(
+                    param.grad is not None and torch.isnan(param.grad).any()
+                    for param in agent.critic_model.parameters()
+                )
+                if has_nan_critic_grad:
+                    print("  WARNING: NaN critic gradients detected! Skipping batch update.")
+                    critic_optimizer.zero_grad()
+                    continue
+                critic_optimizer.step()
 
-            optimizer.step()
+                loss = (
+                    policy_loss
+                    + value_coef * value_loss
+                    + entropy_coef * entropy_loss
+                    + activity_coef * activity_loss
+                )
+            else:
+                loss = (
+                    policy_loss
+                    + value_coef * value_loss
+                    + entropy_coef * entropy_loss
+                    + activity_coef * activity_loss
+                )
+                policy_optimizer.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(agent.model.parameters(), max_grad_norm)
+
+                has_nan_grad = any(
+                    param.grad is not None and torch.isnan(param.grad).any()
+                    for param in agent.model.parameters()
+                )
+                if has_nan_grad:
+                    print("  WARNING: NaN gradients detected! Skipping batch update.")
+                    policy_optimizer.zero_grad()
+                    continue
+
+                policy_optimizer.step()
 
             total_approx_kl += approx_kl
             total_clipfrac += clipfrac
@@ -430,11 +535,16 @@ def train(
     xdim_cnn_channels: Sequence[int] = (64, 128, 128),
     xdim_cnn_kernel_size: Tuple[int, int] = (3, 5),
     xdim_fusion_hidden_dim: int | None = None,
+    xdim_critic_fusion_hidden_dim: int | None = None,
     hidden_dims: Sequence[int] = (512, 512),
+    critic_hidden_dims: Sequence[int] | None = None,
+    critic_mode: Literal["shared", "privileged"] = "shared",
     load_weights: str | None = None,
+    load_critic_weights: str | None = None,
     total_timesteps: int = 1_000_000,
     rollout_steps: int = 4096,
     lr: float = 1e-4,
+    critic_lr: float | None = None,
     gamma: float = 0.99,
     gae_lambda: float = 0.95,
     clip_epsilon: float = 0.2,
@@ -462,11 +572,16 @@ def train(
     max_grad_norm: float = 0.5,
     target_kl: float | None = None,
 ):
-    """Train the shared policy/value network using single-agent PPO."""
+    """Train SARL PPO with optional privileged critic."""
     if total_timesteps <= 0:
         raise ValueError("total_timesteps must be > 0")
     if num_envs <= 0:
         raise ValueError("num_envs must be > 0")
+    if critic_mode not in ("shared", "privileged"):
+        raise ValueError(f"Unknown critic_mode '{critic_mode}'")
+    uses_privileged_critic = critic_mode == "privileged"
+    critic_lr = lr if critic_lr is None else critic_lr
+    critic_hidden_dims = tuple(hidden_dims if critic_hidden_dims is None else critic_hidden_dims)
 
     print(f"\n{'=' * 60}")
     print("Training Policy-Value Network with Single Agent Reinforcement Learning (PPO)")
@@ -482,7 +597,9 @@ def train(
     num_players = len(opponents) + 1  # add the learning agent
     dims = compute_single_agent_dims(num_players, map_type)
     actor_input_dim = dims["actor_dim"]
+    critic_input_dim = dims["critic_dim"]
     numeric_dim = dims["numeric_dim"]
+    full_numeric_dim = dims["full_numeric_dim"]
     board_channels = dims["board_channels"]
     if input_dim is not None and int(input_dim) != actor_input_dim:
         print(
@@ -492,7 +609,10 @@ def train(
 
     print(f"Number of players: {num_players}")
     print(f"Opponents: {[repr(o) for o in opponents]}")
-    print(f"Backbone: {backbone_type} | Model type: {model_type}")
+    print(
+        f"Backbone: {backbone_type} | Model type: {model_type} | "
+        f"Critic mode: {critic_mode}"
+    )
 
     if wandb.run is None:
         if wandb_config:
@@ -515,21 +635,23 @@ def train(
         raise ValueError("xdim_cnn_channels cannot be empty")
 
     if backbone_type == "mlp":
-        backbone_config = BackboneConfig(
+        policy_backbone_config = BackboneConfig(
             architecture="mlp",
             args=MLPBackboneConfig(input_dim=actor_input_dim, hidden_dims=list(hidden_dims)),
         )
     else:
-        xdim_output_dim = hidden_dims[-1] if hidden_dims else 256
-        fusion_hidden_dim = (
-            xdim_fusion_hidden_dim if xdim_fusion_hidden_dim is not None else xdim_output_dim
+        policy_xdim_output_dim = hidden_dims[-1] if hidden_dims else 256
+        policy_fusion_hidden_dim = (
+            xdim_fusion_hidden_dim
+            if xdim_fusion_hidden_dim is not None
+            else policy_xdim_output_dim
         )
         xdim_architecture = (
             "residual_cross_dimensional"
             if backbone_type == "xdim_res"
             else "cross_dimensional"
         )
-        backbone_config = BackboneConfig(
+        policy_backbone_config = BackboneConfig(
             architecture=xdim_architecture,
             args=CrossDimensionalBackboneConfig(
                 board_height=BOARD_HEIGHT,
@@ -539,27 +661,90 @@ def train(
                 cnn_channels=xdim_cnn_channels,
                 cnn_kernel_size=xdim_cnn_kernel_size,
                 numeric_hidden_dims=list(hidden_dims),
-                fusion_hidden_dim=fusion_hidden_dim,
-                output_dim=xdim_output_dim,
+                fusion_hidden_dim=policy_fusion_hidden_dim,
+                output_dim=policy_xdim_output_dim,
             ),
         )
-    if model_type == "flat":
-        model = build_flat_policy_value_network(
-            backbone_config=backbone_config, num_actions=num_actions
-        ).to(device)
-    elif model_type == "hierarchical":
-        model = build_hierarchical_policy_value_network(backbone_config=backbone_config).to(device)
+
+    if uses_privileged_critic:
+        if model_type == "flat":
+            policy_model = build_flat_policy_network(
+                backbone_config=policy_backbone_config, num_actions=num_actions
+            ).to(device)
+        elif model_type == "hierarchical":
+            policy_model = build_hierarchical_policy_network(
+                backbone_config=policy_backbone_config
+            ).to(device)
+        else:
+            raise ValueError(f"Unknown model_type: {model_type}")
+
+        if backbone_type == "mlp":
+            critic_backbone_config = BackboneConfig(
+                architecture="mlp",
+                args=MLPBackboneConfig(
+                    input_dim=critic_input_dim, hidden_dims=list(critic_hidden_dims)
+                ),
+            )
+        else:
+            critic_xdim_output_dim = critic_hidden_dims[-1] if critic_hidden_dims else 256
+            critic_fusion_hidden_dim = (
+                xdim_critic_fusion_hidden_dim
+                if xdim_critic_fusion_hidden_dim is not None
+                else critic_xdim_output_dim
+            )
+            critic_backbone_config = BackboneConfig(
+                architecture=xdim_architecture,
+                args=CrossDimensionalBackboneConfig(
+                    board_height=BOARD_HEIGHT,
+                    board_width=BOARD_WIDTH,
+                    board_channels=board_channels,
+                    numeric_dim=full_numeric_dim,
+                    cnn_channels=xdim_cnn_channels,
+                    cnn_kernel_size=xdim_cnn_kernel_size,
+                    numeric_hidden_dims=list(critic_hidden_dims),
+                    fusion_hidden_dim=critic_fusion_hidden_dim,
+                    output_dim=critic_xdim_output_dim,
+                ),
+            )
+        critic_model = build_value_network(backbone_config=critic_backbone_config).to(device)
     else:
-        raise ValueError(f"Unknown model_type: {model_type}")
+        if model_type == "flat":
+            policy_model = build_flat_policy_value_network(
+                backbone_config=policy_backbone_config, num_actions=num_actions
+            ).to(device)
+        elif model_type == "hierarchical":
+            policy_model = build_hierarchical_policy_value_network(
+                backbone_config=policy_backbone_config
+            ).to(device)
+        else:
+            raise ValueError(f"Unknown model_type: {model_type}")
+        critic_model = None
 
     if load_weights and os.path.exists(load_weights):
-        print(f"Loading weights from: {load_weights}")
+        print(f"Loading policy weights from: {load_weights}")
         state_dict = torch.load(load_weights, map_location=device)
-        model.load_state_dict(state_dict)
-        print("  Weights loaded succesfully.")
+        if uses_privileged_critic:
+            missing_keys, unexpected_keys = policy_model.load_state_dict(state_dict, strict=False)
+            if missing_keys:
+                print(f"  Missing keys while loading policy weights: {missing_keys}")
+            if unexpected_keys:
+                print(f"  Unexpected keys while loading policy weights: {unexpected_keys}")
+        else:
+            policy_model.load_state_dict(state_dict)
+        print("  Policy weights loaded successfully.")
 
-    agent = SARLAgent(model, model_type, device)
-    optimizer = optim.Adam(model.parameters(), lr=lr)
+    if uses_privileged_critic and load_critic_weights and os.path.exists(load_critic_weights):
+        print(f"Loading critic weights from: {load_critic_weights}")
+        assert critic_model is not None
+        critic_state_dict = torch.load(load_critic_weights, map_location=device)
+        critic_model.load_state_dict(critic_state_dict)
+        print("  Critic weights loaded successfully.")
+
+    agent = SARLAgent(policy_model, model_type, device, critic_model=critic_model)
+    policy_optimizer = optim.Adam(policy_model.parameters(), lr=lr)
+    critic_optimizer = (
+        optim.Adam(critic_model.parameters(), lr=critic_lr) if critic_model is not None else None
+    )
 
     # Create learning rate scheduler
     scheduler = None
@@ -573,7 +758,7 @@ def train(
         total_iters = scheduler_kwargs.get("total_iters", default_total_iters)
         scheduler_total_iters = total_iters
         scheduler = lr_scheduler.LinearLR(
-            optimizer, start_factor=start_factor, end_factor=end_factor, total_iters=total_iters
+            policy_optimizer, start_factor=start_factor, end_factor=end_factor, total_iters=total_iters
         )
         print(
             f"LR Scheduler: LinearLR (start_factor={start_factor}, end_factor={end_factor}, total_iters={total_iters})"
@@ -581,14 +766,25 @@ def train(
     else:
         print("LR Scheduler: None (constant learning rate)")
 
-    model.eval()
+    policy_model.eval()
+    if critic_model is not None:
+        critic_model.eval()
 
-    buffer = ExperienceBuffer(
-        num_rollouts=rollout_steps,
-        state_dim=actor_input_dim,
-        action_space_size=num_actions,
-        num_envs=num_envs,
-    )
+    if uses_privileged_critic:
+        buffer = CentralCriticExperienceBuffer(
+            num_rollouts=rollout_steps,
+            actor_state_dim=actor_input_dim,
+            critic_state_dim=critic_input_dim,
+            action_space_size=num_actions,
+            num_envs=num_envs,
+        )
+    else:
+        buffer = ExperienceBuffer(
+            num_rollouts=rollout_steps,
+            state_dim=actor_input_dim,
+            action_space_size=num_actions,
+            num_envs=num_envs,
+        )
     pending_scheduler_steps = 0
     episode_rewards = deque(maxlen=metric_window)
     episode_lengths = deque(maxlen=metric_window)
@@ -633,15 +829,17 @@ def train(
         obs_space = driver_env.observation_space
     obs_dtype = getattr(driver_env, "obs_dtype", np.float32)
 
-    def decode_observations(flat_obs: np.ndarray) -> Tuple[np.ndarray, npt.NDArray[np.bool_]]:
-        actor_batch, _, action_masks = decode_puffer_batch(
+    def decode_observations(
+        flat_obs: np.ndarray,
+    ) -> Tuple[np.ndarray, np.ndarray | None, npt.NDArray[np.bool_]]:
+        actor_batch, critic_batch, action_masks = decode_puffer_batch(
             flat_obs=flat_obs,
             obs_space=obs_space,
             obs_dtype=obs_dtype,
             actor_dim=actor_input_dim,
-            critic_dim=None,
+            critic_dim=critic_input_dim if uses_privileged_critic else None,
         )
-        return actor_batch, action_masks
+        return actor_batch, critic_batch, action_masks
 
     env_episode_rewards = np.zeros(num_envs)
     env_episode_lengths = np.zeros(num_envs, dtype=int)
@@ -651,10 +849,18 @@ def train(
 
     with tqdm(total=total_timesteps, desc="Steps", unit="step", unit_scale=True) as pbar:
         while global_step < total_timesteps:
-            states, valid_action_masks = decode_observations(observations)
+            states, critic_states, valid_action_masks = decode_observations(observations)
             states_t = torch.from_numpy(states).float().to(device)
+            critic_states_t = (
+                torch.from_numpy(critic_states).float().to(device)
+                if critic_states is not None
+                else None
+            )
             actions, log_probs, values, raw_argmax = agent.select_actions_batch(
-                states_t, valid_action_masks, deterministic=deterministic_policy
+                states_t,
+                valid_action_masks,
+                critic_states=critic_states_t,
+                deterministic=deterministic_policy,
             )
             raw_policy_argmax_buffer.append(raw_argmax)
 
@@ -664,15 +870,29 @@ def train(
             env_episode_rewards += rewards
             env_episode_lengths += 1
 
-            buffer.add_batch(
-                states,
-                actions,
-                rewards,
-                values,
-                log_probs,
-                cast(npt.NDArray[np.bool_], valid_action_masks),
-                dones,
-            )
+            if uses_privileged_critic:
+                if critic_states is None:
+                    raise RuntimeError("Expected critic observations in privileged critic mode.")
+                cast(CentralCriticExperienceBuffer, buffer).add_batch(
+                    states,
+                    critic_states,
+                    actions,
+                    rewards,
+                    values,
+                    log_probs,
+                    cast(npt.NDArray[np.bool_], valid_action_masks),
+                    dones,
+                )
+            else:
+                buffer.add_batch(
+                    states,
+                    actions,
+                    rewards,
+                    values,
+                    log_probs,
+                    cast(npt.NDArray[np.bool_], valid_action_masks),
+                    dones,
+                )
             global_step += num_envs
             pbar.update(num_envs)
 
@@ -729,14 +949,19 @@ def train(
                     best_avg_reward = avg_reward
                     os.makedirs(save_path, exist_ok=True)
                     best_train_path = os.path.join(save_path, "policy_best_train_reward.pt")
-                    torch.save(model.state_dict(), best_train_path)
+                    torch.save(policy_model.state_dict(), best_train_path)
+                    if critic_model is not None:
+                        critic_best_train_path = os.path.join(
+                            save_path, "critic_best_train_reward.pt"
+                        )
+                        torch.save(critic_model.state_dict(), critic_best_train_path)
                     if wandb.run is not None:
                         wandb.run.summary["best_avg_reward"] = best_avg_reward
 
             observations = next_observations
 
             if len(buffer) >= rollout_steps:
-                bootstrap_states, _ = decode_observations(observations)
+                bootstrap_actor_states, bootstrap_critic_states, _ = decode_observations(observations)
 
                 # Log raw policy preference distribution (argmax before action-mask application).
                 if raw_policy_argmax_buffer:
@@ -757,7 +982,7 @@ def train(
 
                 metrics = ppo_update(
                     agent=agent,
-                    optimizer=optimizer,
+                    policy_optimizer=policy_optimizer,
                     buffer=buffer,
                     clip_epsilon=clip_epsilon,
                     value_coef=value_coef,
@@ -766,19 +991,23 @@ def train(
                     n_epochs=n_epochs,
                     batch_size=batch_size,
                     device=device,
-                    last_states=bootstrap_states,
+                    last_actor_states=bootstrap_actor_states,
+                    last_critic_states=bootstrap_critic_states,
+                    critic_optimizer=critic_optimizer,
                     gamma=gamma,
                     gae_lambda=gae_lambda,
                     max_grad_norm=max_grad_norm,
                     target_kl=target_kl,
                 )
                 buffer.clear()
-                model.eval()
+                policy_model.eval()
+                if critic_model is not None:
+                    critic_model.eval()
                 ppo_update_count += 1
 
                 # Step learning rate scheduler based on completed episodes since last update
                 updates_performed = metrics.get("num_updates", 0)
-                lr_before_scheduler = optimizer.param_groups[0]["lr"]
+                lr_before_scheduler = policy_optimizer.param_groups[0]["lr"]
                 lr_after_scheduler = lr_before_scheduler
                 if updates_performed > 0 and scheduler is not None and pending_scheduler_steps > 0:
                     remaining_steps = (
@@ -794,7 +1023,7 @@ def train(
                             scheduler.step()
                         scheduler_steps_taken += steps_to_apply
                         pending_scheduler_steps -= steps_to_apply
-                        lr_after_scheduler = optimizer.param_groups[0]["lr"]
+                        lr_after_scheduler = policy_optimizer.param_groups[0]["lr"]
                         if lr_after_scheduler != lr_before_scheduler:
                             print(
                                 f"  → LR updated: {lr_before_scheduler:.6f} → "
@@ -831,10 +1060,19 @@ def train(
                 if save_path and ppo_update_count % save_every_updates == 0:
                     os.makedirs(save_path, exist_ok=True)
                     snapshot_path = os.path.join(save_path, f"policy_update_{ppo_update_count}.pt")
-                    torch.save(model.state_dict(), snapshot_path)
+                    torch.save(policy_model.state_dict(), snapshot_path)
+                    if critic_model is not None:
+                        critic_snapshot_path = os.path.join(
+                            save_path, f"critic_update_{ppo_update_count}.pt"
+                        )
+                        torch.save(critic_model.state_dict(), critic_snapshot_path)
 
                 if do_eval and ppo_update_count % eval_every_updates == 0:
-                    policy_only = policy_value_to_policy_only(model)
+                    policy_only = (
+                        policy_value_to_policy_only(policy_model)
+                        if isinstance(policy_model, PolicyValueNetworkWrapper)
+                        else policy_model
+                    )
                     fresh_eval_metrics = eval_policy_against_baselines(
                         policy_model=policy_only,
                         model_type=model_type,
@@ -879,7 +1117,10 @@ def train(
                             best_eval_win_rate = eval_win_rate
                             os.makedirs(save_path, exist_ok=True)
                             best_path = os.path.join(save_path, "policy_best.pt")
-                            torch.save(model.state_dict(), best_path)
+                            torch.save(policy_model.state_dict(), best_path)
+                            if critic_model is not None:
+                                best_critic_path = os.path.join(save_path, "critic_best.pt")
+                                torch.save(critic_model.state_dict(), best_critic_path)
                             if wandb.run is not None:
                                 wandb.run.summary["best_eval_win_rate_vs_value"] = best_eval_win_rate
                             print(
@@ -897,4 +1138,4 @@ def train(
             f"\nTraining complete. {global_step:,} steps, {total_episodes} episodes. "
             f"Best avg training reward: {best_avg_reward:.3f}"
         )
-    return model
+    return policy_model

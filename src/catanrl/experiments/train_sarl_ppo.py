@@ -26,6 +26,12 @@ def main():
         help="Path to pre-trained weights from supervised learning",
     )
     parser.add_argument(
+        "--load-critic-weights",
+        type=str,
+        default=None,
+        help="Path to critic weights (used when --critic-mode privileged)",
+    )
+    parser.add_argument(
         "--total-timesteps",
         type=int,
         default=1_000_000,
@@ -38,6 +44,12 @@ def main():
         help="Update model every N rollout steps (default: 32)",
     )
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate (default: 1e-4)")
+    parser.add_argument(
+        "--critic-lr",
+        type=float,
+        default=None,
+        help="Critic learning rate in privileged mode (default: use --lr)",
+    )
     parser.add_argument("--gamma", type=float, default=0.99, help="Discount factor (default: 0.99)")
     parser.add_argument(
         "--gae-lambda", type=float, default=0.95, help="GAE lambda parameter (default: 0.95)"
@@ -67,6 +79,19 @@ def main():
         "--hidden-dims", type=str, default="512,512", help="Hidden dimensions (default: 512,512)"
     )
     parser.add_argument(
+        "--critic-hidden-dims",
+        type=str,
+        default=None,
+        help="Critic hidden dimensions in privileged mode (default: use --hidden-dims)",
+    )
+    parser.add_argument(
+        "--critic-mode",
+        type=str,
+        choices=["shared", "privileged"],
+        default="shared",
+        help="Critic architecture mode: shared (joint policy-value) or privileged (separate critic)",
+    )
+    parser.add_argument(
         "--backbone-type",
         type=str,
         choices=["mlp", "xdim", "xdim_res"],
@@ -90,6 +115,12 @@ def main():
         type=int,
         default=None,
         help="Fusion hidden dim for xdim backbones (default: last hidden dim)",
+    )
+    parser.add_argument(
+        "--xdim-critic-fusion-hidden-dim",
+        type=int,
+        default=None,
+        help="Critic fusion hidden dim for privileged xdim backbones (default: critic output dim)",
     )
     parser.add_argument(
         "--save-path",
@@ -230,6 +261,14 @@ def main():
         print(f"Error: Weights file '{args.load_weights}' not found!")
         print("Please train a model first")
         return
+    if (
+        args.critic_mode == "privileged"
+        and args.load_critic_weights
+        and not os.path.exists(args.load_critic_weights)
+    ):
+        print(f"Error: Critic weights file '{args.load_critic_weights}' not found!")
+        print("Please train a model first")
+        return
 
     # Set default save path
     if args.save_path is None:
@@ -260,6 +299,11 @@ def main():
 
     # Parse hidden dimensions
     hidden_dims = [int(dim) for dim in args.hidden_dims.split(",")]
+    critic_hidden_dims = (
+        [int(dim) for dim in args.critic_hidden_dims.split(",")]
+        if args.critic_hidden_dims
+        else list(hidden_dims)
+    )
     xdim_cnn_channels = [int(ch) for ch in args.xdim_cnn_channels.split(",") if ch.strip()]
     xdim_kernel_parts = [int(k) for k in args.xdim_cnn_kernel_size.split(",") if k.strip()]
     if len(xdim_kernel_parts) != 2:
@@ -299,14 +343,19 @@ def main():
                 "n_epochs": args.n_epochs,
                 "batch_size": args.batch_size,
                 "hidden_dims": hidden_dims,
+                "critic_hidden_dims": critic_hidden_dims,
+                "critic_mode": args.critic_mode,
                 "backbone_type": args.backbone_type,
                 "xdim_cnn_channels": xdim_cnn_channels,
                 "xdim_cnn_kernel_size": xdim_cnn_kernel_size,
                 "xdim_fusion_hidden_dim": args.xdim_fusion_hidden_dim,
+                "xdim_critic_fusion_hidden_dim": args.xdim_critic_fusion_hidden_dim,
                 "map_type": args.map_type,
                 "load_weights": args.load_weights,
+                "load_critic_weights": args.load_critic_weights,
                 "opponents": args.opponents,
                 "num_envs": args.num_envs,
+                "critic_lr": args.critic_lr,
                 "use_lr_scheduler": args.use_lr_scheduler,
                 "lr_scheduler_kwargs": lr_scheduler_kwargs,
                 "eval_games_per_opponent": args.eval_games_per_opponent,
@@ -329,11 +378,16 @@ def main():
         xdim_cnn_channels=xdim_cnn_channels,
         xdim_cnn_kernel_size=xdim_cnn_kernel_size,
         xdim_fusion_hidden_dim=args.xdim_fusion_hidden_dim,
+        xdim_critic_fusion_hidden_dim=args.xdim_critic_fusion_hidden_dim,
         hidden_dims=hidden_dims,
+        critic_hidden_dims=critic_hidden_dims,
+        critic_mode=args.critic_mode,
         load_weights=args.load_weights,
+        load_critic_weights=args.load_critic_weights,
         total_timesteps=args.total_timesteps,
         rollout_steps=args.rollout_steps,
         lr=args.lr,
+        critic_lr=args.critic_lr,
         gamma=args.gamma,
         gae_lambda=args.gae_lambda,
         clip_epsilon=args.clip_epsilon,
