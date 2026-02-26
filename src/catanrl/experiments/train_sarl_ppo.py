@@ -53,6 +53,12 @@ def main():
         "--entropy-coef", type=float, default=0.01, help="Entropy coefficient (default: 0.01)"
     )
     parser.add_argument(
+        "--activity-coef",
+        type=float,
+        default=0.0,
+        help="Activity regularization coefficient on raw policy logits (default: 0.0)",
+    )
+    parser.add_argument(
         "--n-epochs", type=int, default=10, help="Number of PPO epochs per update (default: 10)"
     )
     parser.add_argument(
@@ -68,7 +74,10 @@ def main():
         help="Path to save model (default: weights/{wandb-run-name}/best.pt if using wandb, else weights/policy_value_rl_best.pt)",
     )
     parser.add_argument(
-        "--save-freq", type=int, default=100, help="Save checkpoint every N episodes (default: 100)"
+        "--save-every-updates",
+        type=int,
+        default=1,
+        help="Save policy snapshot every N PPO updates (default: 1)",
     )
     parser.add_argument(
         "--map-type",
@@ -148,6 +157,47 @@ def main():
         default=200,
         help="Window size for metrics (avg reward and length), also used for best model saving (default: 200)",
     )
+    parser.add_argument(
+        "--eval-games-per-opponent",
+        type=int,
+        default=0,
+        help="Fresh evaluation games per opponent at each eval point; 0 disables eval (default: 0)",
+    )
+    parser.add_argument(
+        "--trend-eval-games-per-opponent",
+        type=int,
+        default=None,
+        help="Fixed-seed trend evaluation games per opponent (default: use eval-games-per-opponent)",
+    )
+    parser.add_argument(
+        "--trend-eval-seed",
+        type=int,
+        default=42,
+        help="Seed for trend evaluation runs (default: 42)",
+    )
+    parser.add_argument(
+        "--eval-every-updates",
+        type=int,
+        default=0,
+        help="Run evaluation every N PPO updates; 0 disables eval (default: 0)",
+    )
+    parser.add_argument(
+        "--deterministic-policy",
+        action="store_true",
+        help="Use deterministic (argmax) policy during rollout collection",
+    )
+    parser.add_argument(
+        "--max-grad-norm",
+        type=float,
+        default=0.5,
+        help="Gradient clipping norm for PPO updates (default: 0.5)",
+    )
+    parser.add_argument(
+        "--target-kl",
+        type=float,
+        default=None,
+        help="Optional KL threshold for PPO early stopping (default: disabled)",
+    )
 
     args = parser.parse_args()
 
@@ -161,10 +211,10 @@ def main():
     if args.save_path is None:
         if args.wandb and args.wandb_run_name:
             # Use wandb run name as directory
-            args.save_path = f"weights/{args.wandb_run_name}/best.pt"
+            args.save_path = f"weights/{args.wandb_run_name}"
         else:
             # Default fallback
-            args.save_path = "weights/policy_value_rl_best.pt"
+            args.save_path = "weights/sarl_ppo"
 
     # Create save directory
     save_dir = os.path.dirname(args.save_path)
@@ -218,6 +268,7 @@ def main():
                 "clip_epsilon": args.clip_epsilon,
                 "value_coef": args.value_coef,
                 "entropy_coef": args.entropy_coef,
+                "activity_coef": args.activity_coef,
                 "n_epochs": args.n_epochs,
                 "batch_size": args.batch_size,
                 "hidden_dims": hidden_dims,
@@ -227,6 +278,14 @@ def main():
                 "num_envs": args.num_envs,
                 "use_lr_scheduler": args.use_lr_scheduler,
                 "lr_scheduler_kwargs": lr_scheduler_kwargs,
+                "eval_games_per_opponent": args.eval_games_per_opponent,
+                "trend_eval_games_per_opponent": args.trend_eval_games_per_opponent,
+                "trend_eval_seed": args.trend_eval_seed,
+                "eval_every_updates": args.eval_every_updates,
+                "save_every_updates": args.save_every_updates,
+                "deterministic_policy": args.deterministic_policy,
+                "max_grad_norm": args.max_grad_norm,
+                "target_kl": args.target_kl,
             },
         }
 
@@ -245,10 +304,11 @@ def main():
         clip_epsilon=args.clip_epsilon,
         value_coef=args.value_coef,
         entropy_coef=args.entropy_coef,
+        activity_coef=args.activity_coef,
         n_epochs=args.n_epochs,
         batch_size=args.batch_size,
         save_path=args.save_path,
-        save_freq=args.save_freq,
+        save_every_updates=args.save_every_updates,
         wandb_config=wandb_config,
         map_type=args.map_type,
         opponent_configs=args.opponents,
@@ -257,6 +317,13 @@ def main():
         use_lr_scheduler=args.use_lr_scheduler,
         lr_scheduler_kwargs=lr_scheduler_kwargs,
         metric_window=args.metric_window,
+        eval_games_per_opponent=args.eval_games_per_opponent,
+        trend_eval_games_per_opponent=args.trend_eval_games_per_opponent,
+        trend_eval_seed=args.trend_eval_seed,
+        eval_every_updates=args.eval_every_updates,
+        deterministic_policy=args.deterministic_policy,
+        max_grad_norm=args.max_grad_norm,
+        target_kl=args.target_kl,
     )
 
     print("\n" + "=" * 60)
