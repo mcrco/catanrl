@@ -14,9 +14,8 @@ import wandb
 from tqdm import tqdm
 
 from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE, ACTIONS_ARRAY, ACTION_TYPES
-from ...envs import compute_multiagent_input_dim
+from ...envs import compute_multiagent_input_dim, decode_puffer_batch
 from ...envs.zoo.multi_env import make_vectorized_envs as make_marl_vectorized_envs
-from ...envs.gym.puffer_rollout_utils import decode_puffer_batch
 from ...features.catanatron_utils import (
     get_full_numeric_feature_names,
     get_numeric_feature_names,

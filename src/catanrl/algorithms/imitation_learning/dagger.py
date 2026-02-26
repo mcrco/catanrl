@@ -23,11 +23,8 @@ from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE
 
 from .dataset import AggregatedDataset, EvictionStrategy
 
-from ...envs.gym.single_env import (
-    compute_single_agent_dims,
-    make_puffer_vectorized_envs,
-)
-from ...envs.gym.puffer_rollout_utils import (
+from ...envs.gym.single_env import compute_single_agent_dims, make_puffer_vectorized_envs
+from ...envs import (
     extract_expert_actions_from_infos,
     flatten_puffer_observation,
     get_action_mask_from_obs,

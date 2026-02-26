@@ -12,7 +12,7 @@ from pufferlib.emulation import nativize
 
 from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE
 
-from ..envs.gym.puffer_rollout_utils import (
+from ..envs import (
     EpisodeBuffer,
     extract_expert_actions_from_infos,
     flatten_puffer_observation,

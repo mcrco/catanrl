@@ -19,6 +19,14 @@ from .zoo.multi_env import (
 )
 from .zoo.aec_env import AecCatanatronEnv
 from .zoo.parallel_env import ParallelCatanatronEnv
+from .puffer.rollout_utils import (
+    EpisodeBuffer,
+    decode_puffer_batch,
+    extract_expert_actions_from_infos,
+    flatten_puffer_observation,
+    get_action_mask_from_obs,
+    init_episode_buffers,
+)
 
 __all__ = [
     "make_vectorized_envs",
@@ -31,4 +39,10 @@ __all__ = [
     "MultiAgentCatanatronEnvConfig",
     "AecCatanatronEnv",
     "ParallelCatanatronEnv",
+    "EpisodeBuffer",
+    "decode_puffer_batch",
+    "extract_expert_actions_from_infos",
+    "flatten_puffer_observation",
+    "get_action_mask_from_obs",
+    "init_episode_buffers",
 ]

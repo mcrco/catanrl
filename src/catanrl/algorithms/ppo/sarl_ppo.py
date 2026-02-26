@@ -28,7 +28,7 @@ from ...envs.gym.single_env import (
     create_opponents,
     make_puffer_vectorized_envs,
 )
-from ...envs.gym.puffer_rollout_utils import decode_puffer_batch
+from ...envs import decode_puffer_batch
 from ...eval.training_eval import eval_policy_against_baselines
 from ...models import (
     PolicyValueNetworkWrapper,
