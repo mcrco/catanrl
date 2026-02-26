@@ -8,9 +8,11 @@ be reused by both training and evaluation loops.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
+import numpy.typing as npt
+from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE
 
 
 BOARD_WIDTH = 21
@@ -55,7 +57,43 @@ def get_action_mask_from_obs(obs: Dict[str, Any]) -> np.ndarray:
     return np.asarray(obs["action_mask"], dtype=np.int8) > 0
 
 
-def extract_expert_actions_from_infos(infos: Any, batch_size: int) -> np.ndarray:
+def decode_puffer_batch(
+    flat_obs: np.ndarray,
+    obs_space: Any,
+    obs_dtype: Any,
+    actor_dim: int,
+    critic_dim: Optional[int] = None,
+) -> Tuple[np.ndarray, Optional[np.ndarray], np.ndarray]:
+    """Decode flat Puffer observations into actor/critic vectors and action masks.
+
+    Expects structured observations with schema:
+      {"observation": {"numeric": ..., "board": ...}, "action_mask": ..., "critic": ...}
+    If critic_dim is None, critic outputs are skipped and returned as None.
+    """
+    # Local import keeps this util torch-free and avoids puffer dependency at import time.
+    from pufferlib.emulation import nativize
+
+    batch_size = flat_obs.shape[0]
+    actor_batch = np.zeros((batch_size, actor_dim), dtype=np.float32)
+    critic_batch = (
+        np.zeros((batch_size, critic_dim), dtype=np.float32) if critic_dim is not None else None
+    )
+    action_masks = np.zeros((batch_size, ACTION_SPACE_SIZE), dtype=np.bool_)
+
+    for idx in range(batch_size):
+        structured = nativize(flat_obs[idx], obs_space, obs_dtype)
+        actor_vec, critic_vec = flatten_puffer_observation(structured)
+        actor_batch[idx] = actor_vec
+        if critic_batch is not None:
+            critic_batch[idx] = critic_vec
+        action_masks[idx] = get_action_mask_from_obs(structured)
+
+    return actor_batch, critic_batch, action_masks
+
+
+def extract_expert_actions_from_infos(
+    infos: Any, batch_size: int
+) -> npt.NDArray[np.int64]:
     """Extract expert actions from PufferLib vectorized env infos."""
     expert_actions = np.zeros(batch_size, dtype=np.int64)
 

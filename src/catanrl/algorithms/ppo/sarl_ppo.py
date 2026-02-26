@@ -26,8 +26,9 @@ from ...envs.gym.single_env import (
     BOARD_WIDTH,
     compute_single_agent_dims,
     create_opponents,
-    make_vectorized_envs,
+    make_puffer_vectorized_envs,
 )
+from ...envs.gym.puffer_rollout_utils import decode_puffer_batch
 from ...eval.training_eval import eval_policy_against_baselines
 from ...models import (
     PolicyValueNetworkWrapper,
@@ -432,7 +433,6 @@ def train(
     hidden_dims: Sequence[int] = (512, 512),
     load_weights: str | None = None,
     total_timesteps: int = 1_000_000,
-    n_episodes: int | None = None,
     rollout_steps: int = 4096,
     lr: float = 1e-4,
     gamma: float = 0.99,
@@ -474,8 +474,6 @@ def train(
     print(f"Device: {device}")
     print(f"Map type: {map_type}")
     print(f"Total timesteps: {total_timesteps:,}")
-    if n_episodes is not None:
-        print(f"Episode cap: {n_episodes}")
     print(f"Rollout steps: {rollout_steps}")
     print(f"Parallel environments: {num_envs}")
 
@@ -571,11 +569,7 @@ def train(
         scheduler_kwargs = lr_scheduler_kwargs or {}
         start_factor = scheduler_kwargs.get("start_factor", 1.0)
         end_factor = scheduler_kwargs.get("end_factor", 0.0)
-        default_total_iters = (
-            max(1, total_timesteps // max(1, num_envs))
-            if n_episodes is None
-            else max(1, n_episodes)
-        )
+        default_total_iters = max(1, total_timesteps // max(1, num_envs))
         total_iters = scheduler_kwargs.get("total_iters", default_total_iters)
         scheduler_total_iters = total_iters
         scheduler = lr_scheduler.LinearLR(
@@ -626,30 +620,28 @@ def train(
     )
     raw_policy_argmax_buffer: list[np.ndarray] = []
 
-    envs = make_vectorized_envs(
+    envs = make_puffer_vectorized_envs(
         reward_function=reward_function,
         map_type=map_type,
         opponent_configs=opponent_configs,
         num_envs=num_envs,
-        representation="mixed",
     )
+    driver_env = envs.driver_env
+    if hasattr(driver_env, "env_single_observation_space"):
+        obs_space = driver_env.env_single_observation_space
+    else:
+        obs_space = driver_env.observation_space
+    obs_dtype = getattr(driver_env, "obs_dtype", np.float32)
 
-    def flatten_observations(observation_batch: Dict[str, np.ndarray]) -> np.ndarray:
-        numeric_obs = observation_batch["numeric"].astype(np.float32)
-        board_obs = observation_batch["board"].astype(np.float32)
-        if board_obs.ndim != 4:
-            raise ValueError(f"Expected board batch rank 4, got shape {board_obs.shape}")
-        # Canonical flatten order is [numeric, board(W,H,C).reshape(-1)].
-        if board_obs.shape[2] == BOARD_WIDTH and board_obs.shape[3] == BOARD_HEIGHT:
-            board_obs_wh_last = np.transpose(board_obs, (0, 2, 3, 1))  # [N, C, W, H] -> [N, W, H, C]
-        elif board_obs.shape[1] == BOARD_WIDTH and board_obs.shape[2] == BOARD_HEIGHT:
-            board_obs_wh_last = board_obs  # already [N, W, H, C]
-        else:
-            raise ValueError(
-                f"Unrecognized board layout {board_obs.shape}; expected [N,C,W,H] or [N,W,H,C]"
-            )
-        board_flat = board_obs_wh_last.reshape(board_obs_wh_last.shape[0], -1)
-        return np.concatenate([numeric_obs, board_flat], axis=1)
+    def decode_observations(flat_obs: np.ndarray) -> Tuple[np.ndarray, npt.NDArray[np.bool_]]:
+        actor_batch, _, action_masks = decode_puffer_batch(
+            flat_obs=flat_obs,
+            obs_space=obs_space,
+            obs_dtype=obs_dtype,
+            actor_dim=actor_input_dim,
+            critic_dim=None,
+        )
+        return actor_batch, action_masks
 
     env_episode_rewards = np.zeros(num_envs)
     env_episode_lengths = np.zeros(num_envs, dtype=int)
@@ -658,15 +650,8 @@ def train(
     observations, infos = envs.reset()
 
     with tqdm(total=total_timesteps, desc="Steps", unit="step", unit_scale=True) as pbar:
-        while global_step < total_timesteps and (n_episodes is None or total_episodes < n_episodes):
-            states = flatten_observations(observations)
-
-            info_valid = infos.get("valid_actions")
-            valid_action_masks: npt.NDArray[np.bool_] = np.zeros(
-                (num_envs, ACTION_SPACE_SIZE), dtype=np.bool_
-            )
-            for i, v in enumerate(info_valid):
-                valid_action_masks[i, v] = True
+        while global_step < total_timesteps:
+            states, valid_action_masks = decode_observations(observations)
             states_t = torch.from_numpy(states).float().to(device)
             actions, log_probs, values, raw_argmax = agent.select_actions_batch(
                 states_t, valid_action_masks, deterministic=deterministic_policy
@@ -751,7 +736,7 @@ def train(
             observations = next_observations
 
             if len(buffer) >= rollout_steps:
-                bootstrap_states = flatten_observations(observations)
+                bootstrap_states, _ = decode_observations(observations)
 
                 # Log raw policy preference distribution (argmax before action-mask application).
                 if raw_policy_argmax_buffer:

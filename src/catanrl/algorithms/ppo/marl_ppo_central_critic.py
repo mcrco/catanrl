@@ -14,10 +14,9 @@ import wandb
 from tqdm import tqdm
 
 from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE, ACTIONS_ARRAY, ACTION_TYPES
-from pufferlib.emulation import nativize
-
-from ...envs import compute_multiagent_input_dim, flatten_marl_observation
+from ...envs import compute_multiagent_input_dim
 from ...envs.zoo.multi_env import make_vectorized_envs as make_marl_vectorized_envs
+from ...envs.gym.puffer_rollout_utils import decode_puffer_batch
 from ...features.catanatron_utils import (
     get_full_numeric_feature_names,
     get_numeric_feature_names,
@@ -671,16 +670,15 @@ def train(
         ptr += count
 
     def decode_observations(flat_obs: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        batch_size = flat_obs.shape[0]
-        actor_batch = np.zeros((batch_size, actor_input_dim), dtype=np.float32)
-        critic_batch = np.zeros((batch_size, critic_input_dim), dtype=np.float32)
-        action_masks = np.zeros((batch_size, ACTION_SPACE_SIZE), dtype=np.bool_)
-        for idx in range(batch_size):
-            structured = nativize(flat_obs[idx], obs_space, obs_dtype)
-            actor_batch[idx] = flatten_marl_observation(structured)
-            critic_batch[idx] = np.asarray(structured["critic"], dtype=np.float32).reshape(-1)
-            mask = np.asarray(structured["action_mask"], dtype=np.int8).reshape(-1)
-            action_masks[idx] = mask > 0
+        actor_batch, critic_batch, action_masks = decode_puffer_batch(
+            flat_obs=flat_obs,
+            obs_space=obs_space,
+            obs_dtype=obs_dtype,
+            actor_dim=actor_input_dim,
+            critic_dim=critic_input_dim,
+        )
+        if critic_batch is None:
+            raise RuntimeError("Expected critic observations for MARL centralized critic training.")
         return actor_batch, critic_batch, action_masks
 
     metric_window = max(1, metric_window)

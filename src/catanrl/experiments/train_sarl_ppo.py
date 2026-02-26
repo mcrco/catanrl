@@ -32,12 +32,6 @@ def main():
         help="Total number of environment steps to train for (default: 1000000)",
     )
     parser.add_argument(
-        "--episodes",
-        type=int,
-        default=None,
-        help="Optional cap on number of completed episodes (default: none)",
-    )
-    parser.add_argument(
         "--rollout-steps",
         type=int,
         default=4096,
@@ -179,7 +173,7 @@ def main():
         "--lr-scheduler-total-iters",
         type=int,
         default=None,
-        help="Total iterations for LinearLR scheduler (default: episodes cap, else total_timesteps/num_envs)",
+        help="Total iterations for LinearLR scheduler (default: total_timesteps/num_envs)",
     )
     parser.add_argument(
         "--metric-window",
@@ -293,7 +287,6 @@ def main():
             "config": {
                 "algorithm": "PPO",
                 "total_timesteps": args.total_timesteps,
-                "episodes_cap": args.episodes,
                 "rollout_steps": args.rollout_steps,
                 "reward_function": args.reward,
                 "lr": args.lr,
@@ -339,7 +332,6 @@ def main():
         hidden_dims=hidden_dims,
         load_weights=args.load_weights,
         total_timesteps=args.total_timesteps,
-        n_episodes=args.episodes,
         rollout_steps=args.rollout_steps,
         lr=args.lr,
         gamma=args.gamma,
