@@ -74,7 +74,9 @@ def compute_action_distributions(
 
     action_counts = np.bincount(actions, minlength=ACTION_SPACE_SIZE)
     action_dist = {
-        f"action_{idx}": float(count / n_actions) for idx, count in enumerate(action_counts) if count > 0
+        f"action_{idx}": float(count / n_actions)
+        for idx, count in enumerate(action_counts)
+        if count > 0
     }
     return action_type_dist, action_dist
 
@@ -119,7 +121,9 @@ class SARLAgent:
             mask = mask.unsqueeze(0)
         no_valid = ~mask.any(dim=1, keepdim=True)
         mask = torch.where(no_valid, torch.ones_like(mask), mask)
-        masked_logits = torch.where(mask, policy_logits, torch.full_like(policy_logits, float("-inf")))
+        masked_logits = torch.where(
+            mask, policy_logits, torch.full_like(policy_logits, float("-inf"))
+        )
         return torch.clamp(masked_logits, min=-100, max=100), mask
 
     def select_actions_batch(
@@ -151,7 +155,9 @@ class SARLAgent:
                     policy_logits, values = self.model(states)
                 elif self.model_type == "hierarchical":
                     action_type_logits, param_logits, values = self.model(states)
-                    policy_logits = self.model.get_flat_action_logits(action_type_logits, param_logits)
+                    policy_logits = self.model.get_flat_action_logits(
+                        action_type_logits, param_logits
+                    )
                 else:  # pragma: no cover
                     raise ValueError(f"Unknown model_type '{self.model_type}'")
 
@@ -394,7 +400,9 @@ def ppo_update(
 
             decision_count = int(np.sum(batch_is_decision))
             if decision_count > 0:
-                decision_mask_t = torch.as_tensor(batch_is_decision, device=device, dtype=torch.bool)
+                decision_mask_t = torch.as_tensor(
+                    batch_is_decision, device=device, dtype=torch.bool
+                )
 
                 log_probs_d = log_probs[decision_mask_t]
                 entropy_d = entropy[decision_mask_t]
@@ -427,7 +435,9 @@ def ppo_update(
 
                 if decision_count > 0:
                     policy_optimizer.zero_grad()
-                    (policy_loss + entropy_coef * entropy_loss + activity_coef * activity_loss).backward()
+                    (
+                        policy_loss + entropy_coef * entropy_loss + activity_coef * activity_loss
+                    ).backward()
                     torch.nn.utils.clip_grad_norm_(agent.model.parameters(), max_grad_norm)
                     has_nan_policy_grad = any(
                         param.grad is not None and torch.isnan(param.grad).any()
@@ -615,10 +625,7 @@ def train(
 
     print(f"Number of players: {num_players}")
     print(f"Opponents: {[repr(o) for o in opponents]}")
-    print(
-        f"Backbone: {backbone_type} | Model type: {model_type} | "
-        f"Critic mode: {critic_mode}"
-    )
+    print(f"Backbone: {backbone_type} | Model type: {model_type} | " f"Critic mode: {critic_mode}")
 
     if wandb.run is None:
         if wandb_config:
@@ -648,14 +655,10 @@ def train(
     else:
         policy_xdim_output_dim = hidden_dims[-1] if hidden_dims else 256
         policy_fusion_hidden_dim = (
-            xdim_fusion_hidden_dim
-            if xdim_fusion_hidden_dim is not None
-            else policy_xdim_output_dim
+            xdim_fusion_hidden_dim if xdim_fusion_hidden_dim is not None else policy_xdim_output_dim
         )
         xdim_architecture = (
-            "residual_cross_dimensional"
-            if backbone_type == "xdim_res"
-            else "cross_dimensional"
+            "residual_cross_dimensional" if backbone_type == "xdim_res" else "cross_dimensional"
         )
         policy_backbone_config = BackboneConfig(
             architecture=xdim_architecture,
@@ -764,7 +767,10 @@ def train(
         total_iters = scheduler_kwargs.get("total_iters", default_total_iters)
         scheduler_total_iters = total_iters
         scheduler = lr_scheduler.LinearLR(
-            policy_optimizer, start_factor=start_factor, end_factor=end_factor, total_iters=total_iters
+            policy_optimizer,
+            start_factor=start_factor,
+            end_factor=end_factor,
+            total_iters=total_iters,
         )
         print(
             f"LR Scheduler: LinearLR (start_factor={start_factor}, end_factor={end_factor}, total_iters={total_iters})"
@@ -801,11 +807,6 @@ def train(
     ppo_update_count = 0
     eval_every_updates = max(0, int(eval_every_updates))
     save_every_updates = max(1, int(save_every_updates))
-    if eval_every_updates > 0 and save_every_updates % eval_every_updates != 0:
-        raise ValueError(
-            "save_every_updates must be a multiple of eval_every_updates "
-            f"({eval_every_updates})"
-        )
     if eval_every_updates > 0:
         print(f"Eval cadence: every {eval_every_updates} update(s)")
     else:
@@ -967,7 +968,9 @@ def train(
             observations = next_observations
 
             if len(buffer) >= rollout_steps:
-                bootstrap_actor_states, bootstrap_critic_states, _ = decode_observations(observations)
+                bootstrap_actor_states, bootstrap_critic_states, _ = decode_observations(
+                    observations
+                )
 
                 # Log raw policy preference distribution (argmax before action-mask application).
                 if raw_policy_argmax_buffer:
@@ -1096,7 +1099,9 @@ def train(
                     for key, value in trend_eval_metrics.items():
                         suffix = key.split("/", 1)[1] if "/" in key else key
                         trend_log[f"eval_trend/{suffix}"] = value
-                    trend_log["eval_trend/seed"] = trend_eval_seed if trend_eval_seed is not None else 0
+                    trend_log["eval_trend/seed"] = (
+                        trend_eval_seed if trend_eval_seed is not None else 0
+                    )
                     trend_log["eval_trend/games_per_opponent"] = trend_eval_games
                     wandb.log({**fresh_log, **trend_log}, step=global_step)
 
@@ -1106,9 +1111,13 @@ def train(
                             trend_eval_games_per_opponent is not None
                             and trend_eval_games_per_opponent > 0
                         ):
-                            eval_win_rate = float(trend_eval_metrics.get("eval/win_rate_vs_value", 0.0))
+                            eval_win_rate = float(
+                                trend_eval_metrics.get("eval/win_rate_vs_value", 0.0)
+                            )
                         elif eval_games_per_opponent is not None and eval_games_per_opponent > 0:
-                            eval_win_rate = float(fresh_eval_metrics.get("eval/win_rate_vs_value", 0.0))
+                            eval_win_rate = float(
+                                fresh_eval_metrics.get("eval/win_rate_vs_value", 0.0)
+                            )
 
                         if eval_win_rate > best_eval_win_rate:
                             best_eval_win_rate = eval_win_rate
@@ -1119,7 +1128,9 @@ def train(
                                 best_critic_path = os.path.join(save_path, "critic_best.pt")
                                 torch.save(critic_model.state_dict(), best_critic_path)
                             if wandb.run is not None:
-                                wandb.run.summary["best_eval_win_rate_vs_value"] = best_eval_win_rate
+                                wandb.run.summary["best_eval_win_rate_vs_value"] = (
+                                    best_eval_win_rate
+                                )
                             print(
                                 f"  → Saved best policy (eval win rate vs value: {best_eval_win_rate:.3f})"
                             )
