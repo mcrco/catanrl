@@ -165,16 +165,14 @@ class SARLAgent:
 
             raw_argmax_tensor = torch.argmax(policy_logits, dim=-1)
             masked_logits, _ = self._mask_logits(policy_logits, valid_action_masks)
-            probs = F.softmax(masked_logits, dim=-1)
-            log_probs_all = F.log_softmax(masked_logits, dim=-1)
+            dist = torch.distributions.Categorical(logits=masked_logits)
 
             if deterministic:
                 action_tensor = torch.argmax(masked_logits, dim=-1)
             else:
-                dist = torch.distributions.Categorical(probs=probs)
                 action_tensor = dist.sample()
 
-            log_prob_tensor = log_probs_all.gather(1, action_tensor.unsqueeze(1)).squeeze(1)
+            log_prob_tensor = dist.log_prob(action_tensor)
             value_tensor = values.reshape(batch_size)
 
             actions = action_tensor.detach().cpu().numpy().astype(np.int16, copy=False)
@@ -194,11 +192,9 @@ class SARLAgent:
         policy_logits = self._policy_logits(states)
 
         masked_logits, _ = self._mask_logits(policy_logits, valid_action_masks)
-        log_probs_all = F.log_softmax(masked_logits, dim=-1)
-        probs = F.softmax(masked_logits, dim=-1)
-
-        log_probs = log_probs_all.gather(1, actions.unsqueeze(1)).squeeze(1)
-        entropy = -(probs * log_probs_all).sum(dim=-1)
+        dist = torch.distributions.Categorical(logits=masked_logits)
+        log_probs = dist.log_prob(actions)
+        entropy = dist.entropy()
 
         return log_probs, entropy, policy_logits
 

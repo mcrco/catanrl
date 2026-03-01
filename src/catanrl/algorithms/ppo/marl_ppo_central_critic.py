@@ -133,23 +133,15 @@ class PolicyAgent:
         with torch.no_grad():
             policy_logits = self._policy_logits(state_tensor)
             masked_logits, mask_tensor = self._mask_logits(policy_logits, valid_action_mask)
-
-            probs = torch.softmax(masked_logits, dim=-1)
-            log_probs_all = torch.log_softmax(masked_logits, dim=-1)
+            dist = torch.distributions.Categorical(logits=masked_logits)
             valid_indices = torch.nonzero(mask_tensor[0], as_tuple=False).squeeze(-1)
-            if valid_indices.size == 0:
-                valid_indices = torch.arange(ACTION_SPACE_SIZE, device=probs.device)
 
             if deterministic:
-                local_idx = torch.argmax(probs[0, valid_indices]).item()
-                action = int(valid_indices[local_idx].item())
+                action_tensor = torch.argmax(masked_logits, dim=-1)
             else:
-                valid_probs = probs[0, valid_indices]
-                valid_probs = valid_probs / (valid_probs.sum() + 1e-12)
-                dist = torch.distributions.Categorical(valid_probs)
-                action = int(valid_indices[dist.sample()].item())
-
-            log_prob = float(log_probs_all[0, action].item())
+                action_tensor = dist.sample()
+            action = int(action_tensor.item())
+            log_prob = float(dist.log_prob(action_tensor).item())
 
         return action, log_prob
 
@@ -168,16 +160,14 @@ class PolicyAgent:
             raw_argmax_tensor = torch.argmax(policy_logits, dim=-1)
 
             masked_logits, _ = self._mask_logits(policy_logits, valid_action_masks)
-            probs = torch.softmax(masked_logits, dim=-1)
-            log_probs_all = torch.log_softmax(masked_logits, dim=-1)
+            dist = torch.distributions.Categorical(logits=masked_logits)
 
             if deterministic:
                 action_tensor = torch.argmax(masked_logits, dim=-1)
             else:
-                dist = torch.distributions.Categorical(probs=probs)
                 action_tensor = dist.sample()
 
-            log_prob_tensor = log_probs_all.gather(1, action_tensor.unsqueeze(1)).squeeze(1)
+            log_prob_tensor = dist.log_prob(action_tensor)
 
             actions = action_tensor.detach().cpu().numpy().astype(np.int64)
             log_probs = log_prob_tensor.detach().cpu().numpy().astype(np.float32)
@@ -200,11 +190,9 @@ class PolicyAgent:
         """
         policy_logits = self._policy_logits(states)
         masked_logits, _ = self._mask_logits(policy_logits, valid_action_masks)
-        log_probs_all = torch.log_softmax(masked_logits, dim=-1)
-        probs = torch.softmax(masked_logits, dim=-1)
-
-        log_probs = log_probs_all.gather(1, actions.unsqueeze(1)).squeeze(1)
-        entropy = -(probs * log_probs_all).sum(dim=-1)
+        dist = torch.distributions.Categorical(logits=masked_logits)
+        log_probs = dist.log_prob(actions)
+        entropy = dist.entropy()
         return log_probs, entropy, policy_logits
 
 
