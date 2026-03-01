@@ -13,30 +13,29 @@ from typing import Any, Callable, Dict, List, Literal, Optional, Sequence, Tuple
 import numpy as np
 import torch
 import torch.nn.functional as F
+from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE
+from pufferlib.emulation import nativize
+from sklearn.metrics import f1_score
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+
 import wandb
-from sklearn.metrics import f1_score
-from pufferlib.emulation import nativize
 
-from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE
-
-from .dataset import AggregatedDataset, EvictionStrategy
-
-from ...envs.gym.single_env import compute_single_agent_dims, make_puffer_vectorized_envs
 from ...envs import (
     extract_expert_actions_from_infos,
     flatten_puffer_observation,
     get_action_mask_from_obs,
 )
-from ...models.backbones import BackboneConfig, MLPBackboneConfig, CrossDimensionalBackboneConfig
+from ...envs.gym.single_env import compute_single_agent_dims, make_puffer_vectorized_envs
+from ...eval.training_eval import eval_policy_value_against_baselines
+from ...models.backbones import BackboneConfig, CrossDimensionalBackboneConfig, MLPBackboneConfig
 from ...models.models import (
     build_flat_policy_network,
     build_hierarchical_policy_network,
     build_value_network,
 )
 from ...models.wrappers import PolicyNetworkWrapper, ValueNetworkWrapper
-from ...eval.training_eval import eval_policy_value_against_baselines
+from .dataset import AggregatedDataset, EvictionStrategy
 
 
 def _mask_logits(
@@ -151,7 +150,6 @@ def _select_policy_actions_batch(
             policy_logits,
             torch.full_like(policy_logits, float("-inf")),
         )
-        masked_logits = torch.clamp(masked_logits, min=-100, max=100)
 
         probs = torch.softmax(masked_logits, dim=-1)
         log_probs_all = torch.log_softmax(masked_logits, dim=-1)
@@ -186,8 +184,7 @@ def _assert_actions_are_unmasked(
         )
     if np.any(actions < 0) or np.any(actions >= action_masks.shape[1]):
         raise RuntimeError(
-            f"Out-of-range action found in {context}. "
-            f"Action space size={action_masks.shape[1]}."
+            f"Out-of-range action found in {context}. Action space size={action_masks.shape[1]}."
         )
 
     valid = action_masks[np.arange(actions.shape[0]), actions]
@@ -201,8 +198,7 @@ def _assert_actions_are_unmasked(
         for i in preview
     )
     raise RuntimeError(
-        f"Found {bad_indices.size} masked expert actions in {context}. "
-        f"Examples: {examples}"
+        f"Found {bad_indices.size} masked expert actions in {context}. Examples: {examples}"
     )
 
 
@@ -418,7 +414,14 @@ def _train_on_dataset(
             all_labels = []
             all_preds = []
             n_updates = 0
-            for actor_features, critic_features, actions, returns, is_single_action, action_masks in loader:
+            for (
+                actor_features,
+                critic_features,
+                actions,
+                returns,
+                is_single_action,
+                action_masks,
+            ) in loader:
                 actor_features = actor_features.to(device)
                 critic_features = critic_features.to(device)
                 actions = actions.to(device)
@@ -437,13 +440,14 @@ def _train_on_dataset(
                 policy_optimizer.zero_grad()
                 policy_logits = _get_policy_logits(policy_model, actor_features, model_type)
                 no_valid = ~action_masks.any(dim=1, keepdim=True)
-                safe_action_masks = torch.where(no_valid, torch.ones_like(action_masks), action_masks)
+                safe_action_masks = torch.where(
+                    no_valid, torch.ones_like(action_masks), action_masks
+                )
                 masked_policy_logits = torch.where(
                     safe_action_masks,
                     policy_logits,
                     torch.full_like(policy_logits, float("-inf")),
                 )
-                masked_policy_logits = torch.clamp(masked_policy_logits, min=-100, max=100)
                 non_single_mask = ~is_single_action
                 if non_single_mask.any():
                     # Compute loss only for non-single-action steps
@@ -452,7 +456,9 @@ def _train_on_dataset(
                     )
                     policy_loss = policy_loss_per_sample[non_single_mask].mean()
                     policy_loss.backward()
-                    torch.nn.utils.clip_grad_norm_(policy_model.parameters(), max_norm=max_grad_norm)
+                    torch.nn.utils.clip_grad_norm_(
+                        policy_model.parameters(), max_norm=max_grad_norm
+                    )
                     policy_optimizer.step()
                 else:
                     # All samples are single-action steps, skip policy update
@@ -675,9 +681,7 @@ def train(
             else policy_output_dim
         )
         xdim_architecture = (
-            "residual_cross_dimensional"
-            if backbone_type == "xdim_res"
-            else "cross_dimensional"
+            "residual_cross_dimensional" if backbone_type == "xdim_res" else "cross_dimensional"
         )
         policy_backbone_config = BackboneConfig(
             architecture=xdim_architecture,
@@ -719,9 +723,7 @@ def train(
             else critic_output_dim
         )
         xdim_architecture = (
-            "residual_cross_dimensional"
-            if backbone_type == "xdim_res"
-            else "cross_dimensional"
+            "residual_cross_dimensional" if backbone_type == "xdim_res" else "cross_dimensional"
         )
         critic_backbone_config = BackboneConfig(
             architecture=xdim_architecture,
@@ -819,9 +821,7 @@ def train(
                     progress_desc=f"Train {iteration}/{n_iterations}",
                 )
 
-                should_eval = (
-                    iteration % eval_every_iterations == 0 or iteration == n_iterations
-                )
+                should_eval = iteration % eval_every_iterations == 0 or iteration == n_iterations
                 eval_metrics: Dict[str, float] = {}
                 eval_win_rate: Optional[float] = None
                 if should_eval:
@@ -911,9 +911,7 @@ def train(
     if wandb.run is not None:
         wandb.run.summary["best_eval_win_rate_vs_value"] = best_eval_win_rate
 
-    print(
-        f"\n[DAgger] Training complete. " f"Best eval win rate vs value: {best_eval_win_rate:.3f}"
-    )
+    print(f"\n[DAgger] Training complete. Best eval win rate vs value: {best_eval_win_rate:.3f}")
     return policy_model, critic_model
 
 

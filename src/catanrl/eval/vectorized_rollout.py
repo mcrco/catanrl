@@ -4,13 +4,12 @@ Vectorized rollout helpers for policy/value evaluation.
 
 from __future__ import annotations
 
-from typing import Any, Callable, List, Optional, Sequence, Tuple, Literal, cast
+from typing import Any, Callable, List, Literal, Optional, Sequence, Tuple, cast
 
 import numpy as np
 import torch
-from pufferlib.emulation import nativize
-
 from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE
+from pufferlib.emulation import nativize
 
 from ..envs import (
     EpisodeBuffer,
@@ -88,7 +87,7 @@ def _assert_actions_are_unmasked(
     if np.any(actions < 0) or np.any(actions >= action_masks.shape[1]):
         raise RuntimeError(
             f"Out-of-range action found in {context}. "
-            f"Action space size={action_masks.shape[1]}."
+            f"Out-of-range action found in {context}. Action space size={action_masks.shape[1]}."
         )
 
     valid = action_masks[np.arange(actions.shape[0]), actions]
@@ -102,8 +101,7 @@ def _assert_actions_are_unmasked(
         for i in preview
     )
     raise RuntimeError(
-        f"Found {bad_indices.size} masked expert actions in {context}. "
-        f"Examples: {examples}"
+        f"Found {bad_indices.size} masked expert actions in {context}. Examples: {examples}"
     )
 
 
@@ -200,9 +198,7 @@ def run_policy_value_eval_vectorized(
 
             for idx in range(batch_size):
                 structured = nativize(observations[idx], obs_space, obs_dtype)
-                actor_batch[idx], critic_batch[idx] = flatten_puffer_observation(
-                    structured
-                )
+                actor_batch[idx], critic_batch[idx] = flatten_puffer_observation(structured)
                 action_masks[idx] = get_action_mask_from_obs(structured)
 
             for idx in range(batch_size):
@@ -211,18 +207,13 @@ def run_policy_value_eval_vectorized(
 
             with torch.no_grad():
                 actor_tensor = torch.from_numpy(actor_batch).float().to(torch_device)
-                policy_logits = _get_policy_logits(
-                    policy_model, actor_tensor, model_type
-                )
-                mask_tensor = torch.as_tensor(
-                    action_masks, dtype=torch.bool, device=torch_device
-                )
+                policy_logits = _get_policy_logits(policy_model, actor_tensor, model_type)
+                mask_tensor = torch.as_tensor(action_masks, dtype=torch.bool, device=torch_device)
                 masked_logits = torch.where(
                     mask_tensor,
                     policy_logits,
                     torch.full_like(policy_logits, float("-inf")),
                 )
-                masked_logits = torch.clamp(masked_logits, min=-100, max=100)
                 if deterministic:
                     actions = torch.argmax(masked_logits, dim=-1).cpu().numpy()
                 else:
@@ -244,9 +235,7 @@ def run_policy_value_eval_vectorized(
                         all_expert_labels.append(int(expert_actions[idx]))
                         all_expert_masked_preds.append(int(pred_masked[idx]))
 
-            next_observations, rewards, terminations, truncations, infos = envs.step(
-                actions
-            )
+            next_observations, rewards, terminations, truncations, infos = envs.step(actions)
             rewards = rewards.astype(np.float32)
             dones = np.logical_or(terminations, truncations)
             nn_won_batch, nn_won_has_signal = _extract_nn_won_from_infos(infos, batch_size)
@@ -258,9 +247,7 @@ def run_policy_value_eval_vectorized(
                     if episodes_completed >= num_games:
                         continue
                     ep_rewards = np.array(ep_buffers[idx].rewards, dtype=np.float32)
-                    ep_critic_states = np.array(
-                        ep_buffers[idx].critic_states, dtype=np.float32
-                    )
+                    ep_critic_states = np.array(ep_buffers[idx].critic_states, dtype=np.float32)
 
                     # Prefer explicit winner signal from env info; only fall back to reward
                     # for compatibility with older environments that do not expose nn_won.
@@ -283,14 +270,8 @@ def run_policy_value_eval_vectorized(
                         returns[t] = running_return
 
                     with torch.no_grad():
-                        critic_tensor = (
-                            torch.from_numpy(ep_critic_states)
-                            .float()
-                            .to(torch_device)
-                        )
-                        value_preds = (
-                            critic_model(critic_tensor).squeeze(-1).cpu().numpy()
-                        )
+                        critic_tensor = torch.from_numpy(ep_critic_states).float().to(torch_device)
+                        value_preds = critic_model(critic_tensor).squeeze(-1).cpu().numpy()
 
                     all_value_preds.extend(value_preds.tolist())
                     all_returns.extend(returns.tolist())
@@ -298,10 +279,7 @@ def run_policy_value_eval_vectorized(
                     if progress_callback is not None:
                         progress_callback(1)
 
-                    ep_buffers[idx] = EpisodeBuffer(
-                        critic_states=[], rewards=[], steps=0
-                    )
-
+                    ep_buffers[idx] = EpisodeBuffer(critic_states=[], rewards=[], steps=0)
             observations = next_observations
     finally:
         envs.close()

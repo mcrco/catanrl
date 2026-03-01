@@ -1,35 +1,36 @@
 from __future__ import annotations
 
 import os
-import sys
 import random
+import sys
 from collections import deque
-from typing import Dict, Optional, Sequence, Tuple, Literal, cast
+from typing import Dict, Literal, Optional, Sequence, Tuple, cast
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
-import wandb
+from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE, ACTION_TYPES, ACTIONS_ARRAY
 from tqdm import tqdm
 
-from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE, ACTIONS_ARRAY, ACTION_TYPES
+import wandb
+
 from ...envs import compute_multiagent_input_dim, decode_puffer_batch
 from ...envs.zoo.multi_env import make_vectorized_envs as make_marl_vectorized_envs
+from ...eval.training_eval import eval_policy_value_against_baselines
 from ...features.catanatron_utils import (
     get_full_numeric_feature_names,
     get_numeric_feature_names,
 )
-from ...eval.training_eval import eval_policy_value_against_baselines
-from ...models.backbones import BackboneConfig, MLPBackboneConfig, CrossDimensionalBackboneConfig
+from ...models.backbones import BackboneConfig, CrossDimensionalBackboneConfig, MLPBackboneConfig
 from ...models.models import (
     build_flat_policy_network,
     build_hierarchical_policy_network,
     build_value_network,
 )
 from ...models.wrappers import PolicyNetworkWrapper, ValueNetworkWrapper
-from .gae import compute_gae_batched
 from .buffers import CentralCriticExperienceBuffer
+from .gae import compute_gae_batched
 
 
 def _build_action_type_mapping() -> Tuple[Dict[str, list], np.ndarray]:
@@ -118,7 +119,7 @@ class PolicyAgent:
             policy_logits,
             torch.full_like(policy_logits, float("-inf")),
         )
-        return torch.clamp(masked_logits, min=-100, max=100), mask_tensor
+        return masked_logits, mask_tensor
 
     def select_action(
         self,
@@ -356,7 +357,9 @@ def ppo_update(
                 log_probs, entropy, policy_logits = policy_agent.evaluate_actions(
                     batch_actor_states, batch_actions, batch_valid_masks
                 )
-                decision_mask_t = torch.as_tensor(batch_is_decision, device=device, dtype=torch.bool)
+                decision_mask_t = torch.as_tensor(
+                    batch_is_decision, device=device, dtype=torch.bool
+                )
 
                 log_probs_d = log_probs[decision_mask_t]
                 entropy_d = entropy[decision_mask_t]
@@ -366,9 +369,7 @@ def ppo_update(
 
                 ratio = torch.exp(log_probs_d - old_log_probs_d)
                 surr1 = ratio * advantages_d
-                surr2 = (
-                    torch.clamp(ratio, 1 - clip_epsilon, 1 + clip_epsilon) * advantages_d
-                )
+                surr2 = torch.clamp(ratio, 1 - clip_epsilon, 1 + clip_epsilon) * advantages_d
                 policy_loss = -torch.min(surr1, surr2).mean()
                 entropy_loss = -entropy_d.mean()
                 approx_kl = float((old_log_probs_d - log_probs_d).mean().item())
@@ -380,7 +381,9 @@ def ppo_update(
                 activity_loss = (logits_d**2).mean()
 
                 policy_optimizer.zero_grad()
-                (policy_loss + entropy_coef * entropy_loss + activity_coef * activity_loss).backward()
+                (
+                    policy_loss + entropy_coef * entropy_loss + activity_coef * activity_loss
+                ).backward()
                 torch.nn.utils.clip_grad_norm_(policy_agent.model.parameters(), max_grad_norm)
                 if any(
                     param.grad is not None and torch.isnan(param.grad).any()
@@ -566,9 +569,7 @@ def train(
             else policy_output_dim
         )
         xdim_architecture = (
-            "residual_cross_dimensional"
-            if backbone_type == "xdim_res"
-            else "cross_dimensional"
+            "residual_cross_dimensional" if backbone_type == "xdim_res" else "cross_dimensional"
         )
         policy_backbone_config = BackboneConfig(
             architecture=xdim_architecture,
@@ -600,7 +601,9 @@ def train(
     if backbone_type == "mlp":
         critic_backbone_config = BackboneConfig(
             architecture="mlp",
-            args=MLPBackboneConfig(input_dim=critic_input_dim, hidden_dims=list(critic_hidden_dims)),
+            args=MLPBackboneConfig(
+                input_dim=critic_input_dim, hidden_dims=list(critic_hidden_dims)
+            ),
         )
     else:  # xdim / xdim_res
         assert board_shape is not None
@@ -612,9 +615,7 @@ def train(
             else critic_output_dim
         )
         xdim_architecture = (
-            "residual_cross_dimensional"
-            if backbone_type == "xdim_res"
-            else "cross_dimensional"
+            "residual_cross_dimensional" if backbone_type == "xdim_res" else "cross_dimensional"
         )
         critic_backbone_config = BackboneConfig(
             architecture=xdim_architecture,
@@ -686,13 +687,11 @@ def train(
     update_every_updates = 1
     if save_every_updates % update_every_updates != 0:
         raise ValueError(
-            "save_every_updates must be a multiple of update frequency "
-            f"({update_every_updates})"
+            f"save_every_updates must be a multiple of update frequency ({update_every_updates})"
         )
     if save_every_updates % eval_every_updates != 0:
         raise ValueError(
-            "save_every_updates must be a multiple of eval_every_updates "
-            f"({eval_every_updates})"
+            f"save_every_updates must be a multiple of eval_every_updates ({eval_every_updates})"
         )
     print(f"Eval cadence: every {eval_every_updates} update(s)")
     print(f"Save cadence: every {save_every_updates} update(s)")
@@ -850,7 +849,9 @@ def train(
                                 map_type=map_type,
                                 num_games=eval_games_per_opponent,
                                 gamma=gamma,
-                                seed=random.randint(0, sys.maxsize),  # different random games each time
+                                seed=random.randint(
+                                    0, sys.maxsize
+                                ),  # different random games each time
                                 log_to_wandb=False,
                                 global_step=global_step,
                                 device=device,
@@ -886,11 +887,16 @@ def train(
                         wandb.log({**fresh_log, **trend_log}, step=global_step)
 
                         if save_path:
-                            if trend_eval_games_per_opponent is not None and trend_eval_games_per_opponent > 0:
+                            if (
+                                trend_eval_games_per_opponent is not None
+                                and trend_eval_games_per_opponent > 0
+                            ):
                                 eval_win_rate = float(
                                     trend_eval_metrics.get("eval/win_rate_vs_value", 0.0)
                                 )
-                            elif eval_games_per_opponent is not None and eval_games_per_opponent > 0:
+                            elif (
+                                eval_games_per_opponent is not None and eval_games_per_opponent > 0
+                            ):
                                 eval_win_rate = float(
                                     fresh_eval_metrics.get("eval/win_rate_vs_value", 0.0)
                                 )

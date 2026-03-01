@@ -16,11 +16,12 @@ import torch
 import torch.nn.functional as F
 import torch.optim as optim
 import torch.optim.lr_scheduler as lr_scheduler
-from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE, ACTIONS_ARRAY, ACTION_TYPES
+from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE, ACTION_TYPES, ACTIONS_ARRAY
 from tqdm import tqdm
 
 import wandb
 
+from ...envs import decode_puffer_batch
 from ...envs.gym.single_env import (
     BOARD_HEIGHT,
     BOARD_WIDTH,
@@ -28,7 +29,6 @@ from ...envs.gym.single_env import (
     create_opponents,
     make_puffer_vectorized_envs,
 )
-from ...envs import decode_puffer_batch
 from ...eval.training_eval import eval_policy_against_baselines
 from ...models import policy_value_to_policy_only
 from ...models.backbones import BackboneConfig, CrossDimensionalBackboneConfig, MLPBackboneConfig
@@ -124,7 +124,7 @@ class SARLAgent:
         masked_logits = torch.where(
             mask, policy_logits, torch.full_like(policy_logits, float("-inf"))
         )
-        return torch.clamp(masked_logits, min=-100, max=100), mask
+        return masked_logits, mask
 
     def select_actions_batch(
         self,
@@ -625,7 +625,7 @@ def train(
 
     print(f"Number of players: {num_players}")
     print(f"Opponents: {[repr(o) for o in opponents]}")
-    print(f"Backbone: {backbone_type} | Model type: {model_type} | " f"Critic mode: {critic_mode}")
+    print(f"Backbone: {backbone_type} | Model type: {model_type} | Critic mode: {critic_mode}")
 
     if wandb.run is None:
         if wandb_config:
