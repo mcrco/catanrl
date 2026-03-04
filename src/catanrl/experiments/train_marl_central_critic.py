@@ -111,6 +111,12 @@ def main():
         help="Evaluate every N PPO updates (default: 1 = evaluate every update).",
     )
     parser.add_argument(
+        "--save-every-updates",
+        type=int,
+        default=1,
+        help="Save snapshots every N PPO updates (default: 1 = save every update).",
+    )
+    parser.add_argument(
         "--load-policy-weights",
         type=str,
         default=None,
@@ -195,6 +201,7 @@ def main():
         "trend_eval_games": args.trend_eval_games,
         "trend_eval_seed": args.trend_eval_seed,
         "eval_every_updates": args.eval_every_updates,
+        "save_every_updates": args.save_every_updates,
     }
     if args.wandb:
         wandb_config = {
@@ -240,6 +247,7 @@ def main():
         trend_eval_games_per_opponent=args.trend_eval_games,
         trend_eval_seed=args.trend_eval_seed,
         eval_every_updates=args.eval_every_updates,
+        save_every_updates=args.save_every_updates,
         target_kl=args.target_kl,
         num_envs=args.num_envs,
         reward_function=args.reward_function,
