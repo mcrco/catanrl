@@ -209,7 +209,7 @@ def main():
     parser.add_argument(
         "--metric-window",
         type=int,
-        default=200,
+        default=1000,
         help="Window size for metrics (avg reward and length), also used for best model saving (default: 200)",
     )
     parser.add_argument(
