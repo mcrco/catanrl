@@ -12,8 +12,8 @@ import torch
 from catanatron.cli.cli_players import CLI_PLAYERS
 from catanatron.models.player import Player
 
-from catanrl.eval.eval_nn_vs_catanatron import eval
 from catanrl.envs.gym.single_env import compute_single_agent_dims
+from catanrl.eval.eval_nn_vs_catanatron import eval
 from catanrl.features.catanatron_utils import COLOR_ORDER
 from catanrl.models.backbones import (
     BackboneConfig,
@@ -27,7 +27,6 @@ from catanrl.models.models import (
 )
 from catanrl.models.wrappers import PolicyNetworkWrapper, ValueNetworkWrapper
 from catanrl.players import NNMCTSPlayer
-
 
 BOARD_WIDTH = 21
 BOARD_HEIGHT = 11
@@ -128,8 +127,7 @@ def parse_opponents(opponents_str: str) -> list[Player]:
 
     if len(player_keys) > len(COLOR_ORDER) - 1:
         raise ValueError(
-            f"Too many opponents ({len(player_keys)}). "
-            f"Maximum supported is {len(COLOR_ORDER) - 1}."
+            f"Too many opponents ({len(player_keys)}). Maximum supported is {len(COLOR_ORDER) - 1}."
         )
 
     players: list[Player] = []
@@ -152,6 +150,17 @@ def main():
     parser = argparse.ArgumentParser(
         description="Evaluate a neural-guided MCTS player against Catanatron opponents."
     )
+    opponent_policy_choices = [
+        "self",
+        "random",
+        "weighted",
+        "value",
+        "victorypoint",
+        "alphabeta",
+        "sameturnalphabeta",
+        "mcts",
+        "playouts",
+    ]
 
     parser.add_argument(
         "--model-type",
@@ -227,6 +236,17 @@ def main():
         help="Enable catanatron action prunning heuristics",
     )
     parser.add_argument(
+        "--adversarial-policy",
+        type=str,
+        default="self",
+        choices=opponent_policy_choices,
+        help=(
+            "Opponent policy used inside NNMCTS tree expansion for non-agent turns. "
+            "'self' uses the NN policy/value for all players; other options delegate "
+            "opponent turns to the selected Catanatron bot policy."
+        ),
+    )
+    parser.add_argument(
         "--num-games",
         type=int,
         default=100,
@@ -267,6 +287,7 @@ def main():
     print(f"Critic weights: {args.critic_weights}")
     print(f"MCTS simulations: {args.num_simulations} | c_puct: {args.c_puct}")
     print(f"Prunning: {args.prunning}")
+    print(f"Adversarial policy (inside MCTS): {args.adversarial_policy}")
     print(f"Opponents: {args.opponents}")
     print(f"Games: {args.num_games}")
 
@@ -304,6 +325,7 @@ def main():
         num_simulations=args.num_simulations,
         c_puct=args.c_puct,
         prunning=args.prunning,
+        opponent_policy=args.adversarial_policy,
     )
 
     print(f"\nRunning {args.num_games} games...")

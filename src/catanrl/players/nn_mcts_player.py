@@ -4,13 +4,19 @@ import math
 import random
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Literal
+from typing import Callable, Literal
 
 import numpy as np
 import torch
 from catanatron.gym.envs.catanatron_env import ACTIONS_ARRAY, normalize_action
-from catanatron.models.player import Color, Player
+from catanatron.models.player import Color, Player, RandomPlayer
+from catanatron.players.mcts import MCTSPlayer
+from catanatron.players.minimax import AlphaBetaPlayer, SameTurnAlphaBetaPlayer
+from catanatron.players.playouts import GreedyPlayoutsPlayer
+from catanatron.players.search import VictoryPointPlayer
 from catanatron.players.tree_search_utils import execute_spectrum, list_prunned_actions
+from catanatron.players.value import ValueFunctionPlayer
+from catanatron.players.weighted_random import WeightedRandomPlayer
 
 from catanrl.features.catanatron_utils import full_game_to_features, game_to_features
 from catanrl.models import PolicyNetworkWrapper, ValueNetworkWrapper
@@ -54,6 +60,8 @@ class NNMCTSPlayer(Player):
         num_simulations: int = 64,
         c_puct: float = 1.5,
         prunning: bool = False,
+        opponent_policy: str = "self",
+        opponent_factory: Callable[[Color], Player] | None = None,
         **kwargs,
     ):
         super().__init__(color, is_bot=True, **kwargs)
@@ -64,6 +72,12 @@ class NNMCTSPlayer(Player):
         self.num_simulations = int(num_simulations)
         self.c_puct = float(c_puct)
         self.prunning = bool(prunning)
+        self.opponent_policy = opponent_policy.lower()
+        self.opponent_factory = opponent_factory
+        self._opponents_by_color: dict[Color, Player] = {}
+
+        if self.opponent_factory is None and self.opponent_policy != "self":
+            self.opponent_factory = self._build_opponent_factory(self.opponent_policy)
 
         self.policy_model = policy_model.to(self.device)
         self.critic_model = critic_model.to(self.device)
@@ -113,21 +127,60 @@ class NNMCTSPlayer(Player):
             return
 
         actions = (
-            list_prunned_actions(node.game) if self.prunning else list(node.game.state.playable_actions)
+            list_prunned_actions(node.game)
+            if self.prunning
+            else list(node.game.state.playable_actions)
         )
         if not actions:
             return
 
-        node.action_priors = self._policy_priors(
-            node.game,
-            node.game.state.current_color(),
-            actions,
-        )
+        current_color = node.game.state.current_color()
+        if current_color != self.color and self.opponent_factory is not None:
+            opponent_action = self._opponent_action(node.game, actions)
+            node.action_priors = {opponent_action: 1.0}
+            actions = [opponent_action]
+        else:
+            node.action_priors = self._policy_priors(node.game, current_color, actions)
 
         for action in actions:
             outcomes = execute_spectrum(node.game, action)
             for next_game, probability in outcomes:
                 node.children[action].append((_Node(game=next_game, parent=node), probability))
+
+    def _opponent_action(self, game, actions):
+        if self.opponent_factory is None:
+            raise RuntimeError("Opponent factory is not configured.")
+        color = game.state.current_color()
+        opponent = self._opponents_by_color.get(color)
+        if opponent is None:
+            opponent = self.opponent_factory(color)
+            self._opponents_by_color[color] = opponent
+        return opponent.decide(game, actions)
+
+    @staticmethod
+    def _build_opponent_factory(policy: str) -> Callable[[Color], Player]:
+        name = policy.lower()
+        if name in {"random", "r"}:
+            return lambda color: RandomPlayer(color)
+        if name in {"weighted", "w"}:
+            return lambda color: WeightedRandomPlayer(color)
+        if name in {"value", "valuefunction", "f"}:
+            return lambda color: ValueFunctionPlayer(color)
+        if name in {"victorypoint", "vp"}:
+            return lambda color: VictoryPointPlayer(color)
+        if name in {"alphabeta", "ab"}:
+            return lambda color: AlphaBetaPlayer(color, depth=2, prunning=True)
+        if name in {"sameturnalphabeta", "sab"}:
+            return lambda color: SameTurnAlphaBetaPlayer(color)
+        if name in {"mcts", "m"}:
+            return lambda color: MCTSPlayer(color, 100)
+        if name in {"playouts", "greedyplayouts", "g"}:
+            return lambda color: GreedyPlayoutsPlayer(color, 25)
+        raise ValueError(
+            f"Unknown opponent_policy '{policy}'. "
+            "Use 'self' or one of: random, weighted, value, victorypoint, alphabeta, "
+            "sameturnalphabeta, mcts, playouts."
+        )
 
     def _select(self, node: _Node) -> _Node:
         total_visits = sum(child.visits for kids in node.children.values() for child, _ in kids)
@@ -138,9 +191,8 @@ class NNMCTSPlayer(Player):
         for action, children in node.children.items():
             action_visits = sum(child.visits for child, _ in children)
             if action_visits > 0:
-                q_value = (
-                    sum(probability * child.value for child, probability in children)
-                    / sum(probability for _, probability in children)
+                q_value = sum(probability * child.value for child, probability in children) / sum(
+                    probability for _, probability in children
                 )
             else:
                 q_value = 0.0
