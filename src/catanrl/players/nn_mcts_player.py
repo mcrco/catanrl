@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import math
 import random
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from typing import Callable, Literal
 
 import numpy as np
 import torch
+from catanatron.features import create_sample
+from catanatron.game import Game
 from catanatron.gym.envs.catanatron_env import ACTIONS_ARRAY, normalize_action
+from catanatron.models.decks import starting_devcard_bank
+from catanatron.models.enums import DEVELOPMENT_CARDS
 from catanatron.models.player import Color, Player, RandomPlayer
 from catanatron.players.mcts import MCTSPlayer
 from catanatron.players.minimax import AlphaBetaPlayer, SameTurnAlphaBetaPlayer
@@ -18,15 +22,25 @@ from catanatron.players.tree_search_utils import execute_spectrum, list_prunned_
 from catanatron.players.value import ValueFunctionPlayer
 from catanatron.players.weighted_random import WeightedRandomPlayer
 
-from catanrl.features.catanatron_utils import full_game_to_features, game_to_features
+from catanrl.features.catanatron_utils import (
+    full_game_to_features,
+    game_to_features,
+    get_full_numeric_feature_names,
+)
 from catanrl.models import PolicyNetworkWrapper, ValueNetworkWrapper
 
 EPSILON = 1e-8
+CRITIC_MODE_ALIASES = {
+    "full": "full",
+    "guess": "guessed_dev_cards",
+    "guessed": "guessed_dev_cards",
+    "guessed_dev_cards": "guessed_dev_cards",
+}
 
 
 @dataclass
 class _Node:
-    game: object
+    game: Game
     parent: "_Node | None"
     prior_action: object | None = None
     visits: int = 0
@@ -62,6 +76,7 @@ class NNMCTSPlayer(Player):
         prunning: bool = False,
         opponent_policy: str = "self",
         opponent_factory: Callable[[Color], Player] | None = None,
+        critic_mode: Literal["full", "guessed_dev_cards"] = "full",
         **kwargs,
     ):
         super().__init__(color, is_bot=True, **kwargs)
@@ -74,11 +89,13 @@ class NNMCTSPlayer(Player):
         self.prunning = bool(prunning)
         self.opponent_policy = opponent_policy.lower()
         self.opponent_factory = opponent_factory
+        self.critic_mode = self._normalize_critic_mode(critic_mode)
         self._opponents_by_color: dict[Color, Player] = {}
+        self._critic_index_cache: dict[int, dict[str, int]] = {}
+        self._starting_dev_counter = Counter(starting_devcard_bank())
 
         if self.opponent_factory is None and self.opponent_policy != "self":
             self.opponent_factory = self._build_opponent_factory(self.opponent_policy)
-
         self.policy_model = policy_model.to(self.device)
         self.critic_model = critic_model.to(self.device)
         self.policy_model.eval()
@@ -182,6 +199,14 @@ class NNMCTSPlayer(Player):
             "sameturnalphabeta, mcts, playouts."
         )
 
+    @staticmethod
+    def _normalize_critic_mode(critic_mode: str) -> str:
+        normalized = CRITIC_MODE_ALIASES.get(critic_mode.lower())
+        if normalized is None:
+            valid_modes = ", ".join(sorted(CRITIC_MODE_ALIASES))
+            raise ValueError(f"Unknown critic_mode '{critic_mode}'. Use one of: {valid_modes}.")
+        return normalized
+
     def _select(self, node: _Node) -> _Node:
         total_visits = sum(child.visits for kids in node.children.values() for child, _ in kids)
         maximizing = node.game.state.current_color() == self.color
@@ -242,15 +267,90 @@ class NNMCTSPlayer(Player):
 
     def _critic_value(self, game) -> float:
         with torch.no_grad():
-            critic_features = full_game_to_features(
-                game,
-                len(game.state.colors),
-                self.map_type,
-                base_color=self.color,
-            ).reshape(1, -1)
+            if self.critic_mode == "full":
+                critic_features = full_game_to_features(
+                    game,
+                    len(game.state.colors),
+                    self.map_type,
+                    base_color=self.color,
+                )
+            else:
+                critic_features = self._guessed_dev_cards_features(game)
+            critic_features = critic_features.reshape(1, -1)
             critic_tensor = torch.from_numpy(critic_features).to(self.device)
             value = float(self.critic_model(critic_tensor).squeeze(0).item())
         return float(np.clip(value, -1.0, 1.0))
+
+    def _guessed_dev_cards_features(self, game) -> np.ndarray:
+        num_players = len(game.state.colors)
+        features = full_game_to_features(
+            game,
+            num_players,
+            self.map_type,
+            base_color=self.color,
+        ).astype(np.float32, copy=True)
+        sample = create_sample(game, self.color)
+        dev_guess = self._sample_opponent_dev_cards(sample, num_players)
+        numeric_name_to_index = self._get_full_numeric_index(num_players)
+
+        for player_idx, card_counter in dev_guess.items():
+            vp_feature = f"P{player_idx}_VICTORY_POINT_IN_HAND"
+            old_vp = float(features[numeric_name_to_index[vp_feature]])
+            new_vp = float(card_counter.get("VICTORY_POINT", 0))
+            features[numeric_name_to_index[vp_feature]] = new_vp
+            for dev_card in DEVELOPMENT_CARDS:
+                feature_name = f"P{player_idx}_{dev_card}_IN_HAND"
+                features[numeric_name_to_index[feature_name]] = float(card_counter.get(dev_card, 0))
+            actual_vps_feature = f"P{player_idx}_ACTUAL_VPS"
+            if actual_vps_feature in numeric_name_to_index:
+                features[numeric_name_to_index[actual_vps_feature]] += new_vp - old_vp
+        return features
+
+    def _sample_opponent_dev_cards(self, sample, num_players: int) -> dict[int, Counter]:
+        known_cards = Counter()
+        for dev_card in DEVELOPMENT_CARDS:
+            known_cards[dev_card] += int(sample.get(f"P0_{dev_card}_IN_HAND", 0))
+            for player_idx in range(num_players):
+                known_cards[dev_card] += int(sample.get(f"P{player_idx}_{dev_card}_PLAYED", 0))
+
+        unseen = self._starting_dev_counter - known_cards
+        unseen_cards = [card for card, count in unseen.items() for _ in range(max(0, int(count)))]
+        random.shuffle(unseen_cards)
+
+        opponent_card_counts = {
+            player_idx: int(sample.get(f"P{player_idx}_NUM_DEVS_IN_HAND", 0))
+            for player_idx in range(1, num_players)
+        }
+        guessed: dict[int, Counter] = {}
+        cursor = 0
+        for player_idx in range(1, num_players):
+            num_cards = max(0, opponent_card_counts[player_idx])
+            draw = unseen_cards[cursor : cursor + num_cards]
+            cursor += num_cards
+            hand_counter = Counter(draw)
+            if len(draw) < num_cards:
+                self._fill_missing_dev_cards(hand_counter, num_cards - len(draw), unseen)
+            guessed[player_idx] = hand_counter
+        return guessed
+
+    @staticmethod
+    def _fill_missing_dev_cards(hand_counter: Counter, missing: int, unseen: Counter) -> None:
+        if missing <= 0:
+            return
+        fallback_pool = [card for card, count in unseen.items() for _ in range(max(0, int(count)))]
+        if not fallback_pool:
+            fallback_pool = ["KNIGHT"]
+        for _ in range(missing):
+            hand_counter[random.choice(fallback_pool)] += 1
+
+    def _get_full_numeric_index(self, num_players: int) -> dict[str, int]:
+        index = self._critic_index_cache.get(num_players)
+        if index is not None:
+            return index
+        numeric_names = get_full_numeric_feature_names(num_players, self.map_type)
+        index = {name: idx for idx, name in enumerate(numeric_names)}
+        self._critic_index_cache[num_players] = index
+        return index
 
     @staticmethod
     def _resolve_root_action(best_action, playable_actions):
@@ -264,3 +364,13 @@ class NNMCTSPlayer(Player):
 
     def __repr__(self) -> str:
         return super().__repr__().replace("Player", "NNMCTSPlayer")
+
+
+class NNMCTSGuessedDevCardsPlayer(NNMCTSPlayer):
+    """
+    NNMCTS player that hides exact opponent dev-card types from the critic.
+    """
+
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("critic_mode", "guessed_dev_cards")
+        super().__init__(*args, **kwargs)

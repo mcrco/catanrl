@@ -247,6 +247,16 @@ def main():
         ),
     )
     parser.add_argument(
+        "--critic-mode",
+        type=str,
+        default="full",
+        choices=["full", "guess"],
+        help=(
+            "Critic observation mode. 'full' uses privileged critic features; "
+            "'guess' samples hidden opponent dev cards before scoring."
+        ),
+    )
+    parser.add_argument(
         "--num-games",
         type=int,
         default=100,
@@ -285,6 +295,7 @@ def main():
     print(f"Critic hidden dims: {args.critic_hidden_dims}")
     print(f"Policy weights: {args.policy_weights}")
     print(f"Critic weights: {args.critic_weights}")
+    print(f"Critic mode: {args.critic_mode}")
     print(f"MCTS simulations: {args.num_simulations} | c_puct: {args.c_puct}")
     print(f"Prunning: {args.prunning}")
     print(f"Adversarial policy (inside MCTS): {args.adversarial_policy}")
@@ -326,6 +337,7 @@ def main():
         c_puct=args.c_puct,
         prunning=args.prunning,
         opponent_policy=args.adversarial_policy,
+        critic_mode=args.critic_mode,
     )
 
     print(f"\nRunning {args.num_games} games...")
