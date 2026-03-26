@@ -18,6 +18,7 @@ from sklearn.metrics import f1_score
 from ..features.catanatron_utils import COLOR_ORDER
 from ..models.wrappers import PolicyNetworkWrapper, ValueNetworkWrapper
 from ..players.nn_policy_player import NNPolicyPlayer
+from ..utils.seeding import derive_seed
 from .eval_nn_vs_catanatron import eval
 from .vectorized_rollout import run_policy_value_eval_vectorized
 
@@ -165,6 +166,7 @@ def eval_policy_value_against_baselines(
             position=1,
         ) as eval_pbar:
             for opponent_idx, (opponent_name, opponent_configs) in enumerate(opponent_configs_list):
+                opponent_seed = derive_seed(seed, "opponent", opponent_name, opponent_idx)
                 (
                     wins,
                     turns_list,
@@ -185,7 +187,7 @@ def eval_policy_value_against_baselines(
                     deterministic=deterministic,
                     compare_to_expert=compare_to_expert,
                     expert_config=expert_config,
-                    seed=seed + opponent_idx,
+                    seed=opponent_seed,
                     progress_callback=eval_pbar.update,
                 )
 
@@ -203,6 +205,7 @@ def eval_policy_value_against_baselines(
                 all_expert_masked_preds.extend(expert_masked_preds)
     else:
         for opponent_idx, (opponent_name, opponent_configs) in enumerate(opponent_configs_list):
+            opponent_seed = derive_seed(seed, "opponent", opponent_name, opponent_idx)
             (
                 wins,
                 turns_list,
@@ -223,7 +226,7 @@ def eval_policy_value_against_baselines(
                 deterministic=deterministic,
                 compare_to_expert=compare_to_expert,
                 expert_config=expert_config,
-                seed=seed + opponent_idx,
+                seed=opponent_seed,
             )
 
             # Log policy metrics for this opponent

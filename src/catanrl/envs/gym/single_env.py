@@ -36,6 +36,7 @@ from catanrl.features.catanatron_utils import (
     get_full_numeric_feature_names,
     get_numeric_feature_names,
 )
+from catanrl.utils.seeding import derive_map_and_game_seeds, derive_seed
 
 BOARD_WIDTH = 21
 BOARD_HEIGHT = 11
@@ -111,6 +112,8 @@ class SingleAgentCatanatronEnv(gym.Env):
         self.players = [self.p0] + self.enemies
         self.num_players = len(self.players)
         self.features = get_feature_ordering(self.num_players, self.map_type)
+        self._seed_sequence_root: int | None = None
+        self._seed_sequence_index = 0
 
         # Compute dimensions for shared_critic mode
         self.numeric_dim = len(get_numeric_feature_names(self.num_players, self.map_type))
@@ -194,12 +197,18 @@ class SingleAgentCatanatronEnv(gym.Env):
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
 
-        catan_map = build_map(self.map_type)
+        episode_seed = self._next_episode_seed(seed)
+        map_seed = None
+        game_seed = None
+        if episode_seed is not None:
+            map_seed, game_seed = derive_map_and_game_seeds(episode_seed)
+
+        catan_map = build_map(self.map_type, seed=map_seed)
         for player in self.players:
             player.reset_state()
         self.game = Game(
             players=self.players,
-            seed=seed,
+            seed=game_seed,
             catan_map=catan_map,
             vps_to_win=self.vps_to_win,
         )
@@ -212,6 +221,22 @@ class SingleAgentCatanatronEnv(gym.Env):
         info = self._build_info()
         self.reward_function.after_reset(self)  # type: ignore
         return observation, info
+
+    def _next_episode_seed(self, seed: int | None) -> int | None:
+        if seed is not None:
+            self._seed_sequence_root = int(seed)
+            self._seed_sequence_index = 0
+        elif self._seed_sequence_root is None:
+            return None
+
+        assert self._seed_sequence_root is not None
+        episode_seed = derive_seed(
+            self._seed_sequence_root,
+            "env_episode",
+            self._seed_sequence_index,
+        )
+        self._seed_sequence_index += 1
+        return episode_seed
 
     def _build_info(self) -> Dict[str, Any]:
         """Build info dict, optionally including expert action."""

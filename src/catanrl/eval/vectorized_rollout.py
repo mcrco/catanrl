@@ -20,6 +20,7 @@ from ..envs import (
 )
 from ..envs.gym.single_env import compute_single_agent_dims, make_puffer_vectorized_envs
 from ..models.wrappers import PolicyNetworkWrapper, ValueNetworkWrapper
+from ..utils.seeding import derive_seed
 
 
 def _extract_nn_won_from_infos(infos: object, batch_size: int) -> Tuple[Any, Any]:
@@ -181,9 +182,13 @@ def run_policy_value_eval_vectorized(
 
     ep_buffers = init_episode_buffers(num_envs)
 
+    reset_seeds = None
     if seed is not None:
+        reset_seeds = [derive_seed(seed, "env", env_idx) for env_idx in range(num_envs)]
+
+    if reset_seeds is not None:
         try:
-            observations, infos = envs.reset(seed=seed)
+            observations, infos = envs.reset(seed=reset_seeds)
         except TypeError:
             observations, infos = envs.reset()
     else:

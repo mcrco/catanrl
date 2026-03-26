@@ -1,5 +1,3 @@
-import random
-import sys
 from typing import List, Literal
 from tqdm import tqdm
 
@@ -8,11 +6,11 @@ from catanatron.models.map import build_map
 from catanatron.models.player import Player
 from catanatron.state_functions import get_actual_victory_points
 
-from catanrl.players import NNPolicyPlayer
+from catanrl.utils.seeding import derive_map_and_game_seeds, derive_seed
 
 
 def eval(
-    nn_player: NNPolicyPlayer,
+    nn_player: Player,
     opponents: List[Player],
     map_type: Literal["BASE", "TOURNAMENT", "MINI"] = "BASE",
     num_games: int = 100,
@@ -25,19 +23,17 @@ def eval(
     turns = []
 
     players = [nn_player] + opponents
-    rng = random.Random(seed)
-    for _ in tqdm(range(num_games), disable=not show_tqdm):
+    episode_seeds = [derive_seed(seed, "episode", game_idx) for game_idx in range(num_games)]
+    for episode_seed in tqdm(episode_seeds, disable=not show_tqdm):
+        map_seed, game_seed = derive_map_and_game_seeds(episode_seed)
         # Ensure each game starts from a clean player state and fresh map.
         # Reusing player internals or a previously-mutated map can skew win rates.
         for player in players:
             player.reset_state()
         game = Game(
             players=players,
-            catan_map=build_map(map_type),
-            seed=rng.randint(
-                0,
-                sys.maxsize,
-            ),
+            catan_map=build_map(map_type, seed=map_seed),
+            seed=game_seed,
         )
         game.play()
         if game.winning_color() == nn_player.color:
