@@ -263,6 +263,13 @@ def main():
         help="Number of games to play",
     )
     parser.add_argument(
+        "--nn-seat",
+        type=str,
+        default="random",
+        choices=["random", "first", "second"],
+        help="Seat the NN-guided player randomly, first, or second in turn order",
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         default=42,
@@ -300,6 +307,7 @@ def main():
     print(f"Prunning: {args.prunning}")
     print(f"Adversarial policy (inside MCTS): {args.adversarial_policy}")
     print(f"Opponents: {args.opponents}")
+    print(f"NN seat: {args.nn_seat}")
     print(f"Games: {args.num_games}")
 
     policy_model = build_policy_model(
@@ -348,6 +356,7 @@ def main():
         num_games=args.num_games,
         seed=args.seed,
         show_tqdm=True,
+        nn_seat=args.nn_seat,
     )
 
     print(f"\n{'=' * 60}")
