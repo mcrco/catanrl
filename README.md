@@ -5,7 +5,7 @@ Current nn architecture (see `src/catanrl/backbones`) is
 - CNN features for board,
 - MLP for numeric features (e.g. player hands)
 - then concat them and do one more MLP on the fused features
-- pretty much what [this paper](https://arxiv.org/abs/2008.07079) does, but without the residual connections).
+- similar to what [this paper](https://arxiv.org/abs/2008.07079) does, but without the residual connections).
 
 Current training is
 
