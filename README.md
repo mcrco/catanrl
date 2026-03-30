@@ -1,6 +1,6 @@
 # Catan Bot
 
-Current architecture (see `src/catanrl/backbones`) is 
+Current nn architecture (see `src/catanrl/backbones`) is 
 
 - CNN features for board,
 - MLP for numeric features (e.g. player hands)
