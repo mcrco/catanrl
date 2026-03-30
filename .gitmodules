@@ -2,6 +2,3 @@
 	path = catanatron
 	url = https://github.com/mcrco/catanatron
 	branch = master
-[submodule "settle-rs"]
-	path = settle-rs
-	url = https://github.com/mcrco/settle-rs.git
