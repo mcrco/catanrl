@@ -1,18 +1,26 @@
 # Catan Bot
 
-Current nn architecture (see `src/catanrl/models`) is 
+## NN Architecture 
 
 - CNN features for board,
 - MLP for numeric features (e.g. player hands)
 - then concat them and do one more MLP on the fused features
 - basically a super washed down version of [this paper](https://arxiv.org/abs/2008.07079).
+- see `src/catanrl/models` 
 
-Current training is
+## Training Algorithms
 
 - first do imitation learning (DAgger) on the Catanatron `ValueFunctionPlayer` for a decent base model
 - then do PPO against the `ValueFunctionPlayer`
 
-Winrate against the Catanatron value function bot when going first is 70.6%, winrate against the Catanatron value function player going second is ~67.7% on 100 games.
+## Winrate 
+
+- 70.6% over 1000 games against ValueFunction when going first
+- 67.7% over 1000 games against ValueFunction when going second
+- 69.7% over 1000 games against AlphaBeta when going first
+- 66.0% over 1000 games against AlphaBeta when going second
+
+## Experiments
 
 - best weights: [google drive link](https://drive.google.com/file/d/1C3c5Rk9Xlz2WTLCES4553aQwFK6XAOFp/view?usp=sharing)
 - DAgger: [wandb run](https://wandb.ai/myang2-california-institute-of-technology-caltech/catan-rl/runs/regwxcqf?nw=nwusermyang2)
@@ -26,7 +34,8 @@ uv run scripts/eval_vs_catanatron.py \
   --policy-weights weights/ppo-sarl-f-winreward-xdim-flat-pretrained-dagger/policy_best.pt \
   --num-games 1000 \
   --seed 67 \
-  --nn-seat {first/second}
+  --nn-seat {first/second} \
+  --opponents {AB:2/F}
 ```
 
 ## TODO
