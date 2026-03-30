@@ -7,7 +7,12 @@ Current architecture (see `src/catanrl/backbones`) is
 - then concat them and do one more MLP on the fused features
 - pretty much what [this paper](https://arxiv.org/abs/2008.07079) does, but without the residual connections).
 
-Winrate going first is 70.6%, winrate going second is ~67.7% on 100 games.
+Current training is
+
+- first do imitation learning (DAgger) on the Catanatron `ValueFunctionPlayer` for a decent base model
+- then do PPO against the `ValueFunctionPlayer`
+
+Winrate against the Catanatron value function bot when going first is 70.6%, winrate against the Catanatron value function player going second is ~67.7% on 100 games.
 
 - best weights: [google drive link](https://drive.google.com/file/d/1C3c5Rk9Xlz2WTLCES4553aQwFK6XAOFp/view?usp=sharing)
 - DAgger: [wandb run](https://wandb.ai/myang2-california-institute-of-technology-caltech/catan-rl/runs/regwxcqf?nw=nwusermyang2)
