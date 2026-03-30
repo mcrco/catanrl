@@ -28,3 +28,11 @@ uv run scripts/eval_vs_catanatron.py \
   --seed 67 \
   --nn-seat {first/second}
 ```
+
+## TODO
+
+- [] Merge Catanatron fork with upstream (main difference is discard actions, which upstream seems to be implementing soon in [this PR](https://github.com/bcollazo/catanatron/pull/368/changes).
+- [] Track all public information (e.g. in 2 player game, only private info should be dev cards, and in 3+ player game, only private info should be dev cards and stolen cards between opponents) in features, and then retrain model
+- [] Train sequential model architecture (e.g. RNN, LSTM) or represent all timestep-based information in features, like last time player has played knight and last time robber was moved
+- [] Train using self-play with central critic PPO (code is there, just haven't had success with it but in theory it should be good)
+- [] Train with MCTS instead of just having MCTS harness for PPO-trained model
