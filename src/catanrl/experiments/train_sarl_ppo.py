@@ -1,10 +1,10 @@
 import argparse
 import os
 import wandb
-from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE
 
 from ..envs.gym.single_env import compute_single_agent_dims, create_opponents
 from ..algorithms.ppo.sarl_ppo import train
+from ..utils.catanatron_action_space import get_action_space_size
 
 
 def main():
@@ -290,6 +290,7 @@ def main():
         args.opponents = ["random"]
     temp_opponents = create_opponents(args.opponents)
     num_players = len(temp_opponents) + 1  # +1 for the RL agent (BLUE)
+    action_space_size = get_action_space_size(num_players, args.map_type)
 
     # Compute feature dimensions for this player/map setup.
     dims = compute_single_agent_dims(num_players, args.map_type)
@@ -372,7 +373,7 @@ def main():
     # Train model
     train(
         input_dim=input_dim,
-        num_actions=ACTION_SPACE_SIZE,
+        num_actions=action_space_size,
         model_type=args.model_type,
         backbone_type=args.backbone_type,
         xdim_cnn_channels=xdim_cnn_channels,

@@ -27,6 +27,7 @@ from catanrl.models.models import (
 )
 from catanrl.models.wrappers import PolicyNetworkWrapper, ValueNetworkWrapper
 from catanrl.players import NNMCTSPlayer
+from catanrl.utils.catanatron_action_space import get_action_space_size
 
 BOARD_WIDTH = 21
 BOARD_HEIGHT = 11
@@ -69,9 +70,16 @@ def build_policy_model(
         raise ValueError(f"Unknown backbone_type '{backbone_type}'")
 
     if model_type == "flat":
-        model = build_flat_policy_network(backbone_config=backbone_config)
+        model = build_flat_policy_network(
+            backbone_config=backbone_config,
+            num_actions=get_action_space_size(num_players, map_type),
+        )
     elif model_type == "hierarchical":
-        model = build_hierarchical_policy_network(backbone_config=backbone_config)
+        model = build_hierarchical_policy_network(
+            backbone_config=backbone_config,
+            num_players=num_players,
+            map_type=map_type,
+        )
     else:
         raise ValueError(f"Unknown model_type '{model_type}'")
 

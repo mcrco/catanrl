@@ -10,7 +10,6 @@ import numpy as np
 import torch
 from catanatron.features import create_sample
 from catanatron.game import Game
-from catanatron.gym.envs.catanatron_env import ACTIONS_ARRAY, normalize_action
 from catanatron.models.decks import starting_devcard_bank
 from catanatron.models.enums import DEVELOPMENT_CARDS
 from catanatron.models.player import Color, Player, RandomPlayer
@@ -28,6 +27,7 @@ from catanrl.features.catanatron_utils import (
     get_full_numeric_feature_names,
 )
 from catanrl.models import PolicyNetworkWrapper, ValueNetworkWrapper
+from catanrl.utils.catanatron_action_space import to_action_space
 
 EPSILON = 1e-8
 CRITIC_MODE_ALIASES = {
@@ -118,7 +118,7 @@ class NNMCTSPlayer(Player):
             root.children.keys(),
             key=lambda action: sum(child.visits for child, _ in root.children[action]),
         )
-        return self._resolve_root_action(best_action, playable_actions)
+        return self._resolve_root_action(best_action, playable_actions, len(game.state.colors))
 
     def _run_simulation(self, root: _Node) -> None:
         node = root
@@ -146,7 +146,7 @@ class NNMCTSPlayer(Player):
         actions = (
             list_prunned_actions(node.game)
             if self.prunning
-            else list(node.game.state.playable_actions)
+            else list(node.game.playable_actions)
         )
         if not actions:
             return
@@ -256,9 +256,8 @@ class NNMCTSPlayer(Player):
                 raise ValueError(f"Unknown model_type '{self.model_type}'")
             logits_np = logits.squeeze(0).detach().cpu().numpy()
 
-        normalized_actions = [normalize_action(action) for action in actions]
-        possibilities = [(action.action_type, action.value) for action in normalized_actions]
-        indices = [ACTIONS_ARRAY.index(possibility) for possibility in possibilities]
+        num_players = len(game.state.colors)
+        indices = [to_action_space(action, num_players, self.map_type) for action in actions]
         action_logits = np.array([logits_np[idx] for idx in indices], dtype=np.float32)
         action_logits = action_logits - float(np.max(action_logits))
         exp_logits = np.exp(action_logits)
@@ -352,13 +351,10 @@ class NNMCTSPlayer(Player):
         self._critic_index_cache[num_players] = index
         return index
 
-    @staticmethod
-    def _resolve_root_action(best_action, playable_actions):
-        best_normalized = normalize_action(best_action)
-        best_tuple = (best_normalized.action_type, best_normalized.value)
+    def _resolve_root_action(self, best_action, playable_actions, num_players: int):
+        best_idx = to_action_space(best_action, num_players, self.map_type)
         for action in playable_actions:
-            normalized_action = normalize_action(action)
-            if (normalized_action.action_type, normalized_action.value) == best_tuple:
+            if to_action_space(action, num_players, self.map_type) == best_idx:
                 return action
         raise ValueError("NN MCTS Player chose unavailable action.")
 

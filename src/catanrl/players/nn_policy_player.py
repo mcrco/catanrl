@@ -2,7 +2,6 @@ from typing import Literal
 
 import numpy as np
 import torch
-from catanatron.gym.envs.catanatron_env import ACTIONS_ARRAY, normalize_action
 from catanatron.models.player import Color, Player
 
 from catanrl.features.catanatron_utils import (
@@ -11,6 +10,7 @@ from catanrl.features.catanatron_utils import (
 from catanrl.models import (
     PolicyNetworkWrapper,
 )
+from catanrl.utils.catanatron_action_space import to_action_space
 
 
 class NNPolicyPlayer(Player):
@@ -58,26 +58,12 @@ class NNPolicyPlayer(Player):
                 policy_logits = self.model.get_flat_action_logits(action_type_logits, param_logits)
             logits = policy_logits.squeeze(0).cpu().numpy()
 
-        # Convert playable_actions to their indices in the action space
-        # Need to normalize actions and find their index in ACTIONS_ARRAY
-        normalized_playable = [normalize_action(a) for a in playable_actions]
-        possibilities = [(a.action_type, a.value) for a in normalized_playable]
-        playable_action_indices = [ACTIONS_ARRAY.index(x) for x in possibilities]
-
-        # Mask out non-playable actions by setting their logits to -inf
-        masked_logits = np.full_like(logits, float("-inf"))
-        masked_logits[playable_action_indices] = logits[playable_action_indices]
-
-        # Select action with highest logit among playable actions
-        best_action_idx = np.argmax(masked_logits)
-
-        # Find the action object corresponding to this index
-        best_possibility = ACTIONS_ARRAY[best_action_idx]
-        for i, possibility in enumerate(possibilities):
-            if possibility == best_possibility:
-                return playable_actions[i]
-
-        raise ValueError("NN Policy Player chose unavailable action.")
+        num_players = len(game.state.colors)
+        playable_action_indices = [
+            to_action_space(action, num_players, self.map_type) for action in playable_actions
+        ]
+        best_offset = int(np.argmax(logits[playable_action_indices]))
+        return playable_actions[best_offset]
 
     def __repr__(self) -> str:
         return super().__repr__().replace("Player", "NNPolicyPlayer")

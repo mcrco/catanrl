@@ -13,7 +13,6 @@ from typing import Any, Callable, Dict, List, Literal, Optional, Sequence, Tuple
 import numpy as np
 import torch
 import torch.nn.functional as F
-from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE
 from pufferlib.emulation import nativize
 from sklearn.metrics import f1_score
 from torch.utils.data import DataLoader
@@ -35,6 +34,7 @@ from ...models.models import (
     build_value_network,
 )
 from ...models.wrappers import PolicyNetworkWrapper, ValueNetworkWrapper
+from ...utils.catanatron_action_space import get_action_space_size
 from .dataset import AggregatedDataset, EvictionStrategy
 
 
@@ -59,12 +59,12 @@ def _observation_to_state_vector(observation: Dict[str, np.ndarray]) -> np.ndarr
     return np.concatenate([numeric, board_flat], axis=0)
 
 
-def _extract_valid_actions(info: Dict[str, Any] | None) -> np.ndarray:
+def _extract_valid_actions(info: Dict[str, Any] | None, action_space_size: int) -> np.ndarray:
     valid_actions = None
     if info is not None:
         valid_actions = info.get("valid_actions")
     if valid_actions is None or len(valid_actions) == 0:
-        return np.arange(ACTION_SPACE_SIZE, dtype=np.int64)
+        return np.arange(action_space_size, dtype=np.int64)
     return np.array(valid_actions, dtype=np.int64)
 
 
@@ -231,6 +231,7 @@ def _collect_dagger_rollouts_vectorized(
     are provided in the info dict (via expert_player config on the env).
     """
     num_envs = envs.num_envs
+    action_space_size = dataset.action_space_size
     driver_env = envs.driver_env
     # For GymnasiumPufferEnv, get observation space from the wrapped env
     if hasattr(driver_env, "env_single_observation_space"):
@@ -247,7 +248,7 @@ def _collect_dagger_rollouts_vectorized(
     expert_actions_tmj = np.zeros((num_steps, num_envs), dtype=np.int64)
     rewards_tmj = np.zeros((num_steps, num_envs), dtype=np.float32)
     is_single_action_tmj = np.zeros((num_steps, num_envs), dtype=np.bool_)
-    action_masks_tmj = np.zeros((num_steps, num_envs, ACTION_SPACE_SIZE), dtype=np.bool_)
+    action_masks_tmj = np.zeros((num_steps, num_envs, action_space_size), dtype=np.bool_)
     dones_tmj = np.zeros((num_steps, num_envs), dtype=np.bool_)
 
     episode_rewards: List[float] = []
@@ -262,7 +263,7 @@ def _collect_dagger_rollouts_vectorized(
         batch_size = observations.shape[0]
         actor_batch = np.zeros((batch_size, actor_dim), dtype=np.float32)
         critic_batch = np.zeros((batch_size, critic_dim), dtype=np.float32)
-        action_masks = np.zeros((batch_size, ACTION_SPACE_SIZE), dtype=np.bool_)
+        action_masks = np.zeros((batch_size, action_space_size), dtype=np.bool_)
 
         # Decode observations
         for idx in range(batch_size):
@@ -355,7 +356,7 @@ def _collect_dagger_rollouts_vectorized(
         expert_actions=expert_actions_tmj.reshape(-1),
         returns=returns_tmj.reshape(-1),
         is_single_action=is_single_action_tmj.reshape(-1),
-        action_masks=action_masks_tmj.reshape(-1, ACTION_SPACE_SIZE),
+        action_masks=action_masks_tmj.reshape(-1, action_space_size),
     )
 
     mean_reward = float(np.mean(episode_rewards)) if episode_rewards else 0.0
@@ -506,7 +507,7 @@ def _train_on_dataset(
 
 
 def train(
-    num_actions: int = ACTION_SPACE_SIZE,
+    num_actions: int | None = None,
     model_type: str = "flat",
     backbone_type: str = "mlp",
     policy_hidden_dims: Sequence[int] = (512, 512),
@@ -636,6 +637,7 @@ def train(
 
     # Compute dimensions
     num_players = len(opponent_configs) + 1
+    action_space_size = num_actions or get_action_space_size(num_players, map_type)
     dims = compute_single_agent_dims(num_players, map_type)
     actor_dim = dims["actor_dim"]
     critic_dim = dims["critic_dim"]
@@ -700,12 +702,14 @@ def train(
 
     if model_type == "flat":
         policy_model = build_flat_policy_network(
-            backbone_config=policy_backbone_config, num_actions=num_actions
+            backbone_config=policy_backbone_config, num_actions=action_space_size
         ).to(torch_device)
     elif model_type == "hierarchical":
-        policy_model = build_hierarchical_policy_network(backbone_config=policy_backbone_config).to(
-            torch_device
-        )
+        policy_model = build_hierarchical_policy_network(
+            backbone_config=policy_backbone_config,
+            num_players=num_players,
+            map_type=map_type,
+        ).to(torch_device)
     else:
         raise ValueError(f"Unknown model_type '{model_type}'")
 

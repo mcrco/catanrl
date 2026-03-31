@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from catanatron.game import Game
 from catanatron.models.player import Color
-from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE, to_action_space
 from typing import Optional, Dict, Tuple, List, TYPE_CHECKING
 from catanatron.models.enums import Action, ActionType
 from catanatron.models.map import number_probability
 import numpy as np
 import math
+from ...utils.catanatron_action_space import to_action_space
 
 if TYPE_CHECKING:
     # Imported only for type checking to avoid circular import at runtime
@@ -31,11 +31,13 @@ class MCTSNode:
         to_play: Color,
         parent: Optional["MCTSNode"],
         prior: float,
+        map_type: str,
     ):
         self.game = game
         self.to_play = to_play
         self.parent = parent
         self.prior = prior
+        self.map_type = map_type
         self.visit_count = 0
         self.value_sum = 0.0
         self.priors: Dict[int, float] = {}
@@ -54,7 +56,7 @@ class MCTSNode:
         return len(self.priors) > 0
 
     def is_dice_roll_only(self) -> bool:
-        actions = self.game.state.playable_actions
+        actions = self.game.playable_actions
         return (
             len(actions) == 1
             and actions[0].action_type == ActionType.ROLL
@@ -63,7 +65,7 @@ class MCTSNode:
     def expand(self, action_priors: np.ndarray) -> None:
         if self.expanded():
             return
-        valid_actions = self.game.state.playable_actions
+        valid_actions = self.game.playable_actions
         if not valid_actions:
             return
 
@@ -72,12 +74,20 @@ class MCTSNode:
         if total <= 0:
             uniform = 1.0 / len(valid_actions)
             for action in valid_actions:
-                idx = to_action_space(action)
+                idx = to_action_space(
+                    action,
+                    len(self.game.state.colors),
+                    self.map_type,
+                )
                 self.priors[idx] = uniform
                 self.action_map[idx] = action
         else:
             for action in valid_actions:
-                idx = to_action_space(action)
+                idx = to_action_space(
+                    action,
+                    len(self.game.state.colors),
+                    self.map_type,
+                )
                 self.priors[idx] = float(priors[idx])
                 self.action_map[idx] = action
             norm = sum(self.priors.values())
@@ -117,6 +127,7 @@ class MCTSNode:
                 to_play=next_player,
                 parent=self,
                 prior=self.priors[best_action],
+                map_type=self.map_type,
             )
         return best_action, self.children[best_action]
 
@@ -140,6 +151,7 @@ class NeuralMCTS:
             to_play=root_game.state.current_color(),
             parent=None,
             prior=1.0,
+            map_type=self.trainer.config.map_type,
         )
         priors, _ = self.trainer._policy_value(
             root.game,
@@ -193,7 +205,7 @@ class NeuralMCTS:
                 value = -value
 
     def _build_policy_vector(self, root: MCTSNode, temperature: float) -> np.ndarray:
-        policy = np.zeros(ACTION_SPACE_SIZE, dtype=np.float32)
+        policy = np.zeros(self.trainer.action_space_size, dtype=np.float32)
         if not root.priors:
             return policy
 

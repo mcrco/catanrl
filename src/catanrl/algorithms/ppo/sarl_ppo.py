@@ -16,7 +16,7 @@ import torch
 import torch.nn.functional as F
 import torch.optim as optim
 import torch.optim.lr_scheduler as lr_scheduler
-from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE, ACTION_TYPES, ACTIONS_ARRAY
+from catanatron.gym.envs.action_space import ACTION_TYPES
 from tqdm import tqdm
 
 import wandb
@@ -40,26 +40,24 @@ from ...models.models import (
     build_value_network,
 )
 from ...models.wrappers import PolicyNetworkWrapper, PolicyValueNetworkWrapper, ValueNetworkWrapper
+from ...utils.catanatron_action_space import build_action_type_metadata, get_action_space_size
 from .buffers import CentralCriticExperienceBuffer, ExperienceBuffer
 from .gae import compute_gae_batched
 
 
-def _build_action_type_mapping() -> Tuple[Dict[str, list], np.ndarray]:
+def _build_action_type_mapping(
+    num_players: int,
+    map_type: Literal["BASE", "TOURNAMENT", "MINI"],
+) -> Tuple[Dict[str, list[int]], np.ndarray, list[str]]:
     """Build action-type lookup tables for action-distribution diagnostics."""
-    action_type_to_indices: Dict[str, list] = {at.name: [] for at in ACTION_TYPES}
-    action_to_type_idx = np.zeros(ACTION_SPACE_SIZE, dtype=np.int32)
-    for action_idx, (action_type, _) in enumerate(ACTIONS_ARRAY):
-        action_type_to_indices[action_type.name].append(action_idx)
-        action_to_type_idx[action_idx] = ACTION_TYPES.index(action_type)
-    return action_type_to_indices, cast(np.ndarray, action_to_type_idx)
-
-
-ACTION_TYPE_TO_INDICES, ACTION_TO_TYPE_IDX = _build_action_type_mapping()
-ACTION_TYPE_NAMES = [at.name for at in ACTION_TYPES]
+    return build_action_type_metadata(num_players, map_type)
 
 
 def compute_action_distributions(
     actions: np.ndarray,
+    action_to_type_idx: np.ndarray,
+    action_type_names: list[str],
+    action_space_size: int,
 ) -> Tuple[Dict[str, float], Dict[str, float]]:
     """Compute action-type and raw-action distributions from chosen actions."""
     n_actions = len(actions)
@@ -69,10 +67,10 @@ def compute_action_distributions(
     action_types_taken = ACTION_TO_TYPE_IDX[actions]
     type_counts = np.bincount(action_types_taken, minlength=len(ACTION_TYPES))
     action_type_dist = {
-        name: float(count / n_actions) for name, count in zip(ACTION_TYPE_NAMES, type_counts)
+        name: float(count / n_actions) for name, count in zip(action_type_names, type_counts)
     }
 
-    action_counts = np.bincount(actions, minlength=ACTION_SPACE_SIZE)
+    action_counts = np.bincount(actions, minlength=action_space_size)
     action_dist = {
         f"action_{idx}": float(count / n_actions)
         for idx, count in enumerate(action_counts)
@@ -541,7 +539,7 @@ def ppo_update(
 
 def train(
     input_dim: int | None = None,
-    num_actions: int = ACTION_SPACE_SIZE,
+    num_actions: int | None = None,
     model_type: str = "flat",
     backbone_type: str = "mlp",
     xdim_cnn_channels: Sequence[int] = (64, 128, 128),
@@ -607,6 +605,8 @@ def train(
     opponent_configs = opponent_configs or ["random"]
     opponents = create_opponents(opponent_configs)
     num_players = len(opponents) + 1  # add the learning agent
+    action_space_size = num_actions or get_action_space_size(num_players, map_type)
+    _, action_to_type_idx, action_type_names = _build_action_type_mapping(num_players, map_type)
     dims = compute_single_agent_dims(num_players, map_type)
     actor_input_dim = dims["actor_dim"]
     critic_input_dim = dims["critic_dim"]
@@ -674,11 +674,13 @@ def train(
     if uses_privileged_critic:
         if model_type == "flat":
             policy_model = build_flat_policy_network(
-                backbone_config=policy_backbone_config, num_actions=num_actions
+                backbone_config=policy_backbone_config, num_actions=action_space_size
             ).to(device)
         elif model_type == "hierarchical":
             policy_model = build_hierarchical_policy_network(
-                backbone_config=policy_backbone_config
+                backbone_config=policy_backbone_config,
+                num_players=num_players,
+                map_type=map_type,
             ).to(device)
         else:
             raise ValueError(f"Unknown model_type: {model_type}")
@@ -715,11 +717,13 @@ def train(
     else:
         if model_type == "flat":
             policy_model = build_flat_policy_value_network(
-                backbone_config=policy_backbone_config, num_actions=num_actions
+                backbone_config=policy_backbone_config, num_actions=action_space_size
             ).to(device)
         elif model_type == "hierarchical":
             policy_model = build_hierarchical_policy_value_network(
-                backbone_config=policy_backbone_config
+                backbone_config=policy_backbone_config,
+                num_players=num_players,
+                map_type=map_type,
             ).to(device)
         else:
             raise ValueError(f"Unknown model_type: {model_type}")
@@ -971,7 +975,12 @@ def train(
                 # Log raw policy preference distribution (argmax before action-mask application).
                 if raw_policy_argmax_buffer:
                     all_raw_argmax = np.concatenate(raw_policy_argmax_buffer)
-                    raw_action_type_dist, _ = compute_action_distributions(all_raw_argmax)
+                    raw_action_type_dist, _ = compute_action_distributions(
+                        all_raw_argmax,
+                        action_to_type_idx,
+                        action_type_names,
+                        action_space_size,
+                    )
                     raw_policy_log = {
                         f"raw_policy/type_{name}": freq
                         for name, freq in raw_action_type_dist.items()

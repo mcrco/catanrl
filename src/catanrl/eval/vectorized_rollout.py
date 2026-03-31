@@ -8,7 +8,6 @@ from typing import Any, Callable, List, Literal, Optional, Sequence, Tuple, cast
 
 import numpy as np
 import torch
-from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE
 from pufferlib.emulation import nativize
 
 from ..envs import (
@@ -199,12 +198,17 @@ def run_policy_value_eval_vectorized(
             batch_size = observations.shape[0]
             actor_batch = np.zeros((batch_size, actor_dim), dtype=np.float32)
             critic_batch = np.zeros((batch_size, critic_dim), dtype=np.float32)
-            action_masks = np.zeros((batch_size, ACTION_SPACE_SIZE), dtype=np.bool_)
+            action_masks: np.ndarray | None = None
 
             for idx in range(batch_size):
                 structured = nativize(observations[idx], obs_space, obs_dtype)
                 actor_batch[idx], critic_batch[idx] = flatten_puffer_observation(structured)
-                action_masks[idx] = get_action_mask_from_obs(structured)
+                mask = get_action_mask_from_obs(structured)
+                if action_masks is None:
+                    action_masks = np.zeros((batch_size, mask.shape[0]), dtype=np.bool_)
+                action_masks[idx] = mask
+            if action_masks is None:
+                raise ValueError("No action masks available from vectorized observations.")
 
             for idx in range(batch_size):
                 ep_buffers[idx].critic_states.append(critic_batch[idx].copy())

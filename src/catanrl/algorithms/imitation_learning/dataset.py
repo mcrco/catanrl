@@ -11,8 +11,8 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE
 from catanrl.features.catanatron_utils import get_actor_indices_from_critic
+from catanrl.utils.catanatron_action_space import get_action_space_size
 
 
 class EvictionStrategy(str, Enum):
@@ -45,6 +45,7 @@ class AggregatedDataset(Dataset):
         self.max_size = max_size
         self.capacity = max_size
         self.eviction_strategy = eviction_strategy
+        self.action_space_size = get_action_space_size(num_players, map_type)
 
         # Actor state is subset of critic state; these indices convert critic -> actor 
         # so we don't double store overlapping board state.
@@ -55,7 +56,7 @@ class AggregatedDataset(Dataset):
         self.actions = np.zeros((self.max_size,), dtype=np.int64)
         self.returns = np.zeros((self.max_size,), dtype=np.float32)
         self.is_single_action = np.zeros((self.max_size,), dtype=np.bool_)
-        self.action_masks = np.zeros((self.max_size, ACTION_SPACE_SIZE), dtype=np.bool_)
+        self.action_masks = np.zeros((self.max_size, self.action_space_size), dtype=np.bool_)
 
         self.size = 0
         self.head = 0  # Write pointer for FIFO eviction

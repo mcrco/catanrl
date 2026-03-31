@@ -8,7 +8,6 @@ import random
 import sys
 
 from catanatron.models.player import Color, Player
-from catanatron.models.map import build_map
 from catanatron.game import Game, TURNS_LIMIT
 from catanatron.gym.board_tensor_features import get_channels, create_board_tensor
 
@@ -26,13 +25,14 @@ from catanrl.features.catanatron_utils import (
     get_full_numeric_feature_names,
     COLOR_ORDER,
 )
-from catanatron.gym.envs.catanatron_env import (
-    ACTION_SPACE_SIZE,
-    from_action_space,
-    to_action_space,
-    HIGH,
-)
+from catanatron.gym.envs.catanatron_env import HIGH
 from catanrl.envs.zoo.multi_env import BOARD_WIDTH, BOARD_HEIGHT
+from catanrl.utils.catanatron_map import build_catan_map
+from catanrl.utils.catanatron_action_space import (
+    from_action_space,
+    get_action_space_size,
+    to_action_space,
+)
 
 
 class AecCatanatronEnv(AECEnv):
@@ -44,6 +44,7 @@ class AecCatanatronEnv(AECEnv):
         self.num_players = int(self.config.num_players)
         assert 2 <= self.num_players <= 4, "num_players must be in [2, 4]"
         self.map_type = self.config.map_type
+        self.action_space_size = get_action_space_size(self.num_players, self.map_type)
         self.vps_to_win = int(self.config.vps_to_win)
         self.shared_critic = bool(self.config.shared_critic)
 
@@ -87,7 +88,7 @@ class AecCatanatronEnv(AECEnv):
         action_mask_space = spaces.Box(
             low=0,
             high=1,
-            shape=(ACTION_SPACE_SIZE,),
+            shape=(self.action_space_size,),
             dtype=np.int8,
         )
         critic_space = spaces.Box(
@@ -103,7 +104,7 @@ class AecCatanatronEnv(AECEnv):
 
         self.observation_spaces = {agent: obs_space for agent in self.possible_agents}
         self.action_spaces = {
-            agent: spaces.Discrete(ACTION_SPACE_SIZE) for agent in self.possible_agents
+            agent: spaces.Discrete(self.action_space_size) for agent in self.possible_agents
         }
 
         self.game: Optional[Game] = None
@@ -117,7 +118,7 @@ class AecCatanatronEnv(AECEnv):
 
     def reset(self, seed: Optional[int] = None, options: Optional[Dict] = None):
         rng_seed = seed if seed is not None else random.randrange(sys.maxsize)
-        catan_map = build_map(self.map_type)
+        catan_map = build_catan_map(self.map_type, seed=rng_seed, number_placement="random")
         players = [Player(color) for color in self.colors_order]
         for player in players:
             player.reset_state()
@@ -173,7 +174,13 @@ class AecCatanatronEnv(AECEnv):
 
         self._clear_rewards()
 
-        catan_action = from_action_space(action, self.game.state.playable_actions)
+        catan_action = from_action_space(
+            action,
+            self.agent_name_to_color[agent],
+            self.num_players,
+            self.map_type,
+        )
+        assert catan_action in self.game.playable_actions
         self.game.execute(catan_action)
 
         for ag in self.agents:
@@ -237,7 +244,10 @@ class AecCatanatronEnv(AECEnv):
         assert self.game is not None
         for ag in self.infos:
             self.infos[ag] = {}
-        valid_actions = list(map(to_action_space, self.game.state.playable_actions))
+        valid_actions = [
+            to_action_space(action, self.num_players, self.map_type)
+            for action in self.game.playable_actions
+        ]
         current_agent = self._current_agent()
         info_payload: Dict[str, Union[List[int], np.ndarray]] = {"valid_actions": valid_actions}
         if self.shared_critic:
@@ -246,7 +256,10 @@ class AecCatanatronEnv(AECEnv):
 
     def _action_mask(self) -> np.ndarray:
         assert self.game is not None
-        mask = np.zeros(ACTION_SPACE_SIZE, dtype=np.int8)
-        valid_actions = list(map(to_action_space, self.game.state.playable_actions))
+        mask = np.zeros(self.action_space_size, dtype=np.int8)
+        valid_actions = [
+            to_action_space(action, self.num_players, self.map_type)
+            for action in self.game.playable_actions
+        ]
         mask[valid_actions] = 1
         return np.asarray(mask, dtype=np.int8)

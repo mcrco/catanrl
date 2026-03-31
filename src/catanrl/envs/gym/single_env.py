@@ -10,7 +10,6 @@ import pufferlib.vector as puffer_vector
 
 from catanatron.models.player import Color, RandomPlayer, Player
 from catanatron.game import TURNS_LIMIT, Game
-from catanatron.models.map import build_map
 from catanatron.features import create_sample
 from catanatron.gym.board_tensor_features import create_board_tensor
 from catanatron.players.mcts import MCTSPlayer
@@ -19,15 +18,7 @@ from catanatron.players.playouts import GreedyPlayoutsPlayer
 from catanatron.players.search import VictoryPointPlayer
 from catanatron.players.value import ValueFunctionPlayer
 from catanatron.players.weighted_random import WeightedRandomPlayer
-from catanatron.gym.envs.catanatron_env import (
-    ACTION_SPACE_SIZE,
-    get_channels,
-    get_feature_ordering,
-    is_graph_feature,
-    to_action_space,
-    from_action_space,
-    HIGH,
-)
+from catanatron.gym.envs.catanatron_env import get_channels, get_feature_ordering, is_graph_feature, HIGH
 
 from catanrl.envs.gym.rewards import ShapedReward, WinReward, RewardFunction
 from catanrl.features.catanatron_utils import (
@@ -36,6 +27,12 @@ from catanrl.features.catanatron_utils import (
     get_full_numeric_feature_names,
     get_numeric_feature_names,
 )
+from catanrl.utils.catanatron_action_space import (
+    from_action_space,
+    get_action_space_size,
+    to_action_space,
+)
+from catanrl.utils.catanatron_map import build_catan_map
 from catanrl.utils.seeding import derive_map_and_game_seeds, derive_seed
 
 BOARD_WIDTH = 21
@@ -111,6 +108,7 @@ class SingleAgentCatanatronEnv(gym.Env):
         self.p0 = Player(Color.BLUE)
         self.players = [self.p0] + self.enemies
         self.num_players = len(self.players)
+        self.action_space_size = get_action_space_size(self.num_players, self.map_type)
         self.features = get_feature_ordering(self.num_players, self.map_type)
         self._seed_sequence_root: int | None = None
         self._seed_sequence_index = 0
@@ -124,7 +122,7 @@ class SingleAgentCatanatronEnv(gym.Env):
         self.critic_vector_dim = self.full_numeric_dim + self.board_flat_dim
 
         # Action space
-        self.action_space = spaces.Discrete(ACTION_SPACE_SIZE)
+        self.action_space = spaces.Discrete(self.action_space_size)
 
         # Build observation space
         if self.shared_critic:
@@ -140,7 +138,7 @@ class SingleAgentCatanatronEnv(gym.Env):
                 }
             )
             action_mask_space = spaces.Box(
-                low=0, high=1, shape=(ACTION_SPACE_SIZE,), dtype=np.int8
+                low=0, high=1, shape=(self.action_space_size,), dtype=np.int8
             )
             critic_space = spaces.Box(
                 low=0.0, high=HIGH, shape=(self.critic_vector_dim,), dtype=np.float32
@@ -176,10 +174,15 @@ class SingleAgentCatanatronEnv(gym.Env):
 
     def get_valid_actions(self) -> List[int]:
         """Returns list of valid action indices."""
-        return list(map(to_action_space, self.game.state.playable_actions))
+        return [
+            to_action_space(action, self.num_players, self.map_type)
+            for action in self.game.playable_actions
+        ]
 
     def step(self, action):
-        catan_action = from_action_space(action, self.game.state.playable_actions)
+        catan_action = from_action_space(action, self.p0.color, self.num_players, self.map_type)
+        if catan_action not in self.game.playable_actions:
+            raise ValueError(f"Invalid action {action} for current state.")
         self.game.execute(catan_action)
         self._advance_until_p0_decision()
 
@@ -203,7 +206,7 @@ class SingleAgentCatanatronEnv(gym.Env):
         if episode_seed is not None:
             map_seed, game_seed = derive_map_and_game_seeds(episode_seed)
 
-        catan_map = build_map(self.map_type, seed=map_seed)
+        catan_map = build_catan_map(self.map_type, seed=map_seed, number_placement="random")
         for player in self.players:
             player.reset_state()
         self.game = Game(
@@ -254,8 +257,8 @@ class SingleAgentCatanatronEnv(gym.Env):
         if self.expert_player is None:
             raise ValueError("No expert player configured")
         # The expert needs to decide for the current player (p0)
-        expert_catan_action = self.expert_player.decide(self.game, self.game.state.playable_actions)
-        return to_action_space(expert_catan_action)
+        expert_catan_action = self.expert_player.decide(self.game, self.game.playable_actions)
+        return to_action_space(expert_catan_action, self.num_players, self.map_type)
 
     def _get_observation(self) -> Union[np.ndarray, Dict[str, Any]]:
         if self.shared_critic:
@@ -291,7 +294,7 @@ class SingleAgentCatanatronEnv(gym.Env):
 
     def _action_mask(self) -> np.ndarray:
         """Get binary mask of valid actions. Used in shared_critic mode."""
-        mask = np.zeros(ACTION_SPACE_SIZE, dtype=np.int8)
+        mask = np.zeros(self.action_space_size, dtype=np.int8)
         valid_actions = self.get_valid_actions()
         mask[valid_actions] = 1
         return mask

@@ -2,11 +2,11 @@ import argparse
 import os
 
 import wandb
-from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE
 
 from ..envs.gym.single_env import create_opponents
 from ..algorithms.imitation_learning.dagger import train as dagger_train
 from ..algorithms.imitation_learning.dataset import EvictionStrategy
+from ..utils.catanatron_action_space import get_action_space_size
 
 
 def main():
@@ -295,6 +295,7 @@ def main():
         args.opponents = ["random"]
     opponents = create_opponents(args.opponents)
     num_players = len(opponents) + 1
+    action_space_size = get_action_space_size(num_players, args.map_type)
     print(f"Number of players: {num_players}")
 
     policy_hidden_dims = [
@@ -354,7 +355,7 @@ def main():
 
     # Run training
     policy_model, critic_model = dagger_train(
-        num_actions=ACTION_SPACE_SIZE,
+        num_actions=action_space_size,
         model_type=args.model_type,
         backbone_type=args.backbone_type,
         policy_hidden_dims=policy_hidden_dims,

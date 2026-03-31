@@ -2,7 +2,7 @@ import argparse
 import os
 import wandb
 from catanrl.algorithms.supervised.sl import train
-from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE
+from catanrl.utils.catanatron_action_space import get_action_space_size
 
 
 def main():
@@ -11,6 +11,14 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--data-dir", type=str, required=True, help="Path to data directory")
+    parser.add_argument("--num-players", type=int, default=2, help="Number of players in the dataset")
+    parser.add_argument(
+        "--map-type",
+        type=str,
+        default="BASE",
+        choices=["BASE", "MINI", "TOURNAMENT"],
+        help="Map type used to generate the dataset",
+    )
     parser.add_argument("--epochs", type=int, default=5, help="Number of epochs (default: 5)")
     parser.add_argument("--batch-size", type=int, default=1024, help="Batch size (default: 1024)")
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate (default: 1e-3)")
@@ -139,6 +147,7 @@ def main():
     # Prepare wandb config (will be initialized inside train function)
     wandb_config = None
     if args.wandb:
+        action_space_size = get_action_space_size(args.num_players, args.map_type)
         config_dict = {
             "model_type": args.model_type,
             "epochs": args.epochs,
@@ -147,12 +156,14 @@ def main():
             "learning_rate": args.lr,
             "num_workers": args.num_workers,
             "buffer_size": args.buffer_size,
-            "action_space_size": ACTION_SPACE_SIZE,
+            "action_space_size": action_space_size,
             "log_batch_freq": args.log_batch_freq,
             "policy_loss_weight": args.policy_loss_weight,
             "value_loss_weight": args.value_loss_weight,
             "use_class_weights": args.use_class_weights,
             "test_size": args.test_size,
+            "num_players": args.num_players,
+            "map_type": args.map_type,
         }
         if args.model_type == "hierarchical":
             config_dict["action_type_weight"] = args.action_type_weight
@@ -189,6 +200,8 @@ def main():
         weight_power=args.weight_power,
         weight_sample_fraction=args.weight_sample_fraction,
         test_size=args.test_size,
+        num_players=args.num_players,
+        map_type=args.map_type,
     )
 
     print("\n" + "=" * 60)

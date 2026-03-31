@@ -145,16 +145,21 @@ def main() -> None:
     hidden_dims = parse_int_list(args.hidden_dims)
     batch_sizes = parse_int_list(args.batch_sizes)
 
-    input_dim = compute_feature_vector_dim(len(COLOR_ORDER), args.map_type)
+    num_players = len(COLOR_ORDER)
+    input_dim = compute_feature_vector_dim(num_players, args.map_type)
     backbone_config = BackboneConfig(
         architecture="mlp",
         args=MLPBackboneConfig(input_dim=input_dim, hidden_dims=hidden_dims),
     )
-    model = build_hierarchical_policy_value_network(backbone_config=backbone_config)
+    model = build_hierarchical_policy_value_network(
+        backbone_config=backbone_config,
+        num_players=num_players,
+        map_type=args.map_type,
+    )
 
     print("== AlphaZero timing profile ==")
     print(f"Device: {device}")
-    print(f"Map: {args.map_type} | Players: {len(COLOR_ORDER)}")
+    print(f"Map: {args.map_type} | Players: {num_players}")
     print(f"Input dim: {input_dim} | Hidden dims: {hidden_dims}")
 
     print("\nModel forward (hierarchical wrapper):")

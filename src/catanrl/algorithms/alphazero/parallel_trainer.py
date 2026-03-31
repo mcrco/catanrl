@@ -18,12 +18,12 @@ import torch.multiprocessing as mp
 from tqdm import tqdm
 
 from catanatron.game import Game
-from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE, to_action_space
 from catanatron.models.enums import Action
-from catanatron.models.map import build_map
 from catanatron.models.player import Color
 
 from ...features.catanatron_utils import game_to_features
+from ...utils.catanatron_action_space import get_action_space_size, to_action_space
+from ...utils.catanatron_map import build_catan_map
 from .mcts import NeuralMCTS
 from .trainer import (
     AlphaZeroConfig,
@@ -265,6 +265,7 @@ class _SelfPlayWorkerController:
         self.colors = AlphaZeroTrainer.COLOR_ORDER[: config.num_players]
         self._inference_client = _RemoteInferenceClient(worker_id, inference_queue, response_queue)
         self._current_game_samples: List[tuple[Color, np.ndarray, np.ndarray]] = []
+        self.action_space_size = get_action_space_size(config.num_players, config.map_type)
         self.mcts = NeuralMCTS(self)
         self._set_seed(self.config.seed)
 
@@ -303,7 +304,7 @@ class _SelfPlayWorkerController:
             add_noise=add_noise,
         )
         # ignore single action steps
-        if collect_data and len(game.state.playable_actions) > 1:
+        if collect_data and len(game.playable_actions) > 1:
             self._record_sample(color, state_vec, policy)
         return action
 
@@ -318,12 +319,15 @@ class _SelfPlayWorkerController:
         )
         policy, value_scalar = self._inference_client.evaluate(features)
 
-        valid_actions = game.state.playable_actions
+        valid_actions = game.playable_actions
         if not valid_actions:
-            return np.zeros(ACTION_SPACE_SIZE, dtype=np.float32), value_scalar
+            return np.zeros(self.action_space_size, dtype=np.float32), value_scalar
 
-        mask = np.zeros(ACTION_SPACE_SIZE, dtype=np.float32)
-        indices = [to_action_space(action) for action in valid_actions]
+        mask = np.zeros(self.action_space_size, dtype=np.float32)
+        indices = [
+            to_action_space(action, self.config.num_players, self.config.map_type)
+            for action in valid_actions
+        ]
         mask[indices] = 1.0
         masked = policy * mask
         total = masked.sum()
@@ -337,7 +341,7 @@ class _SelfPlayWorkerController:
 
     def _play_game(self, seed: Optional[int]) -> Dict[str, Optional[Color]]:
         players = [AlphaZeroSelfPlayPlayer(color, self) for color in self.colors]
-        catan_map = build_map(self.config.map_type)
+        catan_map = build_catan_map(self.config.map_type, seed=seed, number_placement="random")
         game = Game(
             players=players, seed=seed, catan_map=catan_map, vps_to_win=self.config.vps_to_win
         )

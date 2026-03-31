@@ -1,8 +1,7 @@
 import torch
 import torch.nn as nn
-from typing import Tuple
+from typing import Sequence, Tuple
 
-from catanatron.gym.envs.catanatron_env import ACTIONS_ARRAY
 from catanatron.models.enums import ActionType
 
 from .utils import orthogonal_init
@@ -60,7 +59,7 @@ class HierarchicalPolicyHead(nn.Module):
     Action types in Catanatron:
     0. ROLL (no params)
     1. MOVE_ROBBER (tiles: 19 for BASE, 7 for MINI)
-    2. DISCARD (5 resources)
+    2. DISCARD_RESOURCE (5 resources)
     3. BUILD_ROAD (edges: 72 for BASE, 30 for MINI)
     4. BUILD_SETTLEMENT (nodes: 54 for BASE, 24 for MINI)
     5. BUILD_CITY (nodes: 54 for BASE, 24 for MINI)
@@ -94,8 +93,13 @@ class HierarchicalPolicyHead(nn.Module):
     # Small gain for policy output layers to start with near-uniform action probs
     POLICY_OUTPUT_GAIN = 0.01
 
-    def __init__(self, input_dim: int):
+    def __init__(
+        self,
+        input_dim: int,
+        actions_array: Sequence[tuple[ActionType, object | None]],
+    ):
         super().__init__()
+        self.actions_array = tuple(actions_array)
 
         # Action type head (13 action types)
         self.action_type_head = nn.Linear(input_dim, self.NUM_ACTION_TYPES)
@@ -136,7 +140,7 @@ class HierarchicalPolicyHead(nn.Module):
         maritime_trades = set()
         discard_combinations = set()
 
-        for action_type, value in ACTIONS_ARRAY:
+        for action_type, value in self.actions_array:
             if action_type == ActionType.MOVE_ROBBER:
                 tiles.add(value)
             elif action_type == ActionType.BUILD_ROAD:
@@ -151,7 +155,7 @@ class HierarchicalPolicyHead(nn.Module):
                 monopoly_resources.add(value)
             elif action_type == ActionType.MARITIME_TRADE:
                 maritime_trades.add(value)
-            elif action_type == ActionType.DISCARD:
+            elif action_type == ActionType.DISCARD_RESOURCE:
                 discard_combinations.add(value)
 
         # Store dimensions
@@ -165,14 +169,13 @@ class HierarchicalPolicyHead(nn.Module):
     def _build_action_mappings(self):
         """Build mappings between flat action indices and (action_type, action_value)."""
 
-        self.actions_array = ACTIONS_ARRAY
-        self.action_space_size = len(ACTIONS_ARRAY)
+        self.action_space_size = len(self.actions_array)
 
         # Map ActionType enum to our integer indices
         self.action_type_to_idx = {
             ActionType.ROLL: self.ROLL,
             ActionType.MOVE_ROBBER: self.MOVE_ROBBER,
-            ActionType.DISCARD: self.DISCARD,
+            ActionType.DISCARD_RESOURCE: self.DISCARD,
             ActionType.BUILD_ROAD: self.BUILD_ROAD,
             ActionType.BUILD_SETTLEMENT: self.BUILD_SETTLEMENT,
             ActionType.BUILD_CITY: self.BUILD_CITY,
@@ -192,7 +195,7 @@ class HierarchicalPolicyHead(nn.Module):
         # Build per-action-type parameter lists
         self.action_type_params = {i: [] for i in range(self.NUM_ACTION_TYPES)}
 
-        for flat_idx, (action_type, value) in enumerate(ACTIONS_ARRAY):
+        for flat_idx, (action_type, value) in enumerate(self.actions_array):
             action_type_idx = self.action_type_to_idx[action_type]
 
             # Get parameter index within action type

@@ -345,10 +345,8 @@ def create_loss_computer(
         # Compute action weights if requested
         action_weights = None
         if use_class_weights and train_actions is not None:
-            from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE
-
             action_weights = compute_action_weights(
-                train_actions, ACTION_SPACE_SIZE, weight_power=weight_power
+                train_actions, model.action_space_size, weight_power=weight_power
             )
             print(f"Computed class weights for flat action space")
             print(f"  Weight range: [{action_weights.min():.3f}, {action_weights.max():.3f}]")
