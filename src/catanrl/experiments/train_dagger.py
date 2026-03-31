@@ -152,7 +152,7 @@ def main():
         "--expert",
         type=str,
         default="F",
-        help="Expert policy spec (e.g. AB:3, MCTS:200, random). Default: AB:2",
+        help="Expert policy spec (e.g. AB:3, MCTS:200, random). Default: F",
     )
     parser.add_argument(
         "--beta-init",
@@ -229,6 +229,14 @@ def main():
         help=(
             "Run evaluation every N DAgger iterations "
             "(always evaluates on final iteration) (default: 1)"
+        ),
+    )
+    parser.add_argument(
+        "--save-every-iterations",
+        type=int,
+        default=1,
+        help=(
+            "Save checkpoints every N DAgger iterations (default: 1)"
         ),
     )
 
@@ -349,6 +357,7 @@ def main():
                 "eviction_strategy": args.eviction_strategy,
                 "eval_games_per_opponent": args.eval_games_per_opponent,
                 "eval_every_iterations": args.eval_every_iterations,
+                "save_every_iterations": args.save_every_iterations,
                 "seed": args.seed,
             },
         }
@@ -386,6 +395,7 @@ def main():
         wandb_config=wandb_config,
         eval_games_per_opponent=args.eval_games_per_opponent,
         eval_every_iterations=args.eval_every_iterations,
+        save_every_iterations=args.save_every_iterations,
         seed=args.seed,
         num_envs=args.num_envs,
         reward_function=args.reward_function,
