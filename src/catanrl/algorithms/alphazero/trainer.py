@@ -292,7 +292,7 @@ class AlphaZeroTrainer:
 
         mask = np.zeros(self.action_space_size, dtype=np.float32)
         indices = [
-            to_action_space(action, self.config.num_players, self.config.map_type)
+            to_action_space(action, self.config.num_players, self.config.map_type, tuple(game.state.colors))
             for action in valid_actions
         ]
         mask[indices] = 1.0

@@ -78,6 +78,7 @@ class MCTSNode:
                     action,
                     len(self.game.state.colors),
                     self.map_type,
+                    tuple(self.game.state.colors),
                 )
                 self.priors[idx] = uniform
                 self.action_map[idx] = action
@@ -87,6 +88,7 @@ class MCTSNode:
                     action,
                     len(self.game.state.colors),
                     self.map_type,
+                    tuple(self.game.state.colors),
                 )
                 self.priors[idx] = float(priors[idx])
                 self.action_map[idx] = action

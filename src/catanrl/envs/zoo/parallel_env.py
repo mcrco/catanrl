@@ -142,6 +142,7 @@ class ParallelCatanatronEnv(ParallelEnv):
                 current_color,
                 self.num_players,
                 self.map_type,
+                tuple(self.game.state.colors),
             )
             assert catan_action in self.game.playable_actions
             self.game.execute(catan_action)
@@ -207,7 +208,7 @@ class ParallelCatanatronEnv(ParallelEnv):
         current_color = self.game.state.current_color()
         if self.agents and self.agent_name_to_color[agent] == current_color:
             valid_actions = [
-                to_action_space(action, self.num_players, self.map_type)
+                to_action_space(action, self.num_players, self.map_type, tuple(self.game.state.colors))
                 for action in self.game.playable_actions
             ]
             mask[valid_actions] = 1

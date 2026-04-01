@@ -179,6 +179,7 @@ class AecCatanatronEnv(AECEnv):
             self.agent_name_to_color[agent],
             self.num_players,
             self.map_type,
+            tuple(self.game.state.colors),
         )
         assert catan_action in self.game.playable_actions
         self.game.execute(catan_action)
@@ -245,7 +246,7 @@ class AecCatanatronEnv(AECEnv):
         for ag in self.infos:
             self.infos[ag] = {}
         valid_actions = [
-            to_action_space(action, self.num_players, self.map_type)
+            to_action_space(action, self.num_players, self.map_type, tuple(self.game.state.colors))
             for action in self.game.playable_actions
         ]
         current_agent = self._current_agent()
@@ -258,7 +259,7 @@ class AecCatanatronEnv(AECEnv):
         assert self.game is not None
         mask = np.zeros(self.action_space_size, dtype=np.int8)
         valid_actions = [
-            to_action_space(action, self.num_players, self.map_type)
+            to_action_space(action, self.num_players, self.map_type, tuple(self.game.state.colors))
             for action in self.game.playable_actions
         ]
         mask[valid_actions] = 1

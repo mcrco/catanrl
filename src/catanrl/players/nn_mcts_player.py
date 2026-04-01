@@ -4,7 +4,7 @@ import math
 import random
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from typing import Callable, Literal
+from typing import Callable, Literal, Tuple
 
 import numpy as np
 import torch
@@ -118,7 +118,9 @@ class NNMCTSPlayer(Player):
             root.children.keys(),
             key=lambda action: sum(child.visits for child, _ in root.children[action]),
         )
-        return self._resolve_root_action(best_action, playable_actions, len(game.state.colors))
+        return self._resolve_root_action(
+            best_action, playable_actions, len(game.state.colors), tuple(game.state.colors)
+        )
 
     def _run_simulation(self, root: _Node) -> None:
         node = root
@@ -257,7 +259,8 @@ class NNMCTSPlayer(Player):
             logits_np = logits.squeeze(0).detach().cpu().numpy()
 
         num_players = len(game.state.colors)
-        indices = [to_action_space(action, num_players, self.map_type) for action in actions]
+        game_colors = tuple(game.state.colors)
+        indices = [to_action_space(action, num_players, self.map_type, game_colors) for action in actions]
         action_logits = np.array([logits_np[idx] for idx in indices], dtype=np.float32)
         action_logits = action_logits - float(np.max(action_logits))
         exp_logits = np.exp(action_logits)
@@ -351,10 +354,16 @@ class NNMCTSPlayer(Player):
         self._critic_index_cache[num_players] = index
         return index
 
-    def _resolve_root_action(self, best_action, playable_actions, num_players: int):
-        best_idx = to_action_space(best_action, num_players, self.map_type)
+    def _resolve_root_action(
+        self,
+        best_action,
+        playable_actions,
+        num_players: int,
+        game_colors: Tuple[Color, ...],
+    ):
+        best_idx = to_action_space(best_action, num_players, self.map_type, game_colors)
         for action in playable_actions:
-            if to_action_space(action, num_players, self.map_type) == best_idx:
+            if to_action_space(action, num_players, self.map_type, game_colors) == best_idx:
                 return action
         raise ValueError("NN MCTS Player chose unavailable action.")
 

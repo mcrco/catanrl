@@ -175,12 +175,14 @@ class SingleAgentCatanatronEnv(gym.Env):
     def get_valid_actions(self) -> List[int]:
         """Returns list of valid action indices."""
         return [
-            to_action_space(action, self.num_players, self.map_type)
+            to_action_space(action, self.num_players, self.map_type, tuple(self.game.state.colors))
             for action in self.game.playable_actions
         ]
 
     def step(self, action):
-        catan_action = from_action_space(action, self.p0.color, self.num_players, self.map_type)
+        catan_action = from_action_space(
+            action, self.p0.color, self.num_players, self.map_type, tuple(self.game.state.colors)
+        )
         if catan_action not in self.game.playable_actions:
             raise ValueError(f"Invalid action {action} for current state.")
         self.game.execute(catan_action)
@@ -258,7 +260,9 @@ class SingleAgentCatanatronEnv(gym.Env):
             raise ValueError("No expert player configured")
         # The expert needs to decide for the current player (p0)
         expert_catan_action = self.expert_player.decide(self.game, self.game.playable_actions)
-        return to_action_space(expert_catan_action, self.num_players, self.map_type)
+        return to_action_space(
+            expert_catan_action, self.num_players, self.map_type, tuple(self.game.state.colors)
+        )
 
     def _get_observation(self) -> Union[np.ndarray, Dict[str, Any]]:
         if self.shared_critic:

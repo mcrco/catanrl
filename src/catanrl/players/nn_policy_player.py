@@ -59,8 +59,9 @@ class NNPolicyPlayer(Player):
             logits = policy_logits.squeeze(0).cpu().numpy()
 
         num_players = len(game.state.colors)
+        game_colors = tuple(game.state.colors)
         playable_action_indices = [
-            to_action_space(action, num_players, self.map_type) for action in playable_actions
+            to_action_space(action, num_players, self.map_type, game_colors) for action in playable_actions
         ]
         best_offset = int(np.argmax(logits[playable_action_indices]))
         return playable_actions[best_offset]
