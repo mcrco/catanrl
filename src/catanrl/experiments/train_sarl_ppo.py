@@ -142,6 +142,18 @@ def main():
         help="Map type to use (default: BASE)",
     )
     parser.add_argument(
+        "--vps-to-win",
+        type=int,
+        default=15,
+        help="Victory points required to win each game (default: 15)",
+    )
+    parser.add_argument(
+        "--discard-limit",
+        type=int,
+        default=9,
+        help="Discard threshold used when a 7 is rolled (default: 9)",
+    )
+    parser.add_argument(
         "--opponents",
         type=str,
         nargs="+",
@@ -352,6 +364,8 @@ def main():
                 "xdim_fusion_hidden_dim": args.xdim_fusion_hidden_dim,
                 "xdim_critic_fusion_hidden_dim": args.xdim_critic_fusion_hidden_dim,
                 "map_type": args.map_type,
+                "vps_to_win": args.vps_to_win,
+                "discard_limit": args.discard_limit,
                 "load_weights": args.load_weights,
                 "load_critic_weights": args.load_critic_weights,
                 "opponents": args.opponents,
@@ -401,6 +415,8 @@ def main():
         save_every_updates=args.save_every_updates,
         wandb_config=wandb_config,
         map_type=args.map_type,
+        vps_to_win=args.vps_to_win,
+        discard_limit=args.discard_limit,
         opponent_configs=args.opponents,
         reward_function=args.reward,
         num_envs=args.num_envs,

@@ -96,7 +96,8 @@ class SingleAgentCatanatronEnv(gym.Env):
         self.config = config or dict()
         self.reward_function: RewardFunction = self.config.get("reward_function")
         self.map_type: Literal["BASE", "MINI", "TOURNAMENT"] = self.config.get("map_type", "BASE")
-        self.vps_to_win = self.config.get("vps_to_win", 10)
+        self.vps_to_win = self.config.get("vps_to_win", 15)
+        self.discard_limit = self.config.get("discard_limit", 9)
         self.enemies = self.config.get("enemies", [RandomPlayer(Color.RED)])
         self.representation = self.config.get("representation", "mixed")
         self.shared_critic = self.config.get("shared_critic", False)
@@ -215,6 +216,7 @@ class SingleAgentCatanatronEnv(gym.Env):
             players=self.players,
             seed=game_seed,
             catan_map=catan_map,
+            discard_limit=self.discard_limit,
             vps_to_win=self.vps_to_win,
         )
         # Reset expert player state if present
@@ -314,6 +316,8 @@ def _make_env(
     reward_function: str,
     map_type: str,
     opponent_configs: List[str],
+    vps_to_win: int = 15,
+    discard_limit: int = 9,
     representation: str = "mixed",
 ) -> Callable[[], gym.Env]:
     """Factory for individual gym environments."""
@@ -323,11 +327,13 @@ def _make_env(
         elif reward_function == "win":
             reward_fn = WinReward()
         else:
-             raise ValueError(f"Unknown reward function: {reward_function}")
+            raise ValueError(f"Unknown reward function: {reward_function}")
 
         return SingleAgentCatanatronEnv(
             config={
                 "map_type": map_type,
+                "vps_to_win": vps_to_win,
+                "discard_limit": discard_limit,
                 "enemies": create_opponents(opponent_configs),
                 "representation": representation,
                 "reward_function": reward_fn,
@@ -342,6 +348,8 @@ def make_vectorized_envs(
     map_type: str,
     opponent_configs: List[str],
     num_envs: int,
+    vps_to_win: int = 15,
+    discard_limit: int = 9,
     representation: str = "mixed",
     async_vector: bool = True,
 ):
@@ -355,6 +363,8 @@ def make_vectorized_envs(
             reward_function=reward_function,
             map_type=map_type,
             opponent_configs=opponent_configs,
+            vps_to_win=vps_to_win,
+            discard_limit=discard_limit,
             representation=representation,
         )
         for _ in range(num_envs)
@@ -406,6 +416,8 @@ def _make_puffer_env(
     reward_function: str,
     map_type: Literal["BASE", "MINI", "TOURNAMENT"],
     opponent_configs: List[str],
+    vps_to_win: int = 15,
+    discard_limit: int = 9,
     expert_config: str | None = None,
 ) -> Callable[[], pufferlib.emulation.GymnasiumPufferEnv]:
     """Factory for individual Puffer-wrapped environments with shared_critic enabled.
@@ -431,6 +443,8 @@ def _make_puffer_env(
         return SingleAgentCatanatronEnv(
             config={
                 "map_type": map_type,
+                "vps_to_win": vps_to_win,
+                "discard_limit": discard_limit,
                 "enemies": create_opponents(opponent_configs),
                 "reward_function": reward_fn,
                 "shared_critic": True,  # Enable structured obs for DAgger/PPO
@@ -446,6 +460,8 @@ def make_puffer_vectorized_envs(
     map_type: Literal["BASE", "MINI", "TOURNAMENT"],
     opponent_configs: List[str],
     num_envs: int,
+    vps_to_win: int = 15,
+    discard_limit: int = 9,
     expert_config: str | None = None,
 ):
     """
@@ -463,7 +479,14 @@ def make_puffer_vectorized_envs(
     containing actor obs, action masks, and critic obs.
     """
     return puffer_vector.make(
-        _make_puffer_env(reward_function, map_type, opponent_configs, expert_config),
+        _make_puffer_env(
+            reward_function,
+            map_type,
+            opponent_configs,
+            vps_to_win,
+            discard_limit,
+            expert_config,
+        ),
         num_envs=num_envs,
         backend=puffer_vector.Multiprocessing,
     )

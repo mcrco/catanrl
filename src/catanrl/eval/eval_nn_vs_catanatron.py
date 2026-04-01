@@ -47,6 +47,8 @@ def eval(
     map_type: Literal["BASE", "TOURNAMENT", "MINI"] = "BASE",
     num_games: int = 100,
     seed: int = 42,
+    vps_to_win: int = 15,
+    discard_limit: int = 9,
     show_tqdm: bool = False,
     nn_seat: SeatOption = "random",
 ):
@@ -67,6 +69,8 @@ def eval(
             players=players,
             catan_map=build_catan_map(map_type, seed=map_seed, number_placement="random"),
             seed=game_seed,
+            discard_limit=discard_limit,
+            vps_to_win=vps_to_win,
         )
         if not allow_upstream_shuffle:
             _force_player_order(game, players)

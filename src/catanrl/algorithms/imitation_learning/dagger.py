@@ -528,6 +528,8 @@ def train(
     expert_config: str = "AB:2",
     opponent_configs: Optional[Sequence[str]] = None,
     map_type: Literal["BASE", "MINI", "TOURNAMENT"] = "BASE",
+    vps_to_win: int = 15,
+    discard_limit: int = 9,
     beta_init: float = 1.0,
     beta_decay: float = 0.9,
     beta_min: float = 0.05,
@@ -574,6 +576,8 @@ def train(
         expert_config: Expert player config string (e.g. "AB:2", "MCTS:200")
         opponent_configs: List of opponent config strings
         map_type: Catan map type
+        vps_to_win: Victory points needed to win a game
+        discard_limit: Hand-size threshold for discarding on a rolled 7
         beta_init: Initial probability of using expert action
         beta_decay: Multiplicative decay for beta per iteration
         beta_min: Minimum beta value
@@ -654,6 +658,7 @@ def train(
     print(f"{'=' * 60}")
     print(f"Device: {device}")
     print(f"Map type: {map_type} | Players: {num_players}")
+    print(f"Game params: vps_to_win={vps_to_win}, discard_limit={discard_limit}")
     print(f"Backbone: {backbone_type} | Model type: {model_type}")
     print(f"Actor input dim: {actor_dim} | Critic input dim: {critic_dim}")
     if backbone_type in ("xdim", "xdim_res"):
@@ -770,6 +775,8 @@ def train(
         map_type=map_type,
         opponent_configs=list(opponent_configs),
         num_envs=num_envs,
+        vps_to_win=vps_to_win,
+        discard_limit=discard_limit,
         expert_config=expert_config,
     )
 
@@ -844,6 +851,8 @@ def train(
                             num_games=eval_games_per_opponent,
                             gamma=gamma,
                             seed=random.randint(0, sys.maxsize),
+                            vps_to_win=vps_to_win,
+                            discard_limit=discard_limit,
                             log_to_wandb=False,
                             global_step=global_step,
                             device=device,

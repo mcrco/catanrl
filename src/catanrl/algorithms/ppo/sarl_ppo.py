@@ -568,6 +568,8 @@ def train(
     device: str | torch.device = "cuda" if torch.cuda.is_available() else "cpu",
     wandb_config: dict | None = None,
     map_type: Literal["BASE", "TOURNAMENT", "MINI"] = "BASE",
+    vps_to_win: int = 15,
+    discard_limit: int = 9,
     opponent_configs: List[str] | None = None,
     reward_function: str = "shaped",
     num_envs: int = 4,
@@ -598,6 +600,7 @@ def train(
     print(f"{'=' * 60}")
     print(f"Device: {device}")
     print(f"Map type: {map_type}")
+    print(f"Game params: vps_to_win={vps_to_win}, discard_limit={discard_limit}")
     print(f"Total timesteps: {total_timesteps:,}")
     print(f"Rollout steps: {rollout_steps}")
     print(f"Parallel environments: {num_envs}")
@@ -828,6 +831,8 @@ def train(
         map_type=map_type,
         opponent_configs=opponent_configs,
         num_envs=num_envs,
+        vps_to_win=vps_to_win,
+        discard_limit=discard_limit,
     )
     driver_env = envs.driver_env
     if hasattr(driver_env, "env_single_observation_space"):
@@ -1084,6 +1089,8 @@ def train(
                         map_type=map_type,
                         num_games=eval_games_per_opponent,
                         seed=random.randint(0, sys.maxsize),
+                        vps_to_win=vps_to_win,
+                        discard_limit=discard_limit,
                         log_to_wandb=False,
                         global_step=global_step,
                     )
@@ -1093,6 +1100,8 @@ def train(
                         map_type=map_type,
                         num_games=trend_eval_games,
                         seed=trend_eval_seed if trend_eval_seed is not None else 0,
+                        vps_to_win=vps_to_win,
+                        discard_limit=discard_limit,
                         log_to_wandb=False,
                         global_step=global_step,
                     )

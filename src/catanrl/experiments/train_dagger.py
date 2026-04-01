@@ -208,6 +208,18 @@ def main():
         help="Number of parallel environments (default: 4)",
     )
     parser.add_argument(
+        "--vps-to-win",
+        type=int,
+        default=15,
+        help="Victory points required to win each game (default: 15)",
+    )
+    parser.add_argument(
+        "--discard-limit",
+        type=int,
+        default=9,
+        help="Discard threshold used when a 7 is rolled (default: 9)",
+    )
+    parser.add_argument(
         "--reward-function",
         type=str,
         default="shaped",
@@ -349,6 +361,8 @@ def main():
                 "opponents": args.opponents,
                 "map_type": args.map_type,
                 "num_envs": args.num_envs,
+                "vps_to_win": args.vps_to_win,
+                "discard_limit": args.discard_limit,
                 "reward_function": args.reward_function,
                 "beta_init": args.beta_init,
                 "beta_decay": args.beta_decay,
@@ -385,6 +399,8 @@ def main():
         expert_config=args.expert,
         opponent_configs=args.opponents,
         map_type=args.map_type,
+        vps_to_win=args.vps_to_win,
+        discard_limit=args.discard_limit,
         beta_init=args.beta_init,
         beta_decay=args.beta_decay,
         beta_min=args.beta_min,

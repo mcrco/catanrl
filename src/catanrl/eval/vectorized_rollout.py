@@ -115,6 +115,8 @@ def run_policy_value_eval_vectorized(
     gamma: float,
     opponent_configs: Sequence[str],
     device: Optional[str] = None,
+    vps_to_win: int = 15,
+    discard_limit: int = 9,
     deterministic: bool = True,
     compare_to_expert: bool = False,
     expert_config: Optional[str] = None,
@@ -158,6 +160,8 @@ def run_policy_value_eval_vectorized(
         map_type=map_type,
         opponent_configs=list(opponent_configs),
         num_envs=num_envs,
+        vps_to_win=vps_to_win,
+        discard_limit=discard_limit,
         expert_config=expert_config if compare_to_expert else None,
     )
 

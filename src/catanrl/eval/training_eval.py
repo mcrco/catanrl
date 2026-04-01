@@ -29,6 +29,8 @@ def eval_policy_against_baselines(
     map_type: Literal["BASE", "TOURNAMENT", "MINI"],
     num_games: int = 250,
     seed: int = 42,
+    vps_to_win: int = 15,
+    discard_limit: int = 9,
     log_to_wandb: bool = True,
     global_step: Optional[int] = None,
 ) -> Dict[str, float]:
@@ -63,6 +65,8 @@ def eval_policy_against_baselines(
         map_type=map_type,
         num_games=num_games,
         seed=seed,
+        vps_to_win=vps_to_win,
+        discard_limit=discard_limit,
     )
     metrics["eval/win_rate_vs_random"] = wins / num_games
     metrics["eval/avg_vps_vs_random"] = sum(vps) / len(vps)
@@ -76,6 +80,8 @@ def eval_policy_against_baselines(
         map_type=map_type,
         num_games=num_games,
         seed=seed,
+        vps_to_win=vps_to_win,
+        discard_limit=discard_limit,
     )
     metrics["eval/win_rate_vs_value"] = wins / num_games
     metrics["eval/avg_vps_vs_value"] = sum(vps) / len(vps)
@@ -97,6 +103,8 @@ def eval_policy_value_against_baselines(
     num_games: int = 250,
     gamma: float = 0.99,
     seed: int = 42,
+    vps_to_win: int = 15,
+    discard_limit: int = 9,
     log_to_wandb: bool = True,
     global_step: Optional[int] = None,
     device: Optional[str] = None,
@@ -184,6 +192,8 @@ def eval_policy_value_against_baselines(
                     opponent_configs=opponent_configs,
                     device=device,
                     num_envs=num_envs,
+                    vps_to_win=vps_to_win,
+                    discard_limit=discard_limit,
                     deterministic=deterministic,
                     compare_to_expert=compare_to_expert,
                     expert_config=expert_config,
@@ -223,6 +233,8 @@ def eval_policy_value_against_baselines(
                 opponent_configs=opponent_configs,
                 device=device,
                 num_envs=num_envs,
+                vps_to_win=vps_to_win,
+                discard_limit=discard_limit,
                 deterministic=deterministic,
                 compare_to_expert=compare_to_expert,
                 expert_config=expert_config,
