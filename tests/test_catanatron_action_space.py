@@ -25,11 +25,21 @@ def test_move_robber_round_trip_relative_seating():
     assert back == action
 
 
-def test_move_robber_none_round_trip():
+def test_move_robber_1v1_collapses_victim_choice_to_tile():
     game_colors = tuple(get_player_colors(2))
     actor = game_colors[0]
     coord = (0, 0, 0)
-    action = Action(actor, ActionType.MOVE_ROBBER, (coord, None))
-    idx = to_action_space(action, len(game_colors), "BASE", game_colors)
-    back = from_action_space(idx, actor, len(game_colors), "BASE", game_colors)
-    assert back == action
+    steal_action = Action(actor, ActionType.MOVE_ROBBER, (coord, game_colors[1]))
+    no_steal_action = Action(actor, ActionType.MOVE_ROBBER, (coord, None))
+    idx_steal = to_action_space(steal_action, len(game_colors), "BASE", game_colors)
+    idx_no_steal = to_action_space(no_steal_action, len(game_colors), "BASE", game_colors)
+    assert idx_steal == idx_no_steal
+    back = from_action_space(
+        idx_steal,
+        actor,
+        len(game_colors),
+        "BASE",
+        game_colors,
+        playable_actions=[steal_action],
+    )
+    assert back == steal_action

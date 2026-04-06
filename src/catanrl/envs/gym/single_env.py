@@ -182,7 +182,12 @@ class SingleAgentCatanatronEnv(gym.Env):
 
     def step(self, action):
         catan_action = from_action_space(
-            action, self.p0.color, self.num_players, self.map_type, tuple(self.game.state.colors)
+            action,
+            self.p0.color,
+            self.num_players,
+            self.map_type,
+            tuple(self.game.state.colors),
+            self.game.playable_actions,
         )
         if catan_action not in self.game.playable_actions:
             raise ValueError(f"Invalid action {action} for current state.")

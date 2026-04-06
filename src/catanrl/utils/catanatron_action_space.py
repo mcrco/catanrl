@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import Dict, Literal, Tuple
+from typing import Dict, Literal, Sequence, Tuple
 
 import numpy as np
 from catanatron.gym.envs.action_space import ACTION_TYPES
@@ -51,6 +51,9 @@ def _action_to_key(action: Action, game_colors: Tuple[Color, ...]) -> tuple:
     if action.action_type != ActionType.MOVE_ROBBER:
         return (action.action_type, action.value)
     coord, victim = action.value
+    if len(game_colors) == 2:
+        # Preserve the old 1v1 gym action semantics: robber decisions are tile-only.
+        return (ActionType.MOVE_ROBBER, coord)
     if victim is None:
         return (ActionType.MOVE_ROBBER, (coord, None))
     rel = _relative_opponent_slot(action.color, victim, game_colors)
@@ -70,8 +73,6 @@ def get_action_array(
         raise ValueError(f"num_players must be in [1, {len(PLAYER_COLOR_ORDER)}], got {num_players}")
     catan_map = build_map(map_type)
     num_nodes = len(catan_map.land_nodes)
-    robber_slots: list[object] = [None, *range(1, num_players)]
-
     actions_array = sorted(
         [
             (ActionType.ROLL, None),
@@ -95,11 +96,15 @@ def get_action_array(
             ],
             (ActionType.PLAY_ROAD_BUILDING, None),
             *[(ActionType.PLAY_MONOPOLY, r) for r in RESOURCES],
-            *[
-                (ActionType.MOVE_ROBBER, (coordinates, slot))
-                for coordinates in catan_map.land_tiles.keys()
-                for slot in robber_slots
-            ],
+            *(
+                [(ActionType.MOVE_ROBBER, coordinates) for coordinates in catan_map.land_tiles.keys()]
+                if num_players == 2
+                else [
+                    (ActionType.MOVE_ROBBER, (coordinates, slot))
+                    for coordinates in catan_map.land_tiles.keys()
+                    for slot in [None, *range(1, num_players)]
+                ]
+            ),
             *[
                 (ActionType.MARITIME_TRADE, tuple(4 * [i] + [j]))
                 for i in RESOURCES
@@ -152,8 +157,15 @@ def from_action_space(
     num_players: int,
     map_type: MapType,
     game_colors: Tuple[Color, ...],
+    playable_actions: Sequence[Action] | None = None,
 ) -> Action:
-    """Map flat index to Action; MOVE_ROBBER values use absolute victim colors."""
+    """Map flat index to Action.
+
+    In 1v1, robber indices intentionally collapse victim choice and only encode
+    the destination tile to match the old 294-action gym space. Resolving those
+    indices back into executable actions therefore requires the current
+    `playable_actions`.
+    """
     if len(game_colors) != num_players:
         raise ValueError(
             f"game_colors length {len(game_colors)} must match num_players {num_players}"
@@ -162,6 +174,14 @@ def from_action_space(
     action_type, value = actions_array[action_int]
     if action_type != ActionType.MOVE_ROBBER:
         return Action(color, action_type, value)
+    if num_players == 2:
+        if playable_actions is None:
+            raise ValueError("playable_actions is required for 1v1 MOVE_ROBBER decoding")
+        key = (ActionType.MOVE_ROBBER, value)
+        for action in playable_actions:
+            if _action_to_key(action, game_colors) == key:
+                return action
+        raise ValueError(f"No playable robber action matches encoded tile {value}")
     coord, slot = value  # type: ignore[misc]
     if slot is None:
         return Action(color, action_type, (coord, None))
@@ -191,5 +211,5 @@ def build_action_type_metadata(
     for action_idx, (action_type, _) in enumerate(action_array):
         action_type_to_indices[action_type.name].append(action_idx)
         action_to_type_idx[action_idx] = ACTION_TYPES.index(action_type)
-    action_type_names = [action_type.name for action_type in ACTION_TYPES]
+    action_type_names: list[str] = [str(action_type.name) for action_type in ACTION_TYPES]
     return action_type_to_indices, action_to_type_idx, action_type_names

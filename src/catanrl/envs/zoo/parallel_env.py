@@ -143,6 +143,7 @@ class ParallelCatanatronEnv(ParallelEnv):
                 self.num_players,
                 self.map_type,
                 tuple(self.game.state.colors),
+                self.game.playable_actions,
             )
             assert catan_action in self.game.playable_actions
             self.game.execute(catan_action)
