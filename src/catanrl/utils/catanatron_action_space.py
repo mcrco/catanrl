@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import Dict, Literal, Sequence, Tuple
+from typing import Dict, Literal, Sequence, Tuple, cast
 
 import numpy as np
 from catanatron.gym.envs.action_space import ACTION_TYPES
@@ -135,6 +135,110 @@ def get_action_space_size(num_players: int, map_type: MapType) -> int:
     return len(get_action_array(num_players, map_type))
 
 
+def _old_master_1v1_semantic_key(action_type: ActionType, value: object | None) -> tuple[str, object | None]:
+    """Canonicalize action keys so old master and current spaces can be compared."""
+    if action_type == ActionType.MOVE_ROBBER:
+        if isinstance(value, tuple) and len(value) == 2:
+            coord, _ = value
+            return (action_type.name, coord)
+        return (action_type.name, value)
+    if action_type == ActionType.DISCARD_RESOURCE:
+        return ("DISCARD", value)
+    return (action_type.name, value)
+
+
+@lru_cache(maxsize=None)
+def get_old_master_1v1_action_array(
+    map_type: MapType,
+) -> Tuple[tuple[ActionType, object | None], ...]:
+    """Return the old catanatron master 1v1 flat action ordering."""
+    catan_map = build_map(map_type)
+    num_nodes = len(catan_map.land_nodes)
+    return (
+        (ActionType.ROLL, None),
+        *[(ActionType.MOVE_ROBBER, coordinates) for coordinates in catan_map.land_tiles.keys()],
+        *[(ActionType.DISCARD_RESOURCE, resource) for resource in RESOURCES],
+        *[
+            (ActionType.BUILD_ROAD, tuple(sorted(edge)))
+            for edge in get_edges(catan_map.land_nodes)
+        ],
+        *[(ActionType.BUILD_SETTLEMENT, node_id) for node_id in range(num_nodes)],
+        *[(ActionType.BUILD_CITY, node_id) for node_id in range(num_nodes)],
+        (ActionType.BUY_DEVELOPMENT_CARD, None),
+        (ActionType.PLAY_KNIGHT_CARD, None),
+        *[
+            (ActionType.PLAY_YEAR_OF_PLENTY, (first_card, RESOURCES[j]))
+            for i, first_card in enumerate(RESOURCES)
+            for j in range(i, len(RESOURCES))
+        ],
+        *[
+            (ActionType.PLAY_YEAR_OF_PLENTY, (first_card,))
+            for first_card in RESOURCES
+        ],
+        (ActionType.PLAY_ROAD_BUILDING, None),
+        *[(ActionType.PLAY_MONOPOLY, r) for r in RESOURCES],
+        *[
+            (ActionType.MARITIME_TRADE, tuple(4 * [i] + [j]))
+            for i in RESOURCES
+            for j in RESOURCES
+            if i != j
+        ],
+        *[
+            (ActionType.MARITIME_TRADE, tuple(3 * [i] + [None, j]))  # type: ignore[misc]
+            for i in RESOURCES
+            for j in RESOURCES
+            if i != j
+        ],
+        *[
+            (ActionType.MARITIME_TRADE, tuple(2 * [i] + [None, None, j]))  # type: ignore[misc]
+            for i in RESOURCES
+            for j in RESOURCES
+            if i != j
+        ],
+        (ActionType.END_TURN, None),
+    )
+
+
+@lru_cache(maxsize=None)
+def get_old_master_1v1_action_space_size(map_type: MapType) -> int:
+    return len(get_old_master_1v1_action_array(map_type))
+
+
+@lru_cache(maxsize=None)
+def get_old_master_1v1_to_current_index_groups(
+    map_type: MapType,
+) -> Tuple[Tuple[int, ...], ...]:
+    """Map each old master 1v1 action index to one or more current indices.
+
+    Old master encoded robber choices by destination tile only. Current spaces may
+    either preserve that encoding (294 actions) or expand robber moves into multiple
+    victim-aware indices (e.g. 313 actions). This mapping allows old checkpoints to
+    be projected into the current action space for evaluation.
+    """
+    old_action_array = get_old_master_1v1_action_array(map_type)
+    current_action_array = get_action_array(2, map_type)
+
+    current_by_key: dict[tuple[str, object | None], list[int]] = {}
+    for idx, (action_type, value) in enumerate(current_action_array):
+        key = _old_master_1v1_semantic_key(action_type, value)
+        current_by_key.setdefault(key, []).append(idx)
+
+    index_groups: list[Tuple[int, ...]] = []
+    for action_type, value in old_action_array:
+        key = _old_master_1v1_semantic_key(action_type, value)
+        matches = current_by_key.get(key)
+        if not matches:
+            raise ValueError(f"No current 1v1 action matches old master action key {key}")
+        index_groups.append(tuple(matches))
+
+    flattened = sorted(idx for group in index_groups for idx in group)
+    expected = list(range(len(current_action_array)))
+    if flattened != expected:
+        raise ValueError("Old master 1v1 action mapping does not cover the full current space")
+
+    return tuple(index_groups)
+
+
 def to_action_space(
     action: Action,
     num_players: int,
@@ -212,4 +316,4 @@ def build_action_type_metadata(
         action_type_to_indices[action_type.name].append(action_idx)
         action_to_type_idx[action_idx] = ACTION_TYPES.index(action_type)
     action_type_names: list[str] = [str(action_type.name) for action_type in ACTION_TYPES]
-    return action_type_to_indices, action_to_type_idx, action_type_names
+    return action_type_to_indices, cast(np.ndarray, action_to_type_idx), action_type_names

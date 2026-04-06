@@ -5,6 +5,9 @@ from catanatron.models.enums import ActionType
 
 from catanrl.utils.catanatron_action_space import (
     from_action_space,
+    get_action_array,
+    get_old_master_1v1_action_array,
+    get_old_master_1v1_to_current_index_groups,
     get_player_colors,
     to_action_space,
 )
@@ -43,3 +46,13 @@ def test_move_robber_1v1_collapses_victim_choice_to_tile():
         playable_actions=[steal_action],
     )
     assert back == steal_action
+
+
+def test_old_master_1v1_mapping_covers_current_action_space():
+    old_action_array = get_old_master_1v1_action_array("BASE")
+    current_action_array = get_action_array(2, "BASE")
+    index_groups = get_old_master_1v1_to_current_index_groups("BASE")
+
+    assert len(index_groups) == len(old_action_array)
+    flattened = sorted(idx for group in index_groups for idx in group)
+    assert flattened == list(range(len(current_action_array)))
