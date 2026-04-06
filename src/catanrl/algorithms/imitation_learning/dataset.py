@@ -5,14 +5,14 @@ Aggregated dataset for DAgger imitation learning with configurable eviction stra
 from __future__ import annotations
 
 from enum import Enum
-from typing import List, Literal, Tuple
+from typing import Dict, List, Literal, Tuple
 
 import numpy as np
 import torch
 from torch.utils.data import Dataset
 
 from catanrl.features.catanatron_utils import get_actor_indices_from_critic
-from catanrl.utils.catanatron_action_space import get_action_space_size
+from catanrl.utils.catanatron_action_space import get_action_array, get_action_space_size
 
 
 class EvictionStrategy(str, Enum):
@@ -175,6 +175,25 @@ class AggregatedDataset(Dataset):
         self.returns[replace_indices] = returns[offset:]
         self.is_single_action[replace_indices] = is_single_action[offset:]
         self.action_masks[replace_indices] = action_masks[offset:]
+
+    def summarize_imitation_stats(self) -> Tuple[float, float, Dict[str, int]]:
+        """Fraction of non-forced steps, mean valid-action count, expert action-type counts."""
+        if self.size == 0:
+            return 0.0, 0.0, {}
+        sl = slice(0, self.size)
+        is_single = self.is_single_action[sl]
+        masks = self.action_masks[sl]
+        actions = self.actions[sl]
+        fraction_non_single = float((~is_single).mean())
+        mean_mask_size = float(masks.sum(axis=1).mean())
+
+        action_array = get_action_array(self.num_players, self.map_type)
+        counts: Dict[str, int] = {}
+        for a in actions:
+            at = action_array[int(a)][0]
+            name = at.name
+            counts[name] = counts.get(name, 0) + 1
+        return fraction_non_single, mean_mask_size, counts
 
 
 __all__ = ["AggregatedDataset", "EvictionStrategy"]

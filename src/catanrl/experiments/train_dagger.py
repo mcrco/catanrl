@@ -272,7 +272,9 @@ def main():
         help="Maximum gradient norm for clipping (default: 5.0)",
     )
 
-    # Weights & Biases
+    # Weights & Biases (dagger.train also logs: fraction_non_single_action_samples, mean_mask_size,
+    # expert/policy action-type histograms under dagger/expert_action_type/* and dagger/policy_pred_action_type/*,
+    # rollout_expert_agreement_pre_train / _post_train on the iteration's collected batch)
     parser.add_argument(
         "--wandb",
         action="store_true",
