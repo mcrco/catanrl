@@ -150,6 +150,7 @@ def _select_policy_actions_batch(
             policy_logits,
             torch.full_like(policy_logits, float("-inf")),
         )
+        masked_logits = torch.clamp(masked_logits, min=-100, max=100)
 
         probs = torch.softmax(masked_logits, dim=-1)
         log_probs_all = torch.log_softmax(masked_logits, dim=-1)

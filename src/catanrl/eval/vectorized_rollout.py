@@ -219,6 +219,7 @@ def run_policy_value_eval_vectorized(
                     policy_logits,
                     torch.full_like(policy_logits, float("-inf")),
                 )
+                masked_logits = torch.clamp(masked_logits, min=-100, max=100)
                 if deterministic:
                     actions = torch.argmax(masked_logits, dim=-1).cpu().numpy()
                 else:
