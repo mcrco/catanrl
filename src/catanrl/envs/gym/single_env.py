@@ -10,6 +10,7 @@ import pufferlib.vector as puffer_vector
 
 from catanatron.models.player import Color, RandomPlayer, Player
 from catanatron.game import TURNS_LIMIT, Game
+from catanatron.models.map import build_map
 from catanatron.features import create_sample
 from catanatron.gym.board_tensor_features import create_board_tensor
 from catanatron.players.mcts import MCTSPlayer
@@ -32,7 +33,6 @@ from catanrl.utils.catanatron_action_space import (
     get_action_space_size,
     to_action_space,
 )
-from catanrl.utils.catanatron_map import build_catan_map
 from catanrl.utils.seeding import derive_map_and_game_seeds, derive_seed
 
 BOARD_WIDTH = 21
@@ -209,12 +209,11 @@ class SingleAgentCatanatronEnv(gym.Env):
         super().reset(seed=seed)
 
         episode_seed = self._next_episode_seed(seed)
-        map_seed = None
         game_seed = None
         if episode_seed is not None:
-            map_seed, game_seed = derive_map_and_game_seeds(episode_seed)
+            _, game_seed = derive_map_and_game_seeds(episode_seed)
 
-        catan_map = build_catan_map(self.map_type, seed=map_seed, number_placement="random")
+        catan_map = build_map(self.map_type, number_placement='random')
         for player in self.players:
             player.reset_state()
         self.game = Game(
