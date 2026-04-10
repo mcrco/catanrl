@@ -37,6 +37,7 @@ from ...models.models import (
 from ...models.wrappers import PolicyNetworkWrapper, ValueNetworkWrapper
 from ...features.catanatron_utils import get_actor_indices_from_critic
 from ...utils.catanatron_action_space import get_action_array, get_action_space_size
+from ...utils.seeding import derive_seed
 from .dataset import AggregatedDataset, EvictionStrategy
 
 
@@ -281,6 +282,7 @@ def _collect_dagger_rollouts_vectorized(
     actor_dim: int,
     critic_dim: int,
     progress_callback: Optional[Callable[[int], None]] = None,
+    seed: int | None = None,
 ) -> Tuple[DAggerCollectStats, DAggerRolloutBatch]:
     """Run batched policy/environment interaction and aggregate expert-labeled data.
 
@@ -314,7 +316,17 @@ def _collect_dagger_rollouts_vectorized(
     expert_actions_used = 0
     total_actions = 0
 
-    observations, infos = envs.reset()
+    reset_seeds = None
+    if seed is not None:
+        reset_seeds = [derive_seed(seed, "env", env_idx) for env_idx in range(num_envs)]
+
+    if reset_seeds is not None:
+        try:
+            observations, infos = envs.reset(seed=reset_seeds)
+        except TypeError:
+            observations, infos = envs.reset()
+    else:
+        observations, infos = envs.reset()
 
     for step_idx in range(num_steps):
         batch_size = observations.shape[0]
@@ -873,6 +885,7 @@ def train(
         with tqdm(total=total_steps, desc="DAgger", unit="step", unit_scale=True) as pbar:
             for iteration in range(1, n_iterations + 1):
                 pbar.set_postfix({"iter": f"{iteration}/{n_iterations}", "beta": f"{beta:.2f}"})
+                collect_seed = derive_seed(seed, "dagger_collect", iteration)
 
                 collect_stats, rollout_batch = _collect_dagger_rollouts_vectorized(
                     envs=envs,
@@ -887,6 +900,7 @@ def train(
                     actor_dim=actor_dim,
                     critic_dim=critic_dim,
                     progress_callback=pbar.update,
+                    seed=collect_seed,
                 )
                 global_step += collect_stats.steps
 
