@@ -6,10 +6,9 @@ allowing plug-and-play evaluation of DAgger-trained models.
 """
 
 import argparse
-from typing import Literal, Sequence, cast
+from typing import Literal, Sequence
 
 import torch
-import torch.nn as nn
 from catanatron.cli.cli_players import CLI_PLAYERS
 from catanatron.models.player import Player
 
@@ -24,42 +23,11 @@ from catanrl.models.backbones import (
 from catanrl.models.models import build_flat_policy_network, build_hierarchical_policy_network
 from catanrl.models.wrappers import PolicyNetworkWrapper
 from catanrl.players import NNPolicyPlayer
-from catanrl.utils.catanatron_action_space import (
-    get_action_space_size,
-    get_old_master_1v1_action_space_size,
-    get_old_master_1v1_to_current_index_groups,
-)
+from catanrl.utils.catanatron_action_space import get_action_space_size
 
 
 BOARD_WIDTH = 21
 BOARD_HEIGHT = 11
-
-
-class OldMaster1v1FlatPolicyAdapter(nn.Module):
-    """Project old master 1v1 policy logits into the current action space."""
-
-    def __init__(
-        self,
-        base_model: PolicyNetworkWrapper,
-        index_groups: Sequence[Sequence[int]],
-        current_action_space_size: int,
-    ):
-        super().__init__()
-        self.base_model: PolicyNetworkWrapper = base_model
-        self.index_groups: list[tuple[int, ...]] = [tuple(group) for group in index_groups]
-        self.current_action_space_size: int = current_action_space_size
-
-    def forward(self, x):
-        old_logits = self.base_model(x)
-        new_logits = torch.empty(
-            (*old_logits.shape[:-1], self.current_action_space_size),
-            dtype=old_logits.dtype,
-            device=old_logits.device,
-        )
-        for old_idx, group in enumerate(self.index_groups):
-            for current_idx in group:
-                new_logits[..., current_idx] = old_logits[..., old_idx]
-        return new_logits
 
 
 def build_policy_model(
@@ -69,7 +37,6 @@ def build_policy_model(
     num_players: int,
     map_type: Literal["BASE", "MINI", "TOURNAMENT"],
     device: torch.device,
-    checkpoint_action_space: str = "current",
 ) -> PolicyNetworkWrapper:
     """Build a policy network with the same configuration as dagger.py."""
     dims = compute_single_agent_dims(num_players, map_type)
@@ -101,18 +68,11 @@ def build_policy_model(
         raise ValueError(f"Unknown backbone_type '{backbone_type}'")
 
     if model_type == "flat":
-        num_actions = (
-            get_old_master_1v1_action_space_size(map_type)
-            if checkpoint_action_space == "old-master-1v1"
-            else get_action_space_size(num_players, map_type)
-        )
         model = build_flat_policy_network(
             backbone_config=backbone_config,
-            num_actions=num_actions,
+            num_actions=get_action_space_size(num_players, map_type),
         )
     elif model_type == "hierarchical":
-        if checkpoint_action_space != "current":
-            raise ValueError("Old checkpoint action-space compatibility only supports flat models.")
         model = build_hierarchical_policy_network(
             backbone_config=backbone_config,
             num_players=num_players,
@@ -208,17 +168,6 @@ def main():
         required=True,
         help="Path to policy model weights (.pt file)",
     )
-    parser.add_argument(
-        "--checkpoint-action-space",
-        type=str,
-        default="current",
-        choices=["current", "old-master-1v1"],
-        help=(
-            "Interpret checkpoint logits using the current action ordering or "
-            "old catanatron master 1v1 ordering."
-        ),
-    )
-
     # Evaluation settings
     parser.add_argument(
         "--num-games",
@@ -277,7 +226,6 @@ def main():
     print(f"Backbone: {args.backbone_type} | Model type: {args.model_type}")
     print(f"Hidden dims: {args.policy_hidden_dims}")
     print(f"Policy weights: {args.policy_weights}")
-    print(f"Checkpoint action space: {args.checkpoint_action_space}")
     print(f"Opponents: {args.opponents}")
     print(f"NN seat: {args.nn_seat}")
     print(f"Games: {args.num_games}")
@@ -291,32 +239,19 @@ def main():
         num_players=num_players,
         map_type=args.map_type,
         device=device,
-        checkpoint_action_space=args.checkpoint_action_space,
     )
 
     # Load weights
     state_dict = torch.load(args.policy_weights, map_location=device)
     model.load_state_dict(state_dict)
-    model_for_player: nn.Module = model
-    if args.checkpoint_action_space == "old-master-1v1":
-        if args.model_type != "flat":
-            raise ValueError("--checkpoint-action-space old-master-1v1 only supports --model-type flat")
-        if num_players != 2:
-            raise ValueError("--checkpoint-action-space old-master-1v1 only supports 1v1 evaluation")
-        index_groups = get_old_master_1v1_to_current_index_groups(args.map_type)
-        model_for_player = OldMaster1v1FlatPolicyAdapter(
-            base_model=model,
-            index_groups=index_groups,
-            current_action_space_size=get_action_space_size(num_players, args.map_type),
-        ).to(device)
-    model_for_player.eval()
+    model.eval()
     print(f"Loaded policy weights from {args.policy_weights}")
 
     # Create NN player
     nn_player = NNPolicyPlayer(
         color=COLOR_ORDER[0],
         model_type=args.model_type,
-        model=cast(PolicyNetworkWrapper, model_for_player),
+        model=model,
         map_type=args.map_type,
     )
 
