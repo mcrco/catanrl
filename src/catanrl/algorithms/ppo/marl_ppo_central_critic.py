@@ -839,6 +839,7 @@ def train(
                                 critic_model=critic_model,
                                 model_type=model_type,
                                 map_type=map_type,
+                                eval_opponent_configs=["random"] * (num_players - 1),
                                 num_games=eval_games_per_opponent,
                                 gamma=gamma,
                                 seed=random.randint(
@@ -854,6 +855,7 @@ def train(
                                 critic_model=critic_model,
                                 model_type=model_type,
                                 map_type=map_type,
+                                eval_opponent_configs=["random"] * (num_players - 1),
                                 num_games=trend_eval_games,
                                 gamma=gamma,
                                 seed=trend_eval_seed if trend_eval_seed is not None else 0,

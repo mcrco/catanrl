@@ -5,7 +5,7 @@ Provides a unified interface for evaluating trained policies against
 standard Catanatron opponents (RandomPlayer, ValueFunctionPlayer).
 """
 
-from typing import Dict, Optional, Literal
+from typing import Dict, Optional, Literal, Sequence
 
 import numpy as np
 import torch
@@ -100,6 +100,7 @@ def eval_policy_value_against_baselines(
     model_type: str,
     map_type: Literal["BASE", "TOURNAMENT", "MINI"],
     num_envs: int,
+    eval_opponent_configs: Optional[Sequence[str]] = None,
     num_games: int = 250,
     gamma: float = 0.99,
     seed: int = 42,
@@ -128,6 +129,9 @@ def eval_policy_value_against_baselines(
         critic_model: The trained critic (value) network.
         model_type: Model architecture type ("flat" or "hierarchical").
         map_type: Catan map type.
+        eval_opponent_configs: Opponent configs from training/eval setup. Only the
+            number of opponent slots is used so baseline evals run with the same
+            player count as training.
         num_games: Number of games to play against EACH opponent.
         gamma: Discount factor for computing returns.
         seed: Random seed.
@@ -148,10 +152,14 @@ def eval_policy_value_against_baselines(
     policy_model.eval()
     critic_model.eval()
 
-    # Define opponent types to evaluate against
+    num_opponents = len(eval_opponent_configs) if eval_opponent_configs is not None else 1
+    if num_opponents < 1:
+        raise ValueError("eval_opponent_configs must contain at least one opponent.")
+
+    # Define opponent types to evaluate against while preserving player count.
     opponent_configs_list = [
-        ("random", ["random"]),
-        ("value", ["F"]),
+        ("random", ["random"] * num_opponents),
+        ("value", ["F"] * num_opponents),
     ]
 
     if num_games <= 0:

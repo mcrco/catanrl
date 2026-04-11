@@ -963,6 +963,7 @@ def train(
                             critic_model=critic_model,
                             model_type=model_type,
                             map_type=map_type,
+                            eval_opponent_configs=opponent_configs,
                             num_games=eval_games_per_opponent,
                             gamma=gamma,
                             seed=random.randint(0, sys.maxsize),
