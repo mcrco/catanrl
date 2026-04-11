@@ -2,11 +2,11 @@ import argparse
 import os
 
 import wandb
-from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE
 
 from ..envs.gym.single_env import create_opponents
 from ..algorithms.imitation_learning.dagger import train as dagger_train
 from ..algorithms.imitation_learning.dataset import EvictionStrategy
+from ..utils.catanatron_action_space import get_action_space_size
 
 
 def main():
@@ -152,7 +152,7 @@ def main():
         "--expert",
         type=str,
         default="F",
-        help="Expert policy spec (e.g. AB:3, MCTS:200, random). Default: AB:2",
+        help="Expert policy spec (e.g. AB:3, MCTS:200, random). Default: F",
     )
     parser.add_argument(
         "--beta-init",
@@ -208,6 +208,18 @@ def main():
         help="Number of parallel environments (default: 4)",
     )
     parser.add_argument(
+        "--vps-to-win",
+        type=int,
+        default=15,
+        help="Victory points required to win each game (default: 15)",
+    )
+    parser.add_argument(
+        "--discard-limit",
+        type=int,
+        default=9,
+        help="Discard threshold used when a 7 is rolled (default: 9)",
+    )
+    parser.add_argument(
         "--reward-function",
         type=str,
         default="shaped",
@@ -231,6 +243,14 @@ def main():
             "(always evaluates on final iteration) (default: 1)"
         ),
     )
+    parser.add_argument(
+        "--save-every-iterations",
+        type=int,
+        default=1,
+        help=(
+            "Save checkpoints every N DAgger iterations (default: 1)"
+        ),
+    )
 
     # Misc
     parser.add_argument(
@@ -252,7 +272,9 @@ def main():
         help="Maximum gradient norm for clipping (default: 5.0)",
     )
 
-    # Weights & Biases
+    # Weights & Biases (dagger.train also logs: fraction_non_single_action_samples, mean_mask_size,
+    # expert/policy action-type histograms under dagger/expert_action_type/* and dagger/policy_pred_action_type/*,
+    # rollout_expert_agreement_pre_train / _post_train on the iteration's collected batch)
     parser.add_argument(
         "--wandb",
         action="store_true",
@@ -295,6 +317,7 @@ def main():
         args.opponents = ["random"]
     opponents = create_opponents(args.opponents)
     num_players = len(opponents) + 1
+    action_space_size = get_action_space_size(num_players, args.map_type)
     print(f"Number of players: {num_players}")
 
     policy_hidden_dims = [
@@ -340,6 +363,8 @@ def main():
                 "opponents": args.opponents,
                 "map_type": args.map_type,
                 "num_envs": args.num_envs,
+                "vps_to_win": args.vps_to_win,
+                "discard_limit": args.discard_limit,
                 "reward_function": args.reward_function,
                 "beta_init": args.beta_init,
                 "beta_decay": args.beta_decay,
@@ -348,13 +373,14 @@ def main():
                 "eviction_strategy": args.eviction_strategy,
                 "eval_games_per_opponent": args.eval_games_per_opponent,
                 "eval_every_iterations": args.eval_every_iterations,
+                "save_every_iterations": args.save_every_iterations,
                 "seed": args.seed,
             },
         }
 
     # Run training
     policy_model, critic_model = dagger_train(
-        num_actions=ACTION_SPACE_SIZE,
+        num_actions=action_space_size,
         model_type=args.model_type,
         backbone_type=args.backbone_type,
         policy_hidden_dims=policy_hidden_dims,
@@ -375,6 +401,8 @@ def main():
         expert_config=args.expert,
         opponent_configs=args.opponents,
         map_type=args.map_type,
+        vps_to_win=args.vps_to_win,
+        discard_limit=args.discard_limit,
         beta_init=args.beta_init,
         beta_decay=args.beta_decay,
         beta_min=args.beta_min,
@@ -385,6 +413,7 @@ def main():
         wandb_config=wandb_config,
         eval_games_per_opponent=args.eval_games_per_opponent,
         eval_every_iterations=args.eval_every_iterations,
+        save_every_iterations=args.save_every_iterations,
         seed=args.seed,
         num_envs=args.num_envs,
         reward_function=args.reward_function,

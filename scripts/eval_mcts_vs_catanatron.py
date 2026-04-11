@@ -27,6 +27,7 @@ from catanrl.models.models import (
 )
 from catanrl.models.wrappers import PolicyNetworkWrapper, ValueNetworkWrapper
 from catanrl.players import NNMCTSPlayer
+from catanrl.utils.catanatron_action_space import get_action_space_size
 
 BOARD_WIDTH = 21
 BOARD_HEIGHT = 11
@@ -69,9 +70,16 @@ def build_policy_model(
         raise ValueError(f"Unknown backbone_type '{backbone_type}'")
 
     if model_type == "flat":
-        model = build_flat_policy_network(backbone_config=backbone_config)
+        model = build_flat_policy_network(
+            backbone_config=backbone_config,
+            num_actions=get_action_space_size(num_players, map_type),
+        )
     elif model_type == "hierarchical":
-        model = build_hierarchical_policy_network(backbone_config=backbone_config)
+        model = build_hierarchical_policy_network(
+            backbone_config=backbone_config,
+            num_players=num_players,
+            map_type=map_type,
+        )
     else:
         raise ValueError(f"Unknown model_type '{model_type}'")
 
@@ -276,6 +284,18 @@ def main():
         help="Random seed",
     )
     parser.add_argument(
+        "--vps-to-win",
+        type=int,
+        default=15,
+        help="Victory points required to win each game (default: 15)",
+    )
+    parser.add_argument(
+        "--discard-limit",
+        type=int,
+        default=9,
+        help="Discard threshold when a 7 is rolled (default: 9)",
+    )
+    parser.add_argument(
         "--device",
         type=str,
         default=None,
@@ -309,6 +329,7 @@ def main():
     print(f"Opponents: {args.opponents}")
     print(f"NN seat: {args.nn_seat}")
     print(f"Games: {args.num_games}")
+    print(f"VPs to win: {args.vps_to_win} | Discard limit: {args.discard_limit}")
 
     policy_model = build_policy_model(
         backbone_type=args.backbone_type,
@@ -355,6 +376,8 @@ def main():
         map_type=args.map_type,
         num_games=args.num_games,
         seed=args.seed,
+        vps_to_win=args.vps_to_win,
+        discard_limit=args.discard_limit,
         show_tqdm=True,
         nn_seat=args.nn_seat,
     )

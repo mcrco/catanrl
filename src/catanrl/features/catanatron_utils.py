@@ -8,8 +8,8 @@ import numpy as np
 from catanatron.features import create_sample, get_feature_ordering
 from catanatron.game import Game
 from catanatron.gym.board_tensor_features import create_board_tensor, is_graph_feature
-from catanatron.models.map import build_map
 from catanatron.models.player import Color, RandomPlayer
+from catanrl.utils.catanatron_map import build_catan_map
 
 COLOR_ORDER: Tuple[Color, ...] = (
     Color.RED,
@@ -27,7 +27,7 @@ def _build_dummy_game(
         raise ValueError("num_players must be positive")
     colors = COLOR_ORDER[:num_players]
     dummy_players = [RandomPlayer(color) for color in colors]
-    dummy_game = Game(dummy_players, catan_map=build_map(map_type))
+    dummy_game = Game(dummy_players, catan_map=build_catan_map(map_type))
     return colors, dummy_game
 
 

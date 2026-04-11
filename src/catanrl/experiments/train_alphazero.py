@@ -17,7 +17,6 @@ import torch
 import wandb
 from tqdm import tqdm
 
-from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE
 from catanatron.players.minimax import AlphaBetaPlayer
 from catanatron.players.value import ValueFunctionPlayer
 
@@ -30,6 +29,7 @@ from catanrl.models import (
     build_flat_policy_value_network,
     build_hierarchical_policy_value_network,
 )
+from catanrl.utils.catanatron_action_space import get_action_space_size
 
 
 def parse_args() -> argparse.Namespace:
@@ -414,16 +414,21 @@ def main() -> None:
     )
 
     input_dim = compute_feature_vector_dim(config.num_players, config.map_type)
+    action_space_size = get_action_space_size(config.num_players, config.map_type)
     backbone_config = BackboneConfig(
         architecture="mlp",
         args=MLPBackboneConfig(input_dim=input_dim, hidden_dims=hidden_dims),
     )
     if args.model_type == "hierarchical":
-        model = build_hierarchical_policy_value_network(backbone_config=backbone_config)
+        model = build_hierarchical_policy_value_network(
+            backbone_config=backbone_config,
+            num_players=config.num_players,
+            map_type=config.map_type,
+        )
     else:
         model = build_flat_policy_value_network(
             backbone_config=backbone_config,
-            num_actions=ACTION_SPACE_SIZE,
+            num_actions=action_space_size,
         )
 
     if args.num_workers <= 1:

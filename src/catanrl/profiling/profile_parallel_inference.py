@@ -18,7 +18,6 @@ from typing import Dict, Iterable, List, Sequence
 import numpy as np
 import torch
 
-from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE
 from catanrl.algorithms.alphazero import parallel_trainer as parallel_mod
 from catanrl.algorithms.alphazero.trainer import AlphaZeroConfig
 from catanrl.features.catanatron_utils import compute_feature_vector_dim
@@ -27,6 +26,7 @@ from catanrl.models import (
     MLPBackboneConfig,
     build_hierarchical_policy_value_network,
 )
+from catanrl.utils.catanatron_action_space import get_action_space_size
 
 ParallelAlphaZeroTrainer = parallel_mod.ParallelAlphaZeroTrainer
 _BaseInferenceServer = parallel_mod._InferenceServer
@@ -150,8 +150,9 @@ def make_profiling_inference_server(
                     batch.append(item)
 
                 if self._mock:
+                    action_space_size = self.trainer.action_space_size
                     response_policy = np.full(
-                        ACTION_SPACE_SIZE, 1.0 / ACTION_SPACE_SIZE, dtype=np.float32
+                        action_space_size, 1.0 / action_space_size, dtype=np.float32
                     )
                     for entry in batch:
                         worker_id = entry["worker_id"]
@@ -218,7 +219,11 @@ def run_benchmark(
                 architecture="mlp",
                 args=MLPBackboneConfig(input_dim=input_dim, hidden_dims=list(hidden_dims)),
             )
-            model = build_hierarchical_policy_value_network(backbone_config=backbone_config)
+            model = build_hierarchical_policy_value_network(
+                backbone_config=backbone_config,
+                num_players=config.num_players,
+                map_type=config.map_type,
+            )
             trainer: ParallelAlphaZeroTrainer | None = None
             with patched_inference_server(stats, mock_inference):
                 try:

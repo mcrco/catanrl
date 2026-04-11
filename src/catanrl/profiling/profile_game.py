@@ -4,9 +4,9 @@ import time
 
 from catanatron.game import Game
 from catanatron.models.player import RandomPlayer
-from catanatron.models.map import build_map
 
 from catanrl.features.catanatron_utils import COLOR_ORDER
+from catanrl.utils.catanatron_map import build_catan_map
 from statistics import mean
 
 
@@ -18,12 +18,12 @@ def bench_game_step(
     seed: int,
 ) -> Dict[str, Union[float, List[int]]]:
     players = [RandomPlayer(c) for c in COLOR_ORDER[:num_players]]
-    game = Game(players, seed=seed, catan_map=build_map(map_type))
+    game = Game(players, seed=seed, catan_map=build_catan_map(map_type, seed=seed))
     times: List[float] = []
     for _ in range(steps):
         if game.winning_color() is not None or game.state.num_turns >= turns_limit:
             seed += 1
-            game = Game(players, seed=seed, catan_map=build_map(map_type))
+            game = Game(players, seed=seed, catan_map=build_catan_map(map_type, seed=seed))
         t0 = time.perf_counter()
         game.play_tick()
         times.append(time.perf_counter() - t0)
@@ -42,12 +42,12 @@ def bench_games(
 ) -> Dict[str, Union[float, List[int]]]:
     """Benchmarks the time it takes to initialize and play games."""
     players = [RandomPlayer(c) for c in COLOR_ORDER[:num_players]]
-    game = Game(players, seed=seed, catan_map=build_map(map_type))
+    game = Game(players, seed=seed, catan_map=build_catan_map(map_type, seed=seed))
     times: List[float] = []
     turns: List[int] = []
     for _ in range(games):
         t0 = time.perf_counter()
-        game = Game(players, seed=seed, catan_map=build_map(map_type))
+        game = Game(players, seed=seed, catan_map=build_catan_map(map_type, seed=seed))
         game.play()
         times.append(time.perf_counter() - t0)
         turns.append(game.state.num_turns)

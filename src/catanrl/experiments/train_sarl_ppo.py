@@ -1,10 +1,10 @@
 import argparse
 import os
 import wandb
-from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE
 
 from ..envs.gym.single_env import compute_single_agent_dims, create_opponents
 from ..algorithms.ppo.sarl_ppo import train
+from ..utils.catanatron_action_space import get_action_space_size
 
 
 def main():
@@ -140,6 +140,18 @@ def main():
         default="BASE",
         choices=["BASE", "MINI", "TOURNAMENT"],
         help="Map type to use (default: BASE)",
+    )
+    parser.add_argument(
+        "--vps-to-win",
+        type=int,
+        default=15,
+        help="Victory points required to win each game (default: 15)",
+    )
+    parser.add_argument(
+        "--discard-limit",
+        type=int,
+        default=9,
+        help="Discard threshold used when a 7 is rolled (default: 9)",
     )
     parser.add_argument(
         "--opponents",
@@ -290,6 +302,7 @@ def main():
         args.opponents = ["random"]
     temp_opponents = create_opponents(args.opponents)
     num_players = len(temp_opponents) + 1  # +1 for the RL agent (BLUE)
+    action_space_size = get_action_space_size(num_players, args.map_type)
 
     # Compute feature dimensions for this player/map setup.
     dims = compute_single_agent_dims(num_players, args.map_type)
@@ -351,6 +364,8 @@ def main():
                 "xdim_fusion_hidden_dim": args.xdim_fusion_hidden_dim,
                 "xdim_critic_fusion_hidden_dim": args.xdim_critic_fusion_hidden_dim,
                 "map_type": args.map_type,
+                "vps_to_win": args.vps_to_win,
+                "discard_limit": args.discard_limit,
                 "load_weights": args.load_weights,
                 "load_critic_weights": args.load_critic_weights,
                 "opponents": args.opponents,
@@ -372,7 +387,7 @@ def main():
     # Train model
     train(
         input_dim=input_dim,
-        num_actions=ACTION_SPACE_SIZE,
+        num_actions=action_space_size,
         model_type=args.model_type,
         backbone_type=args.backbone_type,
         xdim_cnn_channels=xdim_cnn_channels,
@@ -400,6 +415,8 @@ def main():
         save_every_updates=args.save_every_updates,
         wandb_config=wandb_config,
         map_type=args.map_type,
+        vps_to_win=args.vps_to_win,
+        discard_limit=args.discard_limit,
         opponent_configs=args.opponents,
         reward_function=args.reward,
         num_envs=args.num_envs,

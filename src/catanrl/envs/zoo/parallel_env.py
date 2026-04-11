@@ -10,16 +10,8 @@ from pettingzoo.utils.env import ParallelEnv
 
 from catanatron.game import Game, TURNS_LIMIT
 from catanatron.models.player import Color, Player
-from catanatron.models.map import build_map
-from catanatron.models.enums import ActionType
 from catanatron.gym.board_tensor_features import get_channels, create_board_tensor
-from catanatron.gym.envs.catanatron_env import (
-    ACTION_SPACE_SIZE,
-    ACTIONS_ARRAY,
-    from_action_space,
-    to_action_space,
-    HIGH,
-)
+from catanatron.gym.envs.catanatron_env import HIGH
 from catanrl.features.catanatron_utils import (
     compute_feature_vector_dim,
     full_game_to_features,
@@ -35,11 +27,13 @@ from catanrl.envs.zoo.multi_env import (
     BOARD_HEIGHT,
     LocalObservation,
 )
-
-# Find the index of END_TURN
-END_TURN_IDX = next(
-    i for i, (action_type, _) in enumerate(ACTIONS_ARRAY) if action_type == ActionType.END_TURN
+from catanrl.utils.catanatron_action_space import (
+    from_action_space,
+    get_action_space_size,
+    get_end_turn_index,
+    to_action_space,
 )
+from catanrl.utils.catanatron_map import build_catan_map
 
 
 class ParallelCatanatronEnv(ParallelEnv):
@@ -49,6 +43,8 @@ class ParallelCatanatronEnv(ParallelEnv):
         self.config = config or MultiAgentCatanatronEnvConfig()
         self.num_players = int(self.config.num_players)
         self.map_type = self.config.map_type
+        self.action_space_size = get_action_space_size(self.num_players, self.map_type)
+        self.end_turn_idx = get_end_turn_index(self.num_players, self.map_type)
         self.vps_to_win = int(self.config.vps_to_win)
         self.shared_critic = bool(self.config.shared_critic)
 
@@ -87,7 +83,9 @@ class ParallelCatanatronEnv(ParallelEnv):
                 ),
             }
         )
-        action_mask_space = spaces.Box(low=0, high=1, shape=(ACTION_SPACE_SIZE,), dtype=np.int8)
+        action_mask_space = spaces.Box(
+            low=0, high=1, shape=(self.action_space_size,), dtype=np.int8
+        )
         critic_space = spaces.Box(
             low=0.0, high=HIGH, shape=(self.critic_vector_dim,), dtype=np.float32
         )
@@ -102,7 +100,7 @@ class ParallelCatanatronEnv(ParallelEnv):
 
         self.observation_spaces = {agent: obs_space for agent in self.possible_agents}
         self.action_spaces = {
-            agent: spaces.Discrete(ACTION_SPACE_SIZE) for agent in self.possible_agents
+            agent: spaces.Discrete(self.action_space_size) for agent in self.possible_agents
         }
 
         self.game = None
@@ -110,7 +108,7 @@ class ParallelCatanatronEnv(ParallelEnv):
 
     def reset(self, seed: Optional[int] = None, options: Optional[Dict] = None):
         rng_seed = seed if seed is not None else random.randrange(sys.maxsize)
-        catan_map = build_map(self.map_type)
+        catan_map = build_catan_map(self.map_type, seed=rng_seed, number_placement="random")
         players = [Player(color) for color in self.colors_order]
         for player in players:
             player.reset_state()
@@ -139,7 +137,15 @@ class ParallelCatanatronEnv(ParallelEnv):
         action = actions.get(current_agent)
 
         if action is not None:
-            catan_action = from_action_space(action, self.game.state.playable_actions)
+            catan_action = from_action_space(
+                action,
+                current_color,
+                self.num_players,
+                self.map_type,
+                tuple(self.game.state.colors),
+                self.game.playable_actions,
+            )
+            assert catan_action in self.game.playable_actions
             self.game.execute(catan_action)
 
         rewards = {agent: 0.0 for agent in self.agents}
@@ -197,15 +203,18 @@ class ParallelCatanatronEnv(ParallelEnv):
         return full_game_to_features(self.game, self.num_players, self.map_type)
 
     def _action_mask(self, agent: str) -> np.ndarray:
-        mask = np.zeros(ACTION_SPACE_SIZE, dtype=np.int8)
+        mask = np.zeros(self.action_space_size, dtype=np.int8)
 
         # Only the current player has valid actions, otherwise "pad" with END_TURN
         current_color = self.game.state.current_color()
         if self.agents and self.agent_name_to_color[agent] == current_color:
-            valid_actions = list(map(to_action_space, self.game.state.playable_actions))
+            valid_actions = [
+                to_action_space(action, self.num_players, self.map_type, tuple(self.game.state.colors))
+                for action in self.game.playable_actions
+            ]
             mask[valid_actions] = 1
         else:
-            mask[END_TURN_IDX] = 1
+            mask[self.end_turn_idx] = 1
 
         return np.asarray(mask, dtype=np.int8)
 

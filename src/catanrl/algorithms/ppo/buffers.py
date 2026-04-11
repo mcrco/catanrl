@@ -5,8 +5,6 @@ from typing import Tuple
 import numpy as np
 import numpy.typing as npt
 
-from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE
-
 
 class ExperienceBuffer:
     """On-policy buffer that keeps a time x env dimension for vectorized envs."""
@@ -15,7 +13,7 @@ class ExperienceBuffer:
         self,
         num_rollouts: int,
         state_dim: int,
-        action_space_size: int = ACTION_SPACE_SIZE,
+        action_space_size: int,
         num_envs: int = 1,
     ):
         self.capacity = num_rollouts
@@ -119,7 +117,7 @@ class CentralCriticExperienceBuffer(ExperienceBuffer):
         num_rollouts: int,
         actor_state_dim: int,
         critic_state_dim: int,
-        action_space_size: int = ACTION_SPACE_SIZE,
+        action_space_size: int,
         num_envs: int = 1,
     ):
         super().__init__(num_rollouts, actor_state_dim, action_space_size, num_envs=num_envs)

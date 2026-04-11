@@ -16,12 +16,12 @@ from sklearn.metrics import f1_score
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor
 import pyarrow.parquet as pq
-from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE
 from ...data.sharded_loader import create_dataloader_from_shards
 from ...data.custom_parquet_iterable import create_dataloader, estimate_steps_per_epoch
 from ...models.backbones import BackboneConfig, MLPBackboneConfig, create_backbone
 from ...models.heads import FlatPolicyHead, HierarchicalPolicyHead, ValueHead
 from ...models.wrappers import PolicyValueNetworkWrapper
+from ...utils.catanatron_action_space import get_action_array, get_action_space_size
 from .loss_utils import create_loss_computer
 from .metrics import PolicyValueMetrics
 
@@ -104,6 +104,8 @@ def _build_sl_model(
     model_type: str,
     backbone_config: BackboneConfig,
     num_actions: int,
+    num_players: int,
+    map_type: str,
     device: torch.device | str,
 ) -> PolicyValueNetworkWrapper:
     """Construct a policy/value network using wrappers for SL training."""
@@ -116,7 +118,7 @@ def _build_sl_model(
         model = PolicyValueNetworkWrapper(backbone, policy_head, value_head)
         model.action_space_size = num_actions
     elif model_type == "hierarchical":
-        policy_head = HierarchicalPolicyHead(feature_dim)
+        policy_head = HierarchicalPolicyHead(feature_dim, get_action_array(num_players, map_type))
         model = PolicyValueNetworkWrapper(backbone, policy_head, value_head)
         model.flat_to_hierarchical = policy_head.flat_to_hierarchical
         model.hierarchical_to_flat = policy_head.hierarchical_to_flat
@@ -157,6 +159,8 @@ def train(
     weight_power: float = 0.5,
     weight_sample_fraction: float = 1.0,
     test_size: float = 0.2,
+    num_players: int = 2,
+    map_type: str = "BASE",
 ):
     """Train the joint policy-value network (flat or hierarchical) with shared backbone."""
 
@@ -235,11 +239,11 @@ def train(
     else:
         wandb.init(mode="disabled")
 
-    num_actions = ACTION_SPACE_SIZE
+    num_actions = get_action_space_size(num_players, map_type)
     backbone_config = BackboneConfig(
         architecture="mlp", args=MLPBackboneConfig(input_dim=input_dim, hidden_dims=hidden_dims)
     )
-    model = _build_sl_model(model_type, backbone_config, num_actions, device)
+    model = _build_sl_model(model_type, backbone_config, num_actions, num_players, map_type, device)
     if model_type == "flat":
         print("Created flat policy/value wrapper")
         print(f"  - Action space size: {num_actions}")
@@ -293,8 +297,8 @@ def train(
     global_step = 0
 
     # Initialize metrics tracker
-    train_metrics = PolicyValueMetrics(num_classes=ACTION_SPACE_SIZE, device=device)
-    val_metrics = PolicyValueMetrics(num_classes=ACTION_SPACE_SIZE, device=device)
+    train_metrics = PolicyValueMetrics(num_classes=num_actions, device=device)
+    val_metrics = PolicyValueMetrics(num_classes=num_actions, device=device)
 
     for epoch in range(epochs):
         # Training

@@ -7,13 +7,13 @@ from __future__ import annotations
 import os
 import random
 import sys
+from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Literal, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE
 from pufferlib.emulation import nativize
 from sklearn.metrics import f1_score
 from torch.utils.data import DataLoader
@@ -35,6 +35,9 @@ from ...models.models import (
     build_value_network,
 )
 from ...models.wrappers import PolicyNetworkWrapper, ValueNetworkWrapper
+from ...features.catanatron_utils import get_actor_indices_from_critic
+from ...utils.catanatron_action_space import get_action_array, get_action_space_size
+from ...utils.seeding import derive_seed
 from .dataset import AggregatedDataset, EvictionStrategy
 
 
@@ -59,12 +62,12 @@ def _observation_to_state_vector(observation: Dict[str, np.ndarray]) -> np.ndarr
     return np.concatenate([numeric, board_flat], axis=0)
 
 
-def _extract_valid_actions(info: Dict[str, Any] | None) -> np.ndarray:
+def _extract_valid_actions(info: Dict[str, Any] | None, action_space_size: int) -> np.ndarray:
     valid_actions = None
     if info is not None:
         valid_actions = info.get("valid_actions")
     if valid_actions is None or len(valid_actions) == 0:
-        return np.arange(ACTION_SPACE_SIZE, dtype=np.int64)
+        return np.arange(action_space_size, dtype=np.int64)
     return np.array(valid_actions, dtype=np.int64)
 
 
@@ -212,6 +215,61 @@ class DAggerCollectStats:
     dataset_size: int
 
 
+@dataclass
+class DAggerRolloutBatch:
+    """Flattened on-policy batch from the latest collection phase (for agreement metrics)."""
+
+    critic_states: np.ndarray
+    expert_actions: np.ndarray
+    action_masks: np.ndarray
+
+
+def _policy_expert_agreement(
+    policy_model: PolicyNetworkWrapper,
+    critic_states: np.ndarray,
+    expert_actions: np.ndarray,
+    action_masks: np.ndarray,
+    actor_indices: np.ndarray,
+    model_type: str,
+    device: torch.device,
+    batch_size: int = 512,
+) -> float:
+    """Fraction of states where argmax policy action matches the expert label (masked)."""
+    n = expert_actions.shape[0]
+    if n == 0:
+        return 0.0
+    was_training = policy_model.training
+    policy_model.eval()
+    correct = 0
+    try:
+        with torch.no_grad():
+            for start in range(0, n, batch_size):
+                end = min(start + batch_size, n)
+                actor = critic_states[start:end][:, actor_indices]
+                actor_t = torch.from_numpy(actor).float().to(device)
+                masks = action_masks[start:end]
+                expert = expert_actions[start:end]
+                policy_logits = _get_policy_logits(policy_model, actor_t, model_type)
+                mask_tensor = torch.as_tensor(masks, dtype=torch.bool, device=device)
+                no_valid = ~mask_tensor.any(dim=1, keepdim=True)
+                mask_tensor = torch.where(no_valid, torch.ones_like(mask_tensor), mask_tensor)
+                masked_logits = torch.where(
+                    mask_tensor,
+                    policy_logits,
+                    torch.full_like(policy_logits, float("-inf")),
+                )
+                preds = torch.argmax(masked_logits, dim=-1).cpu().numpy()
+                correct += int((preds == expert).sum())
+    finally:
+        if was_training:
+            policy_model.train()
+    return correct / n
+
+
+def _wandb_flatten_action_type_counts(prefix: str, counts: Dict[str, int]) -> Dict[str, float]:
+    return {f"{prefix}/{k}": float(v) for k, v in counts.items()}
+
+
 def _collect_dagger_rollouts_vectorized(
     envs: Any,
     policy_model: PolicyNetworkWrapper,
@@ -225,13 +283,15 @@ def _collect_dagger_rollouts_vectorized(
     actor_dim: int,
     critic_dim: int,
     progress_callback: Optional[Callable[[int], None]] = None,
-) -> DAggerCollectStats:
+    seed: int | None = None,
+) -> Tuple[DAggerCollectStats, DAggerRolloutBatch]:
     """Run batched policy/environment interaction and aggregate expert-labeled data.
 
     This version works with PufferLib vectorized environments where expert actions
     are provided in the info dict (via expert_player config on the env).
     """
     num_envs = envs.num_envs
+    action_space_size = dataset.action_space_size
     driver_env = envs.driver_env
     # For GymnasiumPufferEnv, get observation space from the wrapped env
     if hasattr(driver_env, "env_single_observation_space"):
@@ -248,7 +308,7 @@ def _collect_dagger_rollouts_vectorized(
     expert_actions_tmj = np.zeros((num_steps, num_envs), dtype=np.int64)
     rewards_tmj = np.zeros((num_steps, num_envs), dtype=np.float32)
     is_single_action_tmj = np.zeros((num_steps, num_envs), dtype=np.bool_)
-    action_masks_tmj = np.zeros((num_steps, num_envs, ACTION_SPACE_SIZE), dtype=np.bool_)
+    action_masks_tmj = np.zeros((num_steps, num_envs, action_space_size), dtype=np.bool_)
     dones_tmj = np.zeros((num_steps, num_envs), dtype=np.bool_)
 
     episode_rewards: List[float] = []
@@ -257,13 +317,23 @@ def _collect_dagger_rollouts_vectorized(
     expert_actions_used = 0
     total_actions = 0
 
-    observations, infos = envs.reset()
+    reset_seeds = None
+    if seed is not None:
+        reset_seeds = [derive_seed(seed, "env", env_idx) for env_idx in range(num_envs)]
+
+    if reset_seeds is not None:
+        try:
+            observations, infos = envs.reset(seed=reset_seeds)
+        except TypeError:
+            observations, infos = envs.reset()
+    else:
+        observations, infos = envs.reset()
 
     for step_idx in range(num_steps):
         batch_size = observations.shape[0]
         actor_batch = np.zeros((batch_size, actor_dim), dtype=np.float32)
         critic_batch = np.zeros((batch_size, critic_dim), dtype=np.float32)
-        action_masks = np.zeros((batch_size, ACTION_SPACE_SIZE), dtype=np.bool_)
+        action_masks = np.zeros((batch_size, action_space_size), dtype=np.bool_)
 
         # Decode observations
         for idx in range(batch_size):
@@ -356,18 +426,24 @@ def _collect_dagger_rollouts_vectorized(
         expert_actions=expert_actions_tmj.reshape(-1),
         returns=returns_tmj.reshape(-1),
         is_single_action=is_single_action_tmj.reshape(-1),
-        action_masks=action_masks_tmj.reshape(-1, ACTION_SPACE_SIZE),
+        action_masks=action_masks_tmj.reshape(-1, action_space_size),
     )
 
     mean_reward = float(np.mean(episode_rewards)) if episode_rewards else 0.0
     expert_fraction = expert_actions_used / total_actions if total_actions else 0.0
-    return DAggerCollectStats(
+    stats = DAggerCollectStats(
         episodes=len(episode_rewards),
         steps=steps_collected,
         mean_reward=mean_reward,
         expert_fraction=expert_fraction,
         dataset_size=len(dataset),
     )
+    rollout = DAggerRolloutBatch(
+        critic_states=critic_states_tmj.reshape(-1, critic_dim),
+        expert_actions=expert_actions_tmj.reshape(-1),
+        action_masks=action_masks_tmj.reshape(-1, action_space_size),
+    )
+    return stats, rollout
 
 
 def _train_on_dataset(
@@ -380,6 +456,8 @@ def _train_on_dataset(
     batch_size: int,
     model_type: str,
     device: torch.device,
+    num_players: int,
+    map_type: Literal["BASE", "MINI", "TOURNAMENT"],
     max_grad_norm: float = 5.0,
     progress_desc: str = "Train",
 ) -> Dict[str, float]:
@@ -391,13 +469,16 @@ def _train_on_dataset(
             "value_loss": 0.0,
             "accuracy": 0.0,
             "f1_score": 0.0,
+            "pred_action_type_counts": {},
         }
 
+    action_array = get_action_array(num_players, map_type)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=False)
     total_batches = epochs * len(loader)
     policy_model.train()
     critic_model.train()
 
+    pred_action_counter: Counter[str] = Counter()
     with tqdm(
         total=total_batches,
         desc=progress_desc,
@@ -480,6 +561,8 @@ def _train_on_dataset(
                 total_value_loss += float(value_loss.item())
 
                 predictions = torch.argmax(masked_policy_logits, dim=-1)
+                for p in predictions.detach().cpu().numpy().tolist():
+                    pred_action_counter[action_array[int(p)][0].name] += 1
                 # Once again, only compute accuracy for non-single-action steps since end-turn steps dominate otherwise
                 if non_single_mask.any():
                     correct += int(((predictions == actions) & non_single_mask).sum().item())
@@ -503,11 +586,12 @@ def _train_on_dataset(
         "value_loss": total_value_loss / n_updates,
         "accuracy": accuracy,
         "f1_score": f1,
+        "pred_action_type_counts": dict(pred_action_counter),
     }
 
 
 def train(
-    num_actions: int = ACTION_SPACE_SIZE,
+    num_actions: int | None = None,
     model_type: str = "flat",
     backbone_type: str = "mlp",
     policy_hidden_dims: Sequence[int] = (512, 512),
@@ -528,6 +612,8 @@ def train(
     expert_config: str = "AB:2",
     opponent_configs: Optional[Sequence[str]] = None,
     map_type: Literal["BASE", "MINI", "TOURNAMENT"] = "BASE",
+    vps_to_win: int = 15,
+    discard_limit: int = 9,
     beta_init: float = 1.0,
     beta_decay: float = 0.9,
     beta_min: float = 0.05,
@@ -574,6 +660,8 @@ def train(
         expert_config: Expert player config string (e.g. "AB:2", "MCTS:200")
         opponent_configs: List of opponent config strings
         map_type: Catan map type
+        vps_to_win: Victory points needed to win a game
+        discard_limit: Hand-size threshold for discarding on a rolled 7
         beta_init: Initial probability of using expert action
         beta_decay: Multiplicative decay for beta per iteration
         beta_min: Minimum beta value
@@ -637,9 +725,11 @@ def train(
 
     # Compute dimensions
     num_players = len(opponent_configs) + 1
+    action_space_size = num_actions or get_action_space_size(num_players, map_type)
     dims = compute_single_agent_dims(num_players, map_type)
     actor_dim = dims["actor_dim"]
     critic_dim = dims["critic_dim"]
+    actor_indices = get_actor_indices_from_critic(num_players, map_type)
     numeric_dim = dims["numeric_dim"]
     full_numeric_dim = dims["full_numeric_dim"]
     board_channels = dims["board_channels"]
@@ -653,6 +743,7 @@ def train(
     print(f"{'=' * 60}")
     print(f"Device: {device}")
     print(f"Map type: {map_type} | Players: {num_players}")
+    print(f"Game params: vps_to_win={vps_to_win}, discard_limit={discard_limit}")
     print(f"Backbone: {backbone_type} | Model type: {model_type}")
     print(f"Actor input dim: {actor_dim} | Critic input dim: {critic_dim}")
     if backbone_type in ("xdim", "xdim_res"):
@@ -701,12 +792,14 @@ def train(
 
     if model_type == "flat":
         policy_model = build_flat_policy_network(
-            backbone_config=policy_backbone_config, num_actions=num_actions
+            backbone_config=policy_backbone_config, num_actions=action_space_size
         ).to(torch_device)
     elif model_type == "hierarchical":
-        policy_model = build_hierarchical_policy_network(backbone_config=policy_backbone_config).to(
-            torch_device
-        )
+        policy_model = build_hierarchical_policy_network(
+            backbone_config=policy_backbone_config,
+            num_players=num_players,
+            map_type=map_type,
+        ).to(torch_device)
     else:
         raise ValueError(f"Unknown model_type '{model_type}'")
 
@@ -767,6 +860,8 @@ def train(
         map_type=map_type,
         opponent_configs=list(opponent_configs),
         num_envs=num_envs,
+        vps_to_win=vps_to_win,
+        discard_limit=discard_limit,
         expert_config=expert_config,
     )
 
@@ -791,8 +886,9 @@ def train(
         with tqdm(total=total_steps, desc="DAgger", unit="step", unit_scale=True) as pbar:
             for iteration in range(1, n_iterations + 1):
                 pbar.set_postfix({"iter": f"{iteration}/{n_iterations}", "beta": f"{beta:.2f}"})
+                collect_seed = derive_seed(seed, "dagger_collect", iteration)
 
-                collect_stats = _collect_dagger_rollouts_vectorized(
+                collect_stats, rollout_batch = _collect_dagger_rollouts_vectorized(
                     envs=envs,
                     policy_model=policy_model,
                     critic_model=critic_model,
@@ -805,8 +901,25 @@ def train(
                     actor_dim=actor_dim,
                     critic_dim=critic_dim,
                     progress_callback=pbar.update,
+                    seed=collect_seed,
                 )
                 global_step += collect_stats.steps
+
+                (
+                    fraction_non_single,
+                    mean_mask_size,
+                    expert_action_type_counts,
+                ) = dataset.summarize_imitation_stats()
+
+                agreement_pre = _policy_expert_agreement(
+                    policy_model=policy_model,
+                    critic_states=rollout_batch.critic_states,
+                    expert_actions=rollout_batch.expert_actions,
+                    action_masks=rollout_batch.action_masks,
+                    actor_indices=actor_indices,
+                    model_type=model_type,
+                    device=torch_device,
+                )
 
                 train_stats = _train_on_dataset(
                     dataset=dataset,
@@ -818,8 +931,20 @@ def train(
                     batch_size=batch_size,
                     model_type=model_type,
                     device=torch_device,
+                    num_players=num_players,
+                    map_type=map_type,
                     max_grad_norm=max_grad_norm,
                     progress_desc=f"Train {iteration}/{n_iterations}",
+                )
+
+                agreement_post = _policy_expert_agreement(
+                    policy_model=policy_model,
+                    critic_states=rollout_batch.critic_states,
+                    expert_actions=rollout_batch.expert_actions,
+                    action_masks=rollout_batch.action_masks,
+                    actor_indices=actor_indices,
+                    model_type=model_type,
+                    device=torch_device,
                 )
 
                 should_eval = iteration % eval_every_iterations == 0 or iteration == n_iterations
@@ -841,6 +966,8 @@ def train(
                             num_games=eval_games_per_opponent,
                             gamma=gamma,
                             seed=random.randint(0, sys.maxsize),
+                            vps_to_win=vps_to_win,
+                            discard_limit=discard_limit,
                             log_to_wandb=False,
                             global_step=global_step,
                             device=device,
@@ -887,22 +1014,35 @@ def train(
                     torch.save(policy_model.state_dict(), policy_path)
                     torch.save(critic_model.state_dict(), critic_path)
 
-                wandb.log(
-                    {
-                        "dagger/dataset_size": len(dataset),
-                        "dagger/collect_reward": collect_stats.mean_reward,
-                        "dagger/expert_fraction": collect_stats.expert_fraction,
-                        "dagger/train_total_loss": train_stats["total_loss"],
-                        "dagger/train_policy_loss": train_stats["policy_loss"],
-                        "dagger/train_value_loss": train_stats["value_loss"],
-                        "dagger/train_accuracy": train_stats["accuracy"],
-                        "dagger/train_f1_score": train_stats["f1_score"],
-                        "dagger/beta": beta,
-                        "dagger/eval_ran": float(should_eval),
-                        **eval_metrics,
-                    },
-                    step=global_step,
+                wandb_log: Dict[str, Any] = {
+                    "dagger/dataset_size": len(dataset),
+                    "dagger/collect_reward": collect_stats.mean_reward,
+                    "dagger/expert_fraction": collect_stats.expert_fraction,
+                    "dagger/fraction_non_single_action_samples": fraction_non_single,
+                    "dagger/mean_mask_size": mean_mask_size,
+                    "dagger/rollout_expert_agreement_pre_train": agreement_pre,
+                    "dagger/rollout_expert_agreement_post_train": agreement_post,
+                    "dagger/train_total_loss": train_stats["total_loss"],
+                    "dagger/train_policy_loss": train_stats["policy_loss"],
+                    "dagger/train_value_loss": train_stats["value_loss"],
+                    "dagger/train_accuracy": train_stats["accuracy"],
+                    "dagger/train_f1_score": train_stats["f1_score"],
+                    "dagger/beta": beta,
+                    "dagger/eval_ran": float(should_eval),
+                    **eval_metrics,
+                }
+                wandb_log.update(
+                    _wandb_flatten_action_type_counts(
+                        "dagger/expert_action_type", expert_action_type_counts
+                    )
                 )
+                wandb_log.update(
+                    _wandb_flatten_action_type_counts(
+                        "dagger/policy_pred_action_type",
+                        train_stats["pred_action_type_counts"],
+                    )
+                )
+                wandb.log(wandb_log, step=global_step)
 
                 beta = max(beta * beta_decay, beta_min)
 

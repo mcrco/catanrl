@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE
-
 from .backbones import BackboneConfig, create_backbone
 from .heads import FlatPolicyHead, HierarchicalPolicyHead, ValueHead
+from ..utils.catanatron_action_space import MapType, get_action_array, get_action_space_size
 from .wrappers import PolicyNetworkWrapper, PolicyValueNetworkWrapper, ValueNetworkWrapper
 
 
@@ -25,10 +24,10 @@ def _attach_hierarchical_metadata(
 
 def build_flat_policy_value_network(
     backbone_config: BackboneConfig,
-    num_actions: int | None = None,
+    num_actions: int,
 ) -> PolicyValueNetworkWrapper:
     """Create a flat policy-value network wrapper with a shared backbone."""
-    action_dim = num_actions or ACTION_SPACE_SIZE
+    action_dim = num_actions
     backbone, feature_dim = create_backbone(backbone_config)
     policy_head = FlatPolicyHead(feature_dim, action_dim)
     value_head = ValueHead(feature_dim)
@@ -40,9 +39,9 @@ def build_flat_policy_value_network(
 
 def build_flat_policy_network(
     backbone_config: BackboneConfig,
-    num_actions: int | None = None,
+    num_actions: int,
 ) -> PolicyNetworkWrapper:
-    action_dim = num_actions or ACTION_SPACE_SIZE
+    action_dim = num_actions
     backbone, feature_dim = create_backbone(backbone_config)
     policy_head = FlatPolicyHead(feature_dim, action_dim)
     model = PolicyNetworkWrapper(backbone, policy_head)
@@ -53,26 +52,38 @@ def build_flat_policy_network(
 
 def build_hierarchical_policy_network(
     backbone_config: BackboneConfig,
+    num_players: int,
+    map_type: MapType,
 ) -> PolicyNetworkWrapper:
     backbone, feature_dim = create_backbone(backbone_config)
-    policy_head = HierarchicalPolicyHead(feature_dim)
+    policy_head = HierarchicalPolicyHead(
+        feature_dim,
+        get_action_array(num_players, map_type),
+    )
     model = PolicyNetworkWrapper(backbone, policy_head)
     model.backbone_config = backbone_config
+    model.action_space_size = get_action_space_size(num_players, map_type)
     _attach_hierarchical_metadata(model, policy_head)
     return model
 
 
 def build_hierarchical_policy_value_network(
     backbone_config: BackboneConfig,
+    num_players: int,
+    map_type: MapType,
 ) -> PolicyValueNetworkWrapper:
     """Create a hierarchical policy-value network wrapper with a shared backbone."""
 
     backbone, feature_dim = create_backbone(backbone_config)
-    policy_head = HierarchicalPolicyHead(feature_dim)
+    policy_head = HierarchicalPolicyHead(
+        feature_dim,
+        get_action_array(num_players, map_type),
+    )
     value_head = ValueHead(feature_dim)
 
     model = PolicyValueNetworkWrapper(backbone, policy_head, value_head)
     model.backbone_config = backbone_config
+    model.action_space_size = get_action_space_size(num_players, map_type)
     _attach_hierarchical_metadata(model, policy_head)
     return model
 

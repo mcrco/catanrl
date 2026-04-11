@@ -2,10 +2,11 @@ from typing import List, Literal
 from tqdm import tqdm
 
 from catanatron.game import Game
-from catanatron.models.map import build_map
+from catanatron.models.actions import generate_playable_actions
 from catanatron.models.player import Player
 from catanatron.state_functions import get_actual_victory_points
 
+from catanrl.utils.catanatron_map import build_catan_map
 from catanrl.utils.seeding import derive_map_and_game_seeds, derive_seed
 
 
@@ -17,7 +18,7 @@ def _build_players_for_seat(
     opponents: List[Player],
     nn_seat: SeatOption,
 ) -> tuple[list[Player], bool]:
-    """Return player order plus whether Catanatron should reshuffle it."""
+    """Return desired player order plus whether to let upstream shuffle seating."""
     if nn_seat == "random":
         return [nn_player] + opponents, True
     if nn_seat == "first":
@@ -29,12 +30,25 @@ def _build_players_for_seat(
     raise ValueError(f"Unknown nn_seat '{nn_seat}'")
 
 
+def _force_player_order(game: Game, players: list[Player]) -> None:
+    """Override upstream's randomized seating before the first move for fixed-seat evals."""
+    colors = tuple(player.color for player in players)
+    game.state.players = list(players)
+    game.state.colors = colors
+    game.state.color_to_index = {color: idx for idx, color in enumerate(colors)}
+    game.state.current_player_index = 0
+    game.state.current_turn_index = 0
+    game.playable_actions = generate_playable_actions(game.state)
+
+
 def eval(
     nn_player: Player,
     opponents: List[Player],
     map_type: Literal["BASE", "TOURNAMENT", "MINI"] = "BASE",
     num_games: int = 100,
     seed: int = 42,
+    vps_to_win: int = 15,
+    discard_limit: int = 9,
     show_tqdm: bool = False,
     nn_seat: SeatOption = "random",
 ):
@@ -43,7 +57,7 @@ def eval(
     total_vps = []
     turns = []
 
-    players, shuffle_players = _build_players_for_seat(nn_player, opponents, nn_seat)
+    players, allow_upstream_shuffle = _build_players_for_seat(nn_player, opponents, nn_seat)
     episode_seeds = [derive_seed(seed, "episode", game_idx) for game_idx in range(num_games)]
     for episode_seed in tqdm(episode_seeds, disable=not show_tqdm):
         map_seed, game_seed = derive_map_and_game_seeds(episode_seed)
@@ -53,10 +67,13 @@ def eval(
             player.reset_state()
         game = Game(
             players=players,
-            catan_map=build_map(map_type, seed=map_seed),
+            catan_map=build_catan_map(map_type, seed=map_seed, number_placement="random"),
             seed=game_seed,
-            shuffle_players=shuffle_players,
+            discard_limit=discard_limit,
+            vps_to_win=vps_to_win,
         )
+        if not allow_upstream_shuffle:
+            _force_player_order(game, players)
         game.play()
         if game.winning_color() == nn_player.color:
             wins += 1

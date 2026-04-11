@@ -7,10 +7,10 @@ import time
 from catanatron.game import Game
 from catanatron.models.player import Color
 from catanatron.models.player import RandomPlayer
-from catanatron.models.map import build_map
 import numpy as np
 
 from catanrl.features.catanatron_utils import COLOR_ORDER, game_to_features
+from catanrl.utils.catanatron_map import build_catan_map
 
 
 def parse_args() -> argparse.Namespace:
@@ -58,12 +58,12 @@ def bench_feature_extraction(
 ) -> float:
     rng = random.Random(seed)
     players = [RandomPlayer(c) for c in COLOR_ORDER]
-    game = Game(players, seed=seed, catan_map=build_map(map_type))
+    game = Game(players, seed=seed, catan_map=build_catan_map(map_type, seed=seed))
     times: List[float] = []
     for _ in range(num_samples):
-        if game.winning_color() is not None or not game.state.playable_actions:
+        if game.winning_color() is not None or not game.playable_actions:
             seed += 1
-            game = Game(players, seed=seed, catan_map=build_map(map_type))
+            game = Game(players, seed=seed, catan_map=build_catan_map(map_type, seed=seed))
         color = COLOR_ORDER[rng.randrange(len(COLOR_ORDER))]
         t0 = time.perf_counter()
         _ = feature_extractor(game, color, len(COLOR_ORDER), map_type)

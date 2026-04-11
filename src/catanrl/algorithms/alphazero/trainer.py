@@ -22,9 +22,7 @@ import torch.nn.functional as F
 from tqdm import tqdm
 
 from catanatron.game import Game
-from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE, to_action_space
 from catanatron.models.enums import Action
-from catanatron.models.map import build_map
 from catanatron.models.player import Color, Player
 
 from ...features.catanatron_utils import (
@@ -33,6 +31,8 @@ from ...features.catanatron_utils import (
     get_numeric_feature_names,
 )
 from ...models import BackboneConfig, MLPBackboneConfig, build_flat_policy_value_network
+from ...utils.catanatron_action_space import get_action_space_size, to_action_space
+from ...utils.catanatron_map import build_catan_map
 from .mcts import NeuralMCTS
 
 
@@ -99,9 +99,10 @@ class AlphaZeroTrainer:
             architecture="mlp",
             args=MLPBackboneConfig(input_dim=input_dim, hidden_dims=[512, 512]),
         )
+        self.action_space_size = get_action_space_size(self.config.num_players, self.config.map_type)
 
         self.model = model or build_flat_policy_value_network(
-            backbone_config=backbone_config, num_actions=ACTION_SPACE_SIZE
+            backbone_config=backbone_config, num_actions=self.action_space_size
         )
         self.model.to(self.device)
         self._hierarchical_model = hasattr(self.model, "flat_to_hierarchical") or hasattr(
@@ -150,7 +151,7 @@ class AlphaZeroTrainer:
                 else:
                     players.append(opponent_factory(color))
 
-            catan_map = build_map(self.config.map_type)
+            catan_map = build_catan_map(self.config.map_type, seed=seed, number_placement="random")
             seed = None if self.config.seed is None else self.config.seed + seed_offset + game_idx
             game = Game(
                 players=players, seed=seed, catan_map=catan_map, vps_to_win=self.config.vps_to_win
@@ -231,7 +232,7 @@ class AlphaZeroTrainer:
 
     def _play_game(self, seed: Optional[int] = None) -> Dict[str, Optional[Color]]:
         players = [AlphaZeroSelfPlayPlayer(color, self) for color in self.colors]
-        catan_map = build_map(self.config.map_type)
+        catan_map = build_catan_map(self.config.map_type, seed=seed, number_placement="random")
         game = Game(
             players=players, seed=seed, catan_map=catan_map, vps_to_win=self.config.vps_to_win
         )
@@ -261,7 +262,7 @@ class AlphaZeroTrainer:
             add_noise=add_noise,
         )
         # ignore sample if single action
-        if collect_data and len(game.state.playable_actions) > 1:
+        if collect_data and len(game.playable_actions) > 1:
             self._record_sample(color, state_vec, policy)
         return action
 
@@ -285,12 +286,15 @@ class AlphaZeroTrainer:
             probs = torch.exp(log_probs).cpu().numpy().squeeze(0)
             value_scalar = float(value.squeeze(0).item())
 
-        valid_actions = game.state.playable_actions
+        valid_actions = game.playable_actions
         if not valid_actions:
-            return np.zeros(ACTION_SPACE_SIZE, dtype=np.float32), value_scalar
+            return np.zeros(self.action_space_size, dtype=np.float32), value_scalar
 
-        mask = np.zeros(ACTION_SPACE_SIZE, dtype=np.float32)
-        indices = [to_action_space(action) for action in valid_actions]
+        mask = np.zeros(self.action_space_size, dtype=np.float32)
+        indices = [
+            to_action_space(action, self.config.num_players, self.config.map_type, tuple(game.state.colors))
+            for action in valid_actions
+        ]
         mask[indices] = 1.0
         masked = probs * mask
         total = masked.sum()

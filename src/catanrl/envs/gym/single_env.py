@@ -10,7 +10,6 @@ import pufferlib.vector as puffer_vector
 
 from catanatron.models.player import Color, RandomPlayer, Player
 from catanatron.game import TURNS_LIMIT, Game
-from catanatron.models.map import build_map
 from catanatron.features import create_sample
 from catanatron.gym.board_tensor_features import create_board_tensor
 from catanatron.players.mcts import MCTSPlayer
@@ -19,15 +18,7 @@ from catanatron.players.playouts import GreedyPlayoutsPlayer
 from catanatron.players.search import VictoryPointPlayer
 from catanatron.players.value import ValueFunctionPlayer
 from catanatron.players.weighted_random import WeightedRandomPlayer
-from catanatron.gym.envs.catanatron_env import (
-    ACTION_SPACE_SIZE,
-    get_channels,
-    get_feature_ordering,
-    is_graph_feature,
-    to_action_space,
-    from_action_space,
-    HIGH,
-)
+from catanatron.gym.envs.catanatron_env import get_channels, get_feature_ordering, is_graph_feature, HIGH
 
 from catanrl.envs.gym.rewards import ShapedReward, WinReward, RewardFunction
 from catanrl.features.catanatron_utils import (
@@ -36,6 +27,12 @@ from catanrl.features.catanatron_utils import (
     get_full_numeric_feature_names,
     get_numeric_feature_names,
 )
+from catanrl.utils.catanatron_action_space import (
+    from_action_space,
+    get_action_space_size,
+    to_action_space,
+)
+from catanrl.utils.catanatron_map import build_catan_map
 from catanrl.utils.seeding import derive_map_and_game_seeds, derive_seed
 
 BOARD_WIDTH = 21
@@ -99,7 +96,8 @@ class SingleAgentCatanatronEnv(gym.Env):
         self.config = config or dict()
         self.reward_function: RewardFunction = self.config.get("reward_function")
         self.map_type: Literal["BASE", "MINI", "TOURNAMENT"] = self.config.get("map_type", "BASE")
-        self.vps_to_win = self.config.get("vps_to_win", 10)
+        self.vps_to_win = self.config.get("vps_to_win", 15)
+        self.discard_limit = self.config.get("discard_limit", 9)
         self.enemies = self.config.get("enemies", [RandomPlayer(Color.RED)])
         self.representation = self.config.get("representation", "mixed")
         self.shared_critic = self.config.get("shared_critic", False)
@@ -111,6 +109,7 @@ class SingleAgentCatanatronEnv(gym.Env):
         self.p0 = Player(Color.BLUE)
         self.players = [self.p0] + self.enemies
         self.num_players = len(self.players)
+        self.action_space_size = get_action_space_size(self.num_players, self.map_type)
         self.features = get_feature_ordering(self.num_players, self.map_type)
         self._seed_sequence_root: int | None = None
         self._seed_sequence_index = 0
@@ -124,7 +123,7 @@ class SingleAgentCatanatronEnv(gym.Env):
         self.critic_vector_dim = self.full_numeric_dim + self.board_flat_dim
 
         # Action space
-        self.action_space = spaces.Discrete(ACTION_SPACE_SIZE)
+        self.action_space = spaces.Discrete(self.action_space_size)
 
         # Build observation space
         if self.shared_critic:
@@ -140,7 +139,7 @@ class SingleAgentCatanatronEnv(gym.Env):
                 }
             )
             action_mask_space = spaces.Box(
-                low=0, high=1, shape=(ACTION_SPACE_SIZE,), dtype=np.int8
+                low=0, high=1, shape=(self.action_space_size,), dtype=np.int8
             )
             critic_space = spaces.Box(
                 low=0.0, high=HIGH, shape=(self.critic_vector_dim,), dtype=np.float32
@@ -176,10 +175,22 @@ class SingleAgentCatanatronEnv(gym.Env):
 
     def get_valid_actions(self) -> List[int]:
         """Returns list of valid action indices."""
-        return list(map(to_action_space, self.game.state.playable_actions))
+        return [
+            to_action_space(action, self.num_players, self.map_type, tuple(self.game.state.colors))
+            for action in self.game.playable_actions
+        ]
 
     def step(self, action):
-        catan_action = from_action_space(action, self.game.state.playable_actions)
+        catan_action = from_action_space(
+            action,
+            self.p0.color,
+            self.num_players,
+            self.map_type,
+            tuple(self.game.state.colors),
+            self.game.playable_actions,
+        )
+        if catan_action not in self.game.playable_actions:
+            raise ValueError(f"Invalid action {action} for current state.")
         self.game.execute(catan_action)
         self._advance_until_p0_decision()
 
@@ -203,13 +214,14 @@ class SingleAgentCatanatronEnv(gym.Env):
         if episode_seed is not None:
             map_seed, game_seed = derive_map_and_game_seeds(episode_seed)
 
-        catan_map = build_map(self.map_type, seed=map_seed)
+        catan_map = build_catan_map(self.map_type, seed=map_seed, number_placement="random")
         for player in self.players:
             player.reset_state()
         self.game = Game(
             players=self.players,
             seed=game_seed,
             catan_map=catan_map,
+            discard_limit=self.discard_limit,
             vps_to_win=self.vps_to_win,
         )
         # Reset expert player state if present
@@ -254,8 +266,10 @@ class SingleAgentCatanatronEnv(gym.Env):
         if self.expert_player is None:
             raise ValueError("No expert player configured")
         # The expert needs to decide for the current player (p0)
-        expert_catan_action = self.expert_player.decide(self.game, self.game.state.playable_actions)
-        return to_action_space(expert_catan_action)
+        expert_catan_action = self.expert_player.decide(self.game, self.game.playable_actions)
+        return to_action_space(
+            expert_catan_action, self.num_players, self.map_type, tuple(self.game.state.colors)
+        )
 
     def _get_observation(self) -> Union[np.ndarray, Dict[str, Any]]:
         if self.shared_critic:
@@ -291,7 +305,7 @@ class SingleAgentCatanatronEnv(gym.Env):
 
     def _action_mask(self) -> np.ndarray:
         """Get binary mask of valid actions. Used in shared_critic mode."""
-        mask = np.zeros(ACTION_SPACE_SIZE, dtype=np.int8)
+        mask = np.zeros(self.action_space_size, dtype=np.int8)
         valid_actions = self.get_valid_actions()
         mask[valid_actions] = 1
         return mask
@@ -307,6 +321,8 @@ def _make_env(
     reward_function: str,
     map_type: str,
     opponent_configs: List[str],
+    vps_to_win: int = 15,
+    discard_limit: int = 9,
     representation: str = "mixed",
 ) -> Callable[[], gym.Env]:
     """Factory for individual gym environments."""
@@ -316,11 +332,13 @@ def _make_env(
         elif reward_function == "win":
             reward_fn = WinReward()
         else:
-             raise ValueError(f"Unknown reward function: {reward_function}")
+            raise ValueError(f"Unknown reward function: {reward_function}")
 
         return SingleAgentCatanatronEnv(
             config={
                 "map_type": map_type,
+                "vps_to_win": vps_to_win,
+                "discard_limit": discard_limit,
                 "enemies": create_opponents(opponent_configs),
                 "representation": representation,
                 "reward_function": reward_fn,
@@ -335,6 +353,8 @@ def make_vectorized_envs(
     map_type: str,
     opponent_configs: List[str],
     num_envs: int,
+    vps_to_win: int = 15,
+    discard_limit: int = 9,
     representation: str = "mixed",
     async_vector: bool = True,
 ):
@@ -348,6 +368,8 @@ def make_vectorized_envs(
             reward_function=reward_function,
             map_type=map_type,
             opponent_configs=opponent_configs,
+            vps_to_win=vps_to_win,
+            discard_limit=discard_limit,
             representation=representation,
         )
         for _ in range(num_envs)
@@ -399,6 +421,8 @@ def _make_puffer_env(
     reward_function: str,
     map_type: Literal["BASE", "MINI", "TOURNAMENT"],
     opponent_configs: List[str],
+    vps_to_win: int = 15,
+    discard_limit: int = 9,
     expert_config: str | None = None,
 ) -> Callable[[], pufferlib.emulation.GymnasiumPufferEnv]:
     """Factory for individual Puffer-wrapped environments with shared_critic enabled.
@@ -424,6 +448,8 @@ def _make_puffer_env(
         return SingleAgentCatanatronEnv(
             config={
                 "map_type": map_type,
+                "vps_to_win": vps_to_win,
+                "discard_limit": discard_limit,
                 "enemies": create_opponents(opponent_configs),
                 "reward_function": reward_fn,
                 "shared_critic": True,  # Enable structured obs for DAgger/PPO
@@ -439,6 +465,8 @@ def make_puffer_vectorized_envs(
     map_type: Literal["BASE", "MINI", "TOURNAMENT"],
     opponent_configs: List[str],
     num_envs: int,
+    vps_to_win: int = 15,
+    discard_limit: int = 9,
     expert_config: str | None = None,
 ):
     """
@@ -456,7 +484,14 @@ def make_puffer_vectorized_envs(
     containing actor obs, action masks, and critic obs.
     """
     return puffer_vector.make(
-        _make_puffer_env(reward_function, map_type, opponent_configs, expert_config),
+        _make_puffer_env(
+            reward_function,
+            map_type,
+            opponent_configs,
+            vps_to_win,
+            discard_limit,
+            expert_config,
+        ),
         num_envs=num_envs,
         backend=puffer_vector.Multiprocessing,
     )

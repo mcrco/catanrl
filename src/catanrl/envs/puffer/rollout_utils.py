@@ -12,7 +12,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import numpy.typing as npt
-from catanatron.gym.envs.catanatron_env import ACTION_SPACE_SIZE
 
 
 BOARD_WIDTH = 21
@@ -78,7 +77,8 @@ def decode_puffer_batch(
     critic_batch = (
         np.zeros((batch_size, critic_dim), dtype=np.float32) if critic_dim is not None else None
     )
-    action_masks = np.zeros((batch_size, ACTION_SPACE_SIZE), dtype=np.bool_)
+    action_space_size = None
+    action_masks = None
 
     for idx in range(batch_size):
         structured = nativize(flat_obs[idx], obs_space, obs_dtype)
@@ -86,8 +86,13 @@ def decode_puffer_batch(
         actor_batch[idx] = actor_vec
         if critic_batch is not None:
             critic_batch[idx] = critic_vec
-        action_masks[idx] = get_action_mask_from_obs(structured)
-
+        mask = get_action_mask_from_obs(structured)
+        if action_masks is None:
+            action_space_size = mask.shape[0]
+            action_masks = np.zeros((batch_size, action_space_size), dtype=np.bool_)
+        action_masks[idx] = mask
+    if action_masks is None:
+        raise ValueError("No action masks found while decoding puffer batch.")
     return actor_batch, critic_batch, action_masks
 
 
