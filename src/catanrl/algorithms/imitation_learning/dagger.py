@@ -270,6 +270,29 @@ def _wandb_flatten_action_type_counts(prefix: str, counts: Dict[str, int]) -> Di
     return {f"{prefix}/{k}": float(v) for k, v in counts.items()}
 
 
+def _normalize_action_type_counts(
+    action_type_names: Sequence[str], counts: Dict[str, int]
+) -> Dict[str, float]:
+    total = sum(counts.get(name, 0) for name in action_type_names)
+    if total <= 0:
+        return {name: 0.0 for name in action_type_names}
+    return {name: float(counts.get(name, 0)) / float(total) for name in action_type_names}
+
+
+def _build_action_type_time_series_chart(
+    title: str,
+    x_values: Sequence[int],
+    history_by_type: Dict[str, List[float]],
+) -> Any:
+    return wandb.plot.line_series(
+        xs=list(x_values),
+        ys=[history_by_type[name] for name in history_by_type],
+        keys=list(history_by_type.keys()),
+        title=title,
+        xname="global_step",
+    )
+
+
 def _collect_dagger_rollouts_vectorized(
     envs: Any,
     policy_model: PolicyNetworkWrapper,
@@ -726,6 +749,8 @@ def train(
     # Compute dimensions
     num_players = len(opponent_configs) + 1
     action_space_size = num_actions or get_action_space_size(num_players, map_type)
+    action_array = get_action_array(num_players, map_type)
+    action_type_names = list(dict.fromkeys(action[0].name for action in action_array))
     dims = compute_single_agent_dims(num_players, map_type)
     actor_dim = dims["actor_dim"]
     critic_dim = dims["critic_dim"]
@@ -881,6 +906,10 @@ def train(
     best_eval_critic_mse = float("inf")
     total_steps = n_iterations * num_envs * steps_per_iteration
     global_step = 0
+    policy_pred_action_type_steps: List[int] = []
+    policy_pred_action_type_history: Dict[str, List[float]] = {
+        name: [] for name in action_type_names
+    }
 
     try:
         with tqdm(total=total_steps, desc="DAgger", unit="step", unit_scale=True) as pbar:
@@ -1037,10 +1066,17 @@ def train(
                         "dagger/expert_action_type", expert_action_type_counts
                     )
                 )
-                wandb_log.update(
-                    _wandb_flatten_action_type_counts(
-                        "dagger/policy_pred_action_type",
-                        train_stats["pred_action_type_counts"],
+                policy_pred_action_type_steps.append(global_step)
+                normalized_pred_action_type_counts = _normalize_action_type_counts(
+                    action_type_names, train_stats["pred_action_type_counts"]
+                )
+                for action_type_name, normalized_count in normalized_pred_action_type_counts.items():
+                    policy_pred_action_type_history[action_type_name].append(normalized_count)
+                wandb_log["dagger/policy_pred_action_type_over_time"] = (
+                    _build_action_type_time_series_chart(
+                        title="DAgger Policy Predicted Action Type Over Time",
+                        x_values=policy_pred_action_type_steps,
+                        history_by_type=policy_pred_action_type_history,
                     )
                 )
                 wandb.log(wandb_log, step=global_step)
