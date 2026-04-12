@@ -34,6 +34,7 @@ from catanrl.utils.catanatron_action_space import (
     to_action_space,
 )
 from catanrl.utils.catanatron_map import build_catan_map
+from catanrl.utils.seeding import derive_map_and_game_seeds, derive_seed
 
 
 class ParallelCatanatronEnv(ParallelEnv):
@@ -105,17 +106,24 @@ class ParallelCatanatronEnv(ParallelEnv):
 
         self.game = None
         self.agents = []
+        self._seed_sequence_root: int | None = None
+        self._seed_sequence_index = 0
 
     def reset(self, seed: Optional[int] = None, options: Optional[Dict] = None):
-        rng_seed = seed if seed is not None else random.randrange(sys.maxsize)
-        catan_map = build_catan_map(self.map_type, seed=rng_seed, number_placement="random")
+        episode_seed = self._next_episode_seed(seed)
+        map_seed = None
+        game_seed = None
+        if episode_seed is not None:
+            map_seed, game_seed = derive_map_and_game_seeds(episode_seed)
+
+        catan_map = build_catan_map(self.map_type, seed=map_seed, number_placement="random")
         players = [Player(color) for color in self.colors_order]
         for player in players:
             player.reset_state()
 
         self.game = Game(
             players=players,
-            seed=rng_seed,
+            seed=game_seed,
             catan_map=catan_map,
             vps_to_win=self.vps_to_win,
         )
@@ -127,6 +135,22 @@ class ParallelCatanatronEnv(ParallelEnv):
         infos = {agent: self._get_info(agent) for agent in self.agents}
 
         return observations, infos
+
+    def _next_episode_seed(self, seed: Optional[int]) -> Optional[int]:
+        if seed is not None:
+            self._seed_sequence_root = int(seed)
+            self._seed_sequence_index = 0
+        elif self._seed_sequence_root is None:
+            return None
+
+        assert self._seed_sequence_root is not None
+        episode_seed = derive_seed(
+            self._seed_sequence_root,
+            "env_episode",
+            self._seed_sequence_index,
+        )
+        self._seed_sequence_index += 1
+        return episode_seed
 
     def step(self, actions: Dict[str, int]):
         if not self.agents:
