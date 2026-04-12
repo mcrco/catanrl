@@ -20,6 +20,7 @@ dependencies = [
     "pettingzoo==1.24.1",
     "dask>=2025.11.0",
     "catanatron",
+    "requests>=2.31.0",
     "pufferlib>=2.0.6",
 ]
 
@@ -42,6 +43,7 @@ train-marl-cc = "catanrl.experiments.train_marl_central_critic:main"
 train-alphazero = "catanrl.experiments.train_alphazero:main"
 train-dagger = "catanrl.experiments.train_dagger:main"
 profile-alphazero = "catanrl.experiments.profile_alphazero_timing:main"
+openhex-daemon = "catanrl.openhex.daemon:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
