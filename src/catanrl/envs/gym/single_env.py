@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, List, Literal, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Literal, Union
+
+if TYPE_CHECKING:
+    from catanrl.envs.puffer.catanatron_puffer_env import SingleAgentCatanatronPufferEnv
 
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
-import pufferlib
 import pufferlib.vector as puffer_vector
 
 from catanatron.models.player import Color, RandomPlayer, Player
@@ -424,8 +426,8 @@ def _make_puffer_env(
     vps_to_win: int = 15,
     discard_limit: int = 9,
     expert_config: str | None = None,
-) -> Callable[[], pufferlib.emulation.GymnasiumPufferEnv]:
-    """Factory for individual Puffer-wrapped environments with shared_critic enabled.
+) -> Callable[..., SingleAgentCatanatronPufferEnv]:
+    """Factory for native Puffer environments with shared_critic enabled.
 
     Args:
         reward_function: "shaped" or "win"
@@ -435,7 +437,9 @@ def _make_puffer_env(
             are included in info dict (useful for imitation learning).
     """
 
-    def _init():
+    from catanrl.envs.puffer.catanatron_puffer_env import SingleAgentCatanatronPufferEnv
+
+    def _config():
         if reward_function == "shaped":
             reward_fn = ShapedReward()
         elif reward_function == "win":
@@ -445,19 +449,17 @@ def _make_puffer_env(
 
         expert_player = create_expert(expert_config) if expert_config else None
 
-        return SingleAgentCatanatronEnv(
-            config={
-                "map_type": map_type,
-                "vps_to_win": vps_to_win,
-                "discard_limit": discard_limit,
-                "enemies": create_opponents(opponent_configs),
-                "reward_function": reward_fn,
-                "shared_critic": True,  # Enable structured obs for DAgger/PPO
-                "expert_player": expert_player,
-            }
-        )
+        return {
+            "map_type": map_type,
+            "vps_to_win": vps_to_win,
+            "discard_limit": discard_limit,
+            "enemies": create_opponents(opponent_configs),
+            "reward_function": reward_fn,
+            "shared_critic": True,  # Enable structured obs for DAgger/PPO
+            "expert_player": expert_player,
+        }
 
-    return lambda **kwargs: pufferlib.emulation.GymnasiumPufferEnv(env=_init(), **kwargs)
+    return lambda **kwargs: SingleAgentCatanatronPufferEnv(config=_config(), **kwargs)
 
 
 def make_puffer_vectorized_envs(

@@ -12,8 +12,10 @@ This ensures:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple, Union, TypedDict, Callable, Literal
-import pufferlib
+from typing import TYPE_CHECKING, Dict, Optional, Tuple, Union, TypedDict, Callable, Literal
+
+if TYPE_CHECKING:
+    from catanrl.envs.puffer.catanatron_puffer_env import ParallelCatanatronPufferEnv
 import pufferlib.vector as puffer_vector
 import numpy as np
 from pettingzoo.utils.env import AECEnv
@@ -137,20 +139,18 @@ def _make_parallel_env(
     map_type: Literal["BASE", "TOURNAMENT", "MINI"],
     shared_critic: bool,
     reward_function: Literal["shaped", "win"],
-) -> Callable[[], pufferlib.emulation.PettingzooPufferEnv]:
-    from catanrl.envs.zoo.parallel_env import ParallelCatanatronEnv
+) -> Callable[..., ParallelCatanatronPufferEnv]:
+    from catanrl.envs.puffer.catanatron_puffer_env import ParallelCatanatronPufferEnv
 
-    def _init():
-        return ParallelCatanatronEnv(
-            MultiAgentCatanatronEnvConfig(
-                num_players=num_players,
-                map_type=map_type,
-                shared_critic=shared_critic,
-                reward_function=reward_function,
-            )
+    def _config():
+        return MultiAgentCatanatronEnvConfig(
+            num_players=num_players,
+            map_type=map_type,
+            shared_critic=shared_critic,
+            reward_function=reward_function,
         )
 
-    return lambda **kwargs: pufferlib.emulation.PettingZooPufferEnv(env=_init(), **kwargs)
+    return lambda **kwargs: ParallelCatanatronPufferEnv(config=_config(), **kwargs)
 
 
 def make_vectorized_envs(
