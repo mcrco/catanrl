@@ -59,7 +59,7 @@ def compute_action_distributions(
         return {}, {}
 
     # Compute action type distribution
-    action_types_taken = ACTION_TO_TYPE_IDX[actions]
+    action_types_taken = action_to_type_idx[actions]
     type_counts = np.bincount(action_types_taken, minlength=len(ACTION_TYPES))
     action_type_dist = {
         name: float(count / n_actions) for name, count in zip(action_type_names, type_counts)

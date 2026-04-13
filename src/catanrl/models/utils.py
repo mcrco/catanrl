@@ -18,7 +18,7 @@ def compute_hierarchical_loss(
     Compute loss for hierarchical policy head.
 
     Args:
-        action_type_logits: [batch_size, 13]
+        action_type_logits: [batch_size, NUM_ACTION_TYPES]
         param_logits: Dict of parameter logits
         value_pred: [batch_size]
         target_actions: [batch_size] flat action indices
