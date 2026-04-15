@@ -489,6 +489,8 @@ def train(
     target_kl: Optional[float] = None,
     num_envs: int = 2,
     reward_function: Literal["shaped", "win"] = "shaped",
+    vps_to_win: int = 10,
+    discard_limit: int = 7,
     metric_window: int = 200,
 ) -> Tuple[PolicyNetworkWrapper, ValueNetworkWrapper]:
     """Train a shared policy with a centralized critic using PPO."""
@@ -516,6 +518,7 @@ def train(
     print(f"{'=' * 60}")
     print(f"Device: {device}")
     print(f"Map type: {map_type} | Players: {num_players}")
+    print(f"Game config: vps_to_win={vps_to_win} | discard_limit={discard_limit}")
     print(f"Backbone: {backbone_type} | Model type: {model_type}")
     print(f"Actor input dim: {actor_input_dim} | Critic input dim: {critic_input_dim}")
     if backbone_type in ("xdim", "xdim_res"):
@@ -642,6 +645,8 @@ def train(
     envs = make_marl_vectorized_envs(
         num_players=num_players,
         map_type=map_type,
+        vps_to_win=vps_to_win,
+        discard_limit=discard_limit,
         shared_critic=True,
         reward_function=reward_function,
         num_envs=num_envs,
@@ -698,6 +703,90 @@ def train(
     # Track raw policy preferences (argmax before masking) for diagnostics
     raw_policy_argmax_buffer: list[np.ndarray] = []
 
+    def run_and_log_evals() -> None:
+        nonlocal best_eval_win_rate, best_eval_critic_mse
+
+        policy_agent.model.eval()
+        critic_model.eval()
+        with torch.no_grad():
+            fresh_eval_metrics = eval_policy_value_against_baselines(
+                policy_model=policy_model,
+                critic_model=critic_model,
+                model_type=model_type,
+                map_type=map_type,
+                eval_opponent_configs=["random"] * (num_players - 1),
+                num_games=eval_games_per_opponent,
+                gamma=gamma,
+                seed=random.randint(0, sys.maxsize),
+                vps_to_win=vps_to_win,
+                discard_limit=discard_limit,
+                log_to_wandb=False,
+                global_step=global_step,
+                device=device,
+                num_envs=num_envs,
+            )
+            trend_eval_metrics = eval_policy_value_against_baselines(
+                policy_model=policy_model,
+                critic_model=critic_model,
+                model_type=model_type,
+                map_type=map_type,
+                eval_opponent_configs=["random"] * (num_players - 1),
+                num_games=trend_eval_games,
+                gamma=gamma,
+                seed=trend_eval_seed if trend_eval_seed is not None else 0,
+                vps_to_win=vps_to_win,
+                discard_limit=discard_limit,
+                log_to_wandb=False,
+                global_step=global_step,
+                device=device,
+                num_envs=num_envs,
+            )
+
+        fresh_log = {}
+        for key, value in fresh_eval_metrics.items():
+            suffix = key.split("/", 1)[1] if "/" in key else key
+            fresh_log[f"eval_fresh/{suffix}"] = value
+
+        trend_log = {}
+        for key, value in trend_eval_metrics.items():
+            suffix = key.split("/", 1)[1] if "/" in key else key
+            trend_log[f"eval_trend/{suffix}"] = value
+        trend_log["eval_trend/seed"] = trend_eval_seed if trend_eval_seed is not None else 0
+        trend_log["eval_trend/games_per_opponent"] = trend_eval_games
+        wandb.log({**fresh_log, **trend_log}, step=global_step)
+
+        if save_path:
+            eval_win_rate = None
+            if trend_eval_games_per_opponent is not None and trend_eval_games_per_opponent > 0:
+                eval_win_rate = float(trend_eval_metrics.get("eval/win_rate_vs_value", 0.0))
+            elif eval_games_per_opponent is not None and eval_games_per_opponent > 0:
+                eval_win_rate = float(fresh_eval_metrics.get("eval/win_rate_vs_value", 0.0))
+
+            if eval_win_rate is not None and eval_win_rate > best_eval_win_rate:
+                best_eval_win_rate = eval_win_rate
+                save_dir = save_path
+                os.makedirs(save_dir, exist_ok=True)
+                best_policy_path = os.path.join(save_dir, "policy_best.pt")
+                torch.save(policy_model.state_dict(), best_policy_path)
+                if wandb.run is not None:
+                    wandb.run.summary["best_eval_win_rate_vs_value"] = best_eval_win_rate
+                print(
+                    f"  → Saved best policy (eval win rate vs value: {best_eval_win_rate:.3f})"
+                )
+
+            eval_critic_mse = trend_eval_metrics.get("eval/value_mse", float("inf"))
+            if eval_critic_mse < best_eval_critic_mse:
+                best_eval_critic_mse = eval_critic_mse
+                save_dir = save_path
+                os.makedirs(save_dir, exist_ok=True)
+                best_critic_path = os.path.join(save_dir, "critic_best.pt")
+                torch.save(critic_model.state_dict(), best_critic_path)
+                if wandb.run is not None:
+                    wandb.run.summary["best_eval_critic_mse"] = best_eval_critic_mse
+                print(f"  → Saved best critic (eval MSE: {best_eval_critic_mse:.4f})")
+
+    print("Running step-0 baseline eval before PPO updates...")
+    run_and_log_evals()
     observations, infos = envs.reset()
 
     try:
@@ -831,95 +920,7 @@ def train(
 
                     # Evaluate policy against catanatron bots and critic value predictions.
                     if ppo_update_count % eval_every_updates == 0:
-                        policy_agent.model.eval()
-                        critic_model.eval()
-                        with torch.no_grad():
-                            fresh_eval_metrics = eval_policy_value_against_baselines(
-                                policy_model=policy_model,
-                                critic_model=critic_model,
-                                model_type=model_type,
-                                map_type=map_type,
-                                eval_opponent_configs=["random"] * (num_players - 1),
-                                num_games=eval_games_per_opponent,
-                                gamma=gamma,
-                                seed=random.randint(
-                                    0, sys.maxsize
-                                ),  # different random games each time
-                                log_to_wandb=False,
-                                global_step=global_step,
-                                device=device,
-                                num_envs=num_envs,
-                            )
-                            trend_eval_metrics = eval_policy_value_against_baselines(
-                                policy_model=policy_model,
-                                critic_model=critic_model,
-                                model_type=model_type,
-                                map_type=map_type,
-                                eval_opponent_configs=["random"] * (num_players - 1),
-                                num_games=trend_eval_games,
-                                gamma=gamma,
-                                seed=trend_eval_seed if trend_eval_seed is not None else 0,
-                                log_to_wandb=False,
-                                global_step=global_step,
-                                device=device,
-                                num_envs=num_envs,
-                            )
-
-                        fresh_log = {}
-                        for key, value in fresh_eval_metrics.items():
-                            suffix = key.split("/", 1)[1] if "/" in key else key
-                            fresh_log[f"eval_fresh/{suffix}"] = value
-
-                        trend_log = {}
-                        for key, value in trend_eval_metrics.items():
-                            suffix = key.split("/", 1)[1] if "/" in key else key
-                            trend_log[f"eval_trend/{suffix}"] = value
-                        trend_log["eval_trend/seed"] = (
-                            trend_eval_seed if trend_eval_seed is not None else 0
-                        )
-                        trend_log["eval_trend/games_per_opponent"] = trend_eval_games
-                        wandb.log({**fresh_log, **trend_log}, step=global_step)
-
-                        if save_path:
-                            if (
-                                trend_eval_games_per_opponent is not None
-                                and trend_eval_games_per_opponent > 0
-                            ):
-                                eval_win_rate = float(
-                                    trend_eval_metrics.get("eval/win_rate_vs_value", 0.0)
-                                )
-                            elif (
-                                eval_games_per_opponent is not None and eval_games_per_opponent > 0
-                            ):
-                                eval_win_rate = float(
-                                    fresh_eval_metrics.get("eval/win_rate_vs_value", 0.0)
-                                )
-                            if eval_win_rate > best_eval_win_rate:
-                                best_eval_win_rate = eval_win_rate
-                                save_dir = save_path
-                                os.makedirs(save_dir, exist_ok=True)
-                                best_policy_path = os.path.join(save_dir, "policy_best.pt")
-                                torch.save(policy_model.state_dict(), best_policy_path)
-                                if wandb.run is not None:
-                                    wandb.run.summary["best_eval_win_rate_vs_value"] = (
-                                        best_eval_win_rate
-                                    )
-                                print(
-                                    f"  → Saved best policy (eval win rate vs value: {best_eval_win_rate:.3f})"
-                                )
-
-                            eval_critic_mse = trend_eval_metrics.get("eval/value_mse", float("inf"))
-                            if eval_critic_mse < best_eval_critic_mse:
-                                best_eval_critic_mse = eval_critic_mse
-                                save_dir = save_path
-                                os.makedirs(save_dir, exist_ok=True)
-                                best_critic_path = os.path.join(save_dir, "critic_best.pt")
-                                torch.save(critic_model.state_dict(), best_critic_path)
-                                if wandb.run is not None:
-                                    wandb.run.summary["best_eval_critic_mse"] = best_eval_critic_mse
-                                print(
-                                    f"  → Saved best critic (eval MSE: {best_eval_critic_mse:.4f})"
-                                )
+                        run_and_log_evals()
 
     finally:
         envs.close()

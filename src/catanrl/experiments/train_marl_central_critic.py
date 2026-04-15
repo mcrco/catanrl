@@ -146,6 +146,18 @@ def main():
     parser.add_argument("--wandb-run-name", type=str, default=None)
     parser.add_argument("--num-envs", type=int, default=4)
     parser.add_argument("--reward-function", type=str, default="shaped")
+    parser.add_argument(
+        "--vps-to-win",
+        type=int,
+        default=10,
+        help="Victory points required to win each game.",
+    )
+    parser.add_argument(
+        "--discard-limit",
+        type=int,
+        default=7,
+        help="Discard threshold used when a 7 is rolled.",
+    )
     parser.add_argument("--metric-window", type=int, default=200)
 
     args = parser.parse_args()
@@ -202,6 +214,8 @@ def main():
         "trend_eval_seed": args.trend_eval_seed,
         "eval_every_updates": args.eval_every_updates,
         "save_every_updates": args.save_every_updates,
+        "vps_to_win": args.vps_to_win,
+        "discard_limit": args.discard_limit,
     }
     if args.wandb:
         wandb_config = {
@@ -251,6 +265,8 @@ def main():
         target_kl=args.target_kl,
         num_envs=args.num_envs,
         reward_function=args.reward_function,
+        vps_to_win=args.vps_to_win,
+        discard_limit=args.discard_limit,
         metric_window=args.metric_window,
     )
 

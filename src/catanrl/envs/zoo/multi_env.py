@@ -55,6 +55,7 @@ class MultiAgentCatanatronEnvConfig:
     num_players: int = 2
     map_type: Literal["BASE", "TOURNAMENT", "MINI"] = "BASE"
     vps_to_win: int = 10
+    discard_limit: int = 7
     shared_critic: bool = False
     reward_function: Literal["shaped", "win"] = "shaped"
 
@@ -110,6 +111,8 @@ def get_valid_actions(
 def _make_aec_env(
     num_players: int,
     map_type: Literal["BASE", "TOURNAMENT", "MINI"],
+    vps_to_win: int,
+    discard_limit: int,
     shared_critic: bool,
     reward_function: Literal["shaped", "win"],
 ) -> Callable[[], AECEnv]:
@@ -124,6 +127,8 @@ def _make_aec_env(
             MultiAgentCatanatronEnvConfig(
                 num_players=num_players,
                 map_type=map_type,
+                vps_to_win=vps_to_win,
+                discard_limit=discard_limit,
                 shared_critic=shared_critic,
                 reward_function=reward_function,
             )
@@ -135,6 +140,8 @@ def _make_aec_env(
 def _make_parallel_env(
     num_players: int,
     map_type: Literal["BASE", "TOURNAMENT", "MINI"],
+    vps_to_win: int,
+    discard_limit: int,
     shared_critic: bool,
     reward_function: Literal["shaped", "win"],
 ) -> Callable[[], pufferlib.emulation.PettingzooPufferEnv]:
@@ -145,6 +152,8 @@ def _make_parallel_env(
             MultiAgentCatanatronEnvConfig(
                 num_players=num_players,
                 map_type=map_type,
+                vps_to_win=vps_to_win,
+                discard_limit=discard_limit,
                 shared_critic=shared_critic,
                 reward_function=reward_function,
             )
@@ -156,6 +165,8 @@ def _make_parallel_env(
 def make_vectorized_envs(
     num_players: int,
     map_type: Literal["BASE", "TOURNAMENT", "MINI"],
+    vps_to_win: int,
+    discard_limit: int,
     shared_critic: bool,
     reward_function: Literal["shaped", "win"],
     num_envs: int,
@@ -166,7 +177,14 @@ def make_vectorized_envs(
     Returns a gym VectorEnv ready for batched interaction.
     """
     return puffer_vector.make(
-        _make_parallel_env(num_players, map_type, shared_critic, reward_function),
+        _make_parallel_env(
+            num_players,
+            map_type,
+            vps_to_win,
+            discard_limit,
+            shared_critic,
+            reward_function,
+        ),
         num_envs=num_envs,
         backend=puffer_vector.Multiprocessing,
     )
