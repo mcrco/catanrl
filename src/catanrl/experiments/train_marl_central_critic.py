@@ -149,13 +149,13 @@ def main():
     parser.add_argument(
         "--vps-to-win",
         type=int,
-        default=10,
+        default=15,
         help="Victory points required to win each game.",
     )
     parser.add_argument(
         "--discard-limit",
         type=int,
-        default=7,
+        default=9,
         help="Discard threshold used when a 7 is rolled.",
     )
     parser.add_argument("--metric-window", type=int, default=200)
