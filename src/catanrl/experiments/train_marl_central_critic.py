@@ -105,6 +105,18 @@ def main():
         help="Fixed seed used for trend-detection eval runs.",
     )
     parser.add_argument(
+        "--h2h-eval-games",
+        type=int,
+        default=0,
+        help="Optional current-vs-champion head-to-head games per eval pass (0 disables).",
+    )
+    parser.add_argument(
+        "--h2h-eval-seed",
+        type=int,
+        default=123,
+        help="Fixed seed used for current-vs-champion head-to-head eval runs.",
+    )
+    parser.add_argument(
         "--eval-every-updates",
         type=int,
         default=1,
@@ -212,6 +224,8 @@ def main():
         "seed": args.seed,
         "trend_eval_games": args.trend_eval_games,
         "trend_eval_seed": args.trend_eval_seed,
+        "h2h_eval_games": args.h2h_eval_games,
+        "h2h_eval_seed": args.h2h_eval_seed,
         "eval_every_updates": args.eval_every_updates,
         "save_every_updates": args.save_every_updates,
         "vps_to_win": args.vps_to_win,
@@ -260,6 +274,8 @@ def main():
         eval_games_per_opponent=args.eval_games,
         trend_eval_games_per_opponent=args.trend_eval_games,
         trend_eval_seed=args.trend_eval_seed,
+        h2h_eval_games=args.h2h_eval_games,
+        h2h_eval_seed=args.h2h_eval_seed,
         eval_every_updates=args.eval_every_updates,
         save_every_updates=args.save_every_updates,
         target_kl=args.target_kl,

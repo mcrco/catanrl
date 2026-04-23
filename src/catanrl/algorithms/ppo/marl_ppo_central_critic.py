@@ -15,7 +15,7 @@ import wandb
 
 from ...envs import compute_multiagent_input_dim, decode_puffer_batch
 from ...envs.zoo.multi_env import make_vectorized_envs as make_marl_vectorized_envs
-from ...eval.training_eval import eval_policy_value_against_baselines
+from ...eval.training_eval import eval_policy_against_champion, eval_policy_value_against_baselines
 from ...features.catanatron_utils import (
     get_full_numeric_feature_names,
     get_numeric_feature_names,
@@ -68,6 +68,8 @@ def train(
     eval_games_per_opponent: int = 250,
     trend_eval_games_per_opponent: Optional[int] = None,
     trend_eval_seed: Optional[int] = 42,
+    h2h_eval_games: int = 0,
+    h2h_eval_seed: Optional[int] = 123,
     eval_every_updates: int = 1,
     save_every_updates: int = 1,
     target_kl: Optional[float] = None,
@@ -243,6 +245,7 @@ def train(
         if trend_eval_games_per_opponent is None
         else max(1, trend_eval_games_per_opponent)
     )
+    h2h_eval_games = max(0, int(h2h_eval_games))
     best_eval_win_rate = -float("inf")
     best_eval_critic_mse = float("inf")
     global_step = 0
@@ -304,7 +307,37 @@ def train(
             trend_log[f"eval_trend/{suffix}"] = value
         trend_log["eval_trend/seed"] = trend_eval_seed if trend_eval_seed is not None else 0
         trend_log["eval_trend/games_per_opponent"] = trend_eval_games
-        wandb.log({**fresh_log, **trend_log}, step=global_step)
+        h2h_log = {}
+        champion_policy_path = None
+        if save_path:
+            champion_policy_path = os.path.join(save_path, "policy_best.pt")
+        champion_available = bool(
+            h2h_eval_games > 0 and champion_policy_path and os.path.exists(champion_policy_path)
+        )
+        h2h_log["eval_h2h/champion_available"] = float(champion_available)
+        if h2h_eval_games > 0:
+            h2h_log["eval_h2h/games"] = float(h2h_eval_games)
+            h2h_log["eval_h2h/seed"] = h2h_eval_seed if h2h_eval_seed is not None else 0
+        wandb.log({**fresh_log, **trend_log, **h2h_log}, step=global_step)
+
+        if champion_available and champion_policy_path is not None:
+            h2h_metrics = eval_policy_against_champion(
+                policy_model=policy_model,
+                model_type=model_type,
+                map_type=map_type,
+                num_players=num_players,
+                champion_policy_path=champion_policy_path,
+                num_games=h2h_eval_games,
+                seed=h2h_eval_seed if h2h_eval_seed is not None else 0,
+                vps_to_win=vps_to_win,
+                discard_limit=discard_limit,
+                log_to_wandb=False,
+                global_step=global_step,
+            )
+            if h2h_metrics:
+                wandb.log(h2h_metrics, step=global_step)
+        elif h2h_eval_games > 0:
+            print("  → Skipping H2H eval (no champion checkpoint available yet)")
 
         if save_path:
             eval_win_rate = None
