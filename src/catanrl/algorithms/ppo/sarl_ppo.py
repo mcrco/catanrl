@@ -8,15 +8,13 @@ import os
 import random
 import sys
 from collections import deque
-from typing import Dict, List, Literal, Sequence, Tuple, cast
+from typing import List, Literal, Sequence, Tuple, cast
 
 import numpy as np
 import numpy.typing as npt
 import torch
-import torch.nn.functional as F
 import torch.optim as optim
 import torch.optim.lr_scheduler as lr_scheduler
-from catanatron.gym.envs.action_space import ACTION_TYPES
 from tqdm import tqdm
 
 import wandb
@@ -31,7 +29,7 @@ from ...envs.gym.single_env import (
 )
 from ...eval.training_eval import eval_policy_against_baselines
 from ...models import policy_value_to_policy_only
-from ...models.backbones import BackboneConfig, CrossDimensionalBackboneConfig, MLPBackboneConfig
+from ...models.wrappers import PolicyValueNetworkWrapper
 from ...models.models import (
     build_flat_policy_network,
     build_flat_policy_value_network,
@@ -39,502 +37,12 @@ from ...models.models import (
     build_hierarchical_policy_value_network,
     build_value_network,
 )
-from ...models.wrappers import PolicyNetworkWrapper, PolicyValueNetworkWrapper, ValueNetworkWrapper
 from ...utils.catanatron_action_space import build_action_type_metadata, get_action_space_size
 from .buffers import CentralCriticExperienceBuffer, ExperienceBuffer
-from .gae import compute_gae_batched
-
-
-def _build_action_type_mapping(
-    num_players: int,
-    map_type: Literal["BASE", "TOURNAMENT", "MINI"],
-) -> Tuple[Dict[str, list[int]], np.ndarray, list[str]]:
-    """Build action-type lookup tables for action-distribution diagnostics."""
-    return build_action_type_metadata(num_players, map_type)
-
-
-def compute_action_distributions(
-    actions: np.ndarray,
-    action_to_type_idx: np.ndarray,
-    action_type_names: list[str],
-    action_space_size: int,
-) -> Tuple[Dict[str, float], Dict[str, float]]:
-    """Compute action-type and raw-action distributions from chosen actions."""
-    n_actions = len(actions)
-    if n_actions == 0:
-        return {}, {}
-
-    action_types_taken = action_to_type_idx[actions]
-    type_counts = np.bincount(action_types_taken, minlength=len(ACTION_TYPES))
-    action_type_dist = {
-        name: float(count / n_actions) for name, count in zip(action_type_names, type_counts)
-    }
-
-    action_counts = np.bincount(actions, minlength=action_space_size)
-    action_dist = {
-        f"action_{idx}": float(count / n_actions)
-        for idx, count in enumerate(action_counts)
-        if count > 0
-    }
-    return action_type_dist, action_dist
-
-
-class SARLAgent:
-    """Agent wrapper around a policy/value network for single-agent PPO training."""
-
-    def __init__(
-        self,
-        model: PolicyValueNetworkWrapper | PolicyNetworkWrapper,
-        model_type: str,
-        device: str | torch.device,
-        critic_model: ValueNetworkWrapper | None = None,
-    ):
-        self.model = model
-        self.model_type = model_type
-        self.device = device
-        self.critic_model = critic_model
-        self.uses_privileged_critic = critic_model is not None
-
-    def _policy_logits(self, states: torch.Tensor) -> torch.Tensor:
-        if self.model_type == "flat":
-            if self.uses_privileged_critic:
-                policy_logits = self.model(states)
-            else:
-                policy_logits, _ = self.model(states)
-        elif self.model_type == "hierarchical":
-            if self.uses_privileged_critic:
-                action_type_logits, param_logits = self.model(states)
-            else:
-                action_type_logits, param_logits, _ = self.model(states)
-            policy_logits = self.model.get_flat_action_logits(action_type_logits, param_logits)
-        else:  # pragma: no cover
-            raise ValueError(f"Unknown model_type '{self.model_type}'")
-        return policy_logits
-
-    def _mask_logits(
-        self, policy_logits: torch.Tensor, valid_action_masks: npt.NDArray[np.bool_]
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        mask = torch.as_tensor(valid_action_masks, dtype=torch.bool, device=policy_logits.device)
-        if mask.ndim == 1:
-            mask = mask.unsqueeze(0)
-        no_valid = ~mask.any(dim=1, keepdim=True)
-        mask = torch.where(no_valid, torch.ones_like(mask), mask)
-        masked_logits = torch.where(
-            mask, policy_logits, torch.full_like(policy_logits, float("-inf"))
-        )
-        return masked_logits, mask
-
-    def select_actions_batch(
-        self,
-        states: torch.Tensor,
-        valid_action_masks: npt.NDArray[np.bool_],
-        critic_states: torch.Tensor | None = None,
-        deterministic: bool = False,
-    ) -> Tuple[
-        npt.NDArray[np.int16],
-        npt.NDArray[np.float32],
-        npt.NDArray[np.float32],
-        npt.NDArray[np.int64],
-    ]:
-        """Vectorized action selection for multiple parallel environments."""
-        self.model.eval()
-        if self.critic_model is not None:
-            self.critic_model.eval()
-
-        with torch.no_grad():
-            if self.uses_privileged_critic:
-                policy_logits = self._policy_logits(states)
-                if critic_states is None:
-                    raise ValueError("critic_states must be provided when using privileged critic.")
-                assert self.critic_model is not None
-                values = self.critic_model(critic_states)
-            else:
-                if self.model_type == "flat":
-                    policy_logits, values = self.model(states)
-                elif self.model_type == "hierarchical":
-                    action_type_logits, param_logits, values = self.model(states)
-                    policy_logits = self.model.get_flat_action_logits(
-                        action_type_logits, param_logits
-                    )
-                else:  # pragma: no cover
-                    raise ValueError(f"Unknown model_type '{self.model_type}'")
-
-            batch_size, num_actions = policy_logits.shape
-
-            raw_argmax_tensor = torch.argmax(policy_logits, dim=-1)
-            masked_logits, _ = self._mask_logits(policy_logits, valid_action_masks)
-            dist = torch.distributions.Categorical(logits=masked_logits)
-
-            if deterministic:
-                action_tensor = torch.argmax(masked_logits, dim=-1)
-            else:
-                action_tensor = dist.sample()
-
-            log_prob_tensor = dist.log_prob(action_tensor)
-            value_tensor = values.reshape(batch_size)
-
-            actions = action_tensor.detach().cpu().numpy().astype(np.int16, copy=False)
-            log_probs_out = log_prob_tensor.detach().cpu().numpy().astype(np.float32, copy=False)
-            values_out = value_tensor.detach().cpu().numpy().astype(np.float32, copy=False)
-            raw_argmax = raw_argmax_tensor.detach().cpu().numpy().astype(np.int64, copy=False)
-
-        return actions, log_probs_out, values_out, raw_argmax
-
-    def evaluate_actions(
-        self,
-        states: torch.Tensor,
-        actions: torch.Tensor,
-        valid_action_masks: npt.NDArray[np.bool_],
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Evaluate actions for PPO updates."""
-        policy_logits = self._policy_logits(states)
-
-        masked_logits, _ = self._mask_logits(policy_logits, valid_action_masks)
-        dist = torch.distributions.Categorical(logits=masked_logits)
-        log_probs = dist.log_prob(actions)
-        entropy = dist.entropy()
-
-        return log_probs, entropy, policy_logits
-
-    def predict_values(
-        self,
-        actor_states: torch.Tensor,
-        critic_states: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """Predict value estimates for PPO targets."""
-        if self.uses_privileged_critic:
-            if critic_states is None:
-                raise ValueError("critic_states must be provided when using privileged critic.")
-            assert self.critic_model is not None
-            return self.critic_model(critic_states).squeeze(-1)
-
-        if self.model_type == "flat":
-            _, values = self.model(actor_states)
-        elif self.model_type == "hierarchical":
-            _, _, values = self.model(actor_states)
-        else:  # pragma: no cover
-            raise ValueError(f"Unknown model_type '{self.model_type}'")
-        return values.squeeze(-1)
-
-
-def ppo_update(
-    agent: SARLAgent,
-    policy_optimizer: torch.optim.Optimizer,
-    buffer: ExperienceBuffer | CentralCriticExperienceBuffer,
-    clip_epsilon: float,
-    value_coef: float,
-    entropy_coef: float,
-    activity_coef: float,
-    n_epochs: int,
-    batch_size: int,
-    device: str | torch.device,
-    last_actor_states: np.ndarray,
-    last_critic_states: np.ndarray | None = None,
-    critic_optimizer: torch.optim.Optimizer | None = None,
-    gamma: float = 0.99,
-    gae_lambda: float = 0.95,
-    max_grad_norm: float = 0.5,
-    target_kl: float | None = None,
-) -> Dict[str, float]:
-    """
-    Run PPO updates over the collected on-policy buffer for SARL training.
-    """
-    if len(buffer) == 0:
-        print("No experiences found for PPO update. Skipping update.")
-        return {
-            "policy_loss": 0.0,
-            "value_loss": 0.0,
-            "entropy_loss": 0.0,
-            "activity_loss": 0.0,
-            "total_loss": 0.0,
-            "approx_kl": 0.0,
-            "clipfrac": 0.0,
-            "ratio_mean": 0.0,
-            "ratio_std": 0.0,
-            "single_action_fraction": 0.0,
-            "num_updates": 0,
-            "early_stop": 0.0,
-        }
-
-    if agent.uses_privileged_critic:
-        if critic_optimizer is None:
-            raise ValueError("critic_optimizer is required when using privileged critic.")
-        if last_critic_states is None:
-            raise ValueError("last_critic_states is required when using privileged critic.")
-        (
-            actor_states_tmj,
-            critic_states_tmj,
-            actions_tmj,
-            rewards_tmj,
-            old_values_tmj,
-            old_log_probs_tmj,
-            valid_action_masks_tmj,
-            dones_tmj,
-        ) = buffer.get()
-    else:
-        (
-            actor_states_tmj,
-            actions_tmj,
-            rewards_tmj,
-            old_values_tmj,
-            old_log_probs_tmj,
-            valid_action_masks_tmj,
-            dones_tmj,
-        ) = buffer.get()
-        critic_states_tmj = None
-    time_steps, num_envs = actions_tmj.shape
-
-    agent.model.eval()
-    if agent.critic_model is not None:
-        agent.critic_model.eval()
-    with torch.no_grad():
-        next_actor_state_t = torch.from_numpy(last_actor_states).float().to(device)
-        next_critic_state_t = (
-            torch.from_numpy(last_critic_states).float().to(device)
-            if last_critic_states is not None
-            else None
-        )
-        next_values = (
-            agent.predict_values(next_actor_state_t, next_critic_state_t)
-            .detach()
-            .cpu()
-            .numpy()
-            .astype(np.float32, copy=False)
-        )
-    agent.model.train()
-    if agent.critic_model is not None:
-        agent.critic_model.train()
-
-    advantages_tmj, returns_tmj = compute_gae_batched(
-        rewards_tmj, old_values_tmj, dones_tmj, next_values, gamma, gae_lambda
-    )
-
-    # experiences start time-major (T, E, ...); flatten to (T*E, ...) for batching
-    actor_states = actor_states_tmj.reshape(time_steps * num_envs, -1)
-    critic_states = (
-        critic_states_tmj.reshape(time_steps * num_envs, -1)
-        if critic_states_tmj is not None
-        else None
-    )
-    actions = actions_tmj.reshape(-1)
-    old_log_probs = old_log_probs_tmj.reshape(-1)
-    advantages = advantages_tmj.reshape(-1)
-    returns = returns_tmj.reshape(-1)
-    valid_action_masks = valid_action_masks_tmj.reshape(time_steps * num_envs, -1)
-
-    # Keep all samples for critic training, but only train actor on decision points.
-    single_action_fraction = float((valid_action_masks.sum(axis=1) <= 1).mean())
-    is_decision = valid_action_masks.sum(axis=-1) > 1
-    if not np.any(is_decision):
-        return {
-            "policy_loss": 0.0,
-            "value_loss": 0.0,
-            "entropy_loss": 0.0,
-            "activity_loss": 0.0,
-            "total_loss": 0.0,
-            "approx_kl": 0.0,
-            "clipfrac": 0.0,
-            "ratio_mean": 0.0,
-            "ratio_std": 0.0,
-            "single_action_fraction": single_action_fraction,
-            "num_updates": 0,
-            "early_stop": 0.0,
-        }
-
-    adv_decision = advantages[is_decision]
-    if adv_decision.std() > 1e-8:
-        adv_decision = (adv_decision - adv_decision.mean()) / (adv_decision.std() + 1e-8)
-    advantages_norm = np.zeros_like(advantages, dtype=np.float32)
-    advantages_norm[is_decision] = adv_decision.astype(np.float32, copy=False)
-
-    # Keep rollout tensors on CPU; move only mini-batches to the training device.
-    actor_states_t = torch.from_numpy(actor_states).float()
-    critic_states_t = torch.from_numpy(critic_states).float() if critic_states is not None else None
-    actions_t = torch.from_numpy(actions).long()
-    old_log_probs_t = torch.from_numpy(old_log_probs).float()
-    advantages_t = torch.from_numpy(advantages_norm).float()
-    returns_t = torch.from_numpy(returns).float()
-
-    total_policy_loss = 0.0
-    total_value_loss = 0.0
-    total_entropy_loss = 0.0
-    total_activity_loss = 0.0
-    total_loss = 0.0
-    total_approx_kl = 0.0
-    total_clipfrac = 0.0
-    total_ratio_mean = 0.0
-    total_ratio_std = 0.0
-    n_updates = 0
-    early_stop = False
-
-    for _ in range(n_epochs):
-        indices = np.random.permutation(len(actor_states))
-        for start in range(0, len(actor_states), batch_size):
-            end = start + batch_size
-            batch_indices = indices[start:end]
-            if len(batch_indices) <= 1:
-                print(f"Skipping small batch: {len(batch_indices)}")
-                continue
-
-            batch_actor_states = actor_states_t[batch_indices].to(device)
-            batch_critic_states = (
-                critic_states_t[batch_indices].to(device) if critic_states_t is not None else None
-            )
-            batch_actions = actions_t[batch_indices].to(device)
-            batch_old_log_probs = old_log_probs_t[batch_indices].to(device)
-            batch_advantages = advantages_t[batch_indices].to(device)
-            batch_returns = returns_t[batch_indices].to(device)
-            batch_valid_action_masks = valid_action_masks[batch_indices]
-            batch_is_decision = is_decision[batch_indices]
-
-            log_probs, entropy, policy_logits = agent.evaluate_actions(
-                batch_actor_states, batch_actions, batch_valid_action_masks
-            )
-            values = agent.predict_values(batch_actor_states, batch_critic_states)
-
-            decision_count = int(np.sum(batch_is_decision))
-            if decision_count > 0:
-                decision_mask_t = torch.as_tensor(
-                    batch_is_decision, device=device, dtype=torch.bool
-                )
-
-                log_probs_d = log_probs[decision_mask_t]
-                entropy_d = entropy[decision_mask_t]
-                logits_d = policy_logits[decision_mask_t]
-                old_log_probs_d = batch_old_log_probs[decision_mask_t]
-                advantages_d = batch_advantages[decision_mask_t]
-
-                ratio = torch.exp(log_probs_d - old_log_probs_d)
-                surr1 = ratio * advantages_d
-                surr2 = torch.clamp(ratio, 1 - clip_epsilon, 1 + clip_epsilon) * advantages_d
-                policy_loss = -torch.min(surr1, surr2).mean()
-                entropy_loss = -entropy_d.mean()
-                activity_loss = (logits_d**2).mean()
-                approx_kl = float((old_log_probs_d - log_probs_d).mean().item())
-                clipfrac = float(((ratio - 1.0).abs() > clip_epsilon).float().mean().item())
-                ratio_mean = float(ratio.mean().item())
-                ratio_std = float(ratio.std(unbiased=False).item())
-            else:
-                policy_loss = torch.tensor(0.0, device=device)
-                entropy_loss = torch.tensor(0.0, device=device)
-                activity_loss = torch.tensor(0.0, device=device)
-                approx_kl = 0.0
-                clipfrac = 0.0
-                ratio_mean = 0.0
-                ratio_std = 0.0
-
-            value_loss = F.mse_loss(values, batch_returns)
-            if agent.uses_privileged_critic:
-                assert critic_optimizer is not None
-
-                if decision_count > 0:
-                    policy_optimizer.zero_grad()
-                    (
-                        policy_loss + entropy_coef * entropy_loss + activity_coef * activity_loss
-                    ).backward()
-                    torch.nn.utils.clip_grad_norm_(agent.model.parameters(), max_grad_norm)
-                    has_nan_policy_grad = any(
-                        param.grad is not None and torch.isnan(param.grad).any()
-                        for param in agent.model.parameters()
-                    )
-                    if has_nan_policy_grad:
-                        print("  WARNING: NaN policy gradients detected! Skipping batch update.")
-                        policy_optimizer.zero_grad()
-                        continue
-                    policy_optimizer.step()
-
-                critic_optimizer.zero_grad()
-                (value_coef * value_loss).backward()
-                assert agent.critic_model is not None
-                torch.nn.utils.clip_grad_norm_(agent.critic_model.parameters(), max_grad_norm)
-                has_nan_critic_grad = any(
-                    param.grad is not None and torch.isnan(param.grad).any()
-                    for param in agent.critic_model.parameters()
-                )
-                if has_nan_critic_grad:
-                    print("  WARNING: NaN critic gradients detected! Skipping batch update.")
-                    critic_optimizer.zero_grad()
-                    continue
-                critic_optimizer.step()
-
-                loss = (
-                    policy_loss
-                    + value_coef * value_loss
-                    + entropy_coef * entropy_loss
-                    + activity_coef * activity_loss
-                )
-            else:
-                loss = (
-                    policy_loss
-                    + value_coef * value_loss
-                    + entropy_coef * entropy_loss
-                    + activity_coef * activity_loss
-                )
-                policy_optimizer.zero_grad()
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(agent.model.parameters(), max_grad_norm)
-
-                has_nan_grad = any(
-                    param.grad is not None and torch.isnan(param.grad).any()
-                    for param in agent.model.parameters()
-                )
-                if has_nan_grad:
-                    print("  WARNING: NaN gradients detected! Skipping batch update.")
-                    policy_optimizer.zero_grad()
-                    continue
-
-                policy_optimizer.step()
-
-            total_approx_kl += approx_kl
-            total_clipfrac += clipfrac
-            total_ratio_mean += ratio_mean
-            total_ratio_std += ratio_std
-
-            total_policy_loss += float(policy_loss.item())
-            total_value_loss += float(value_loss.item())
-            total_entropy_loss += float(entropy_loss.item())
-            total_activity_loss += float(activity_loss.item())
-            total_loss += float(loss.item())
-            n_updates += 1
-
-            if target_kl is not None and approx_kl > 1.5 * target_kl:
-                # PPO safety valve to prevent overly large policy updates and collapse.
-                early_stop = True
-                break
-        if early_stop:
-            break
-
-    if n_updates == 0:
-        print("  WARNING: n_updates was 0! Loop didn't run or all batches were too small.")
-        return {
-            "policy_loss": 0.0,
-            "value_loss": 0.0,
-            "entropy_loss": 0.0,
-            "activity_loss": 0.0,
-            "total_loss": 0.0,
-            "approx_kl": 0.0,
-            "clipfrac": 0.0,
-            "ratio_mean": 0.0,
-            "ratio_std": 0.0,
-            "single_action_fraction": single_action_fraction,
-            "num_updates": 0,
-            "early_stop": 1.0 if early_stop else 0.0,
-        }
-
-    return {
-        "policy_loss": total_policy_loss / n_updates,
-        "value_loss": total_value_loss / n_updates,
-        "entropy_loss": total_entropy_loss / n_updates,
-        "activity_loss": total_activity_loss / n_updates,
-        "total_loss": total_loss / n_updates,
-        "approx_kl": total_approx_kl / n_updates,
-        "clipfrac": total_clipfrac / n_updates,
-        "ratio_mean": total_ratio_mean / n_updates,
-        "ratio_std": total_ratio_std / n_updates,
-        "single_action_fraction": single_action_fraction,
-        "num_updates": n_updates,
-        "early_stop": 1.0 if early_stop else 0.0,
-    }
+from .agent import PolicyAgent
+from .action_stats import build_raw_policy_log_dict
+from .backbone_builder import build_backbone_config
+from .ppo_update import run_ppo_update
 
 
 def train(
@@ -609,7 +117,7 @@ def train(
     opponents = create_opponents(opponent_configs)
     num_players = len(opponents) + 1  # add the learning agent
     action_space_size = num_actions or get_action_space_size(num_players, map_type)
-    _, action_to_type_idx, action_type_names = _build_action_type_mapping(num_players, map_type)
+    _, action_to_type_idx, action_type_names = build_action_type_metadata(num_players, map_type)
     dims = compute_single_agent_dims(num_players, map_type)
     actor_input_dim = dims["actor_dim"]
     critic_input_dim = dims["critic_dim"]
@@ -646,33 +154,18 @@ def train(
     if backbone_type != "mlp" and not xdim_cnn_channels:
         raise ValueError("xdim_cnn_channels cannot be empty")
 
-    if backbone_type == "mlp":
-        policy_backbone_config = BackboneConfig(
-            architecture="mlp",
-            args=MLPBackboneConfig(input_dim=actor_input_dim, hidden_dims=list(hidden_dims)),
-        )
-    else:
-        policy_xdim_output_dim = hidden_dims[-1] if hidden_dims else 256
-        policy_fusion_hidden_dim = (
-            xdim_fusion_hidden_dim if xdim_fusion_hidden_dim is not None else policy_xdim_output_dim
-        )
-        xdim_architecture = (
-            "residual_cross_dimensional" if backbone_type == "xdim_res" else "cross_dimensional"
-        )
-        policy_backbone_config = BackboneConfig(
-            architecture=xdim_architecture,
-            args=CrossDimensionalBackboneConfig(
-                board_height=BOARD_HEIGHT,
-                board_width=BOARD_WIDTH,
-                board_channels=board_channels,
-                numeric_dim=numeric_dim,
-                cnn_channels=xdim_cnn_channels,
-                cnn_kernel_size=xdim_cnn_kernel_size,
-                numeric_hidden_dims=list(hidden_dims),
-                fusion_hidden_dim=policy_fusion_hidden_dim,
-                output_dim=policy_xdim_output_dim,
-            ),
-        )
+    policy_backbone_config = build_backbone_config(
+        backbone_type=backbone_type,
+        hidden_dims=hidden_dims,
+        input_dim=actor_input_dim,
+        board_height=BOARD_HEIGHT,
+        board_width=BOARD_WIDTH,
+        board_channels=board_channels,
+        numeric_dim=numeric_dim,
+        xdim_cnn_channels=xdim_cnn_channels,
+        xdim_cnn_kernel_size=xdim_cnn_kernel_size,
+        xdim_fusion_hidden_dim=xdim_fusion_hidden_dim,
+    )
 
     if uses_privileged_critic:
         if model_type == "flat":
@@ -688,34 +181,18 @@ def train(
         else:
             raise ValueError(f"Unknown model_type: {model_type}")
 
-        if backbone_type == "mlp":
-            critic_backbone_config = BackboneConfig(
-                architecture="mlp",
-                args=MLPBackboneConfig(
-                    input_dim=critic_input_dim, hidden_dims=list(critic_hidden_dims)
-                ),
-            )
-        else:
-            critic_xdim_output_dim = critic_hidden_dims[-1] if critic_hidden_dims else 256
-            critic_fusion_hidden_dim = (
-                xdim_critic_fusion_hidden_dim
-                if xdim_critic_fusion_hidden_dim is not None
-                else critic_xdim_output_dim
-            )
-            critic_backbone_config = BackboneConfig(
-                architecture=xdim_architecture,
-                args=CrossDimensionalBackboneConfig(
-                    board_height=BOARD_HEIGHT,
-                    board_width=BOARD_WIDTH,
-                    board_channels=board_channels,
-                    numeric_dim=full_numeric_dim,
-                    cnn_channels=xdim_cnn_channels,
-                    cnn_kernel_size=xdim_cnn_kernel_size,
-                    numeric_hidden_dims=list(critic_hidden_dims),
-                    fusion_hidden_dim=critic_fusion_hidden_dim,
-                    output_dim=critic_xdim_output_dim,
-                ),
-            )
+        critic_backbone_config = build_backbone_config(
+            backbone_type=backbone_type,
+            hidden_dims=critic_hidden_dims,
+            input_dim=critic_input_dim,
+            board_height=BOARD_HEIGHT,
+            board_width=BOARD_WIDTH,
+            board_channels=board_channels,
+            numeric_dim=full_numeric_dim,
+            xdim_cnn_channels=xdim_cnn_channels,
+            xdim_cnn_kernel_size=xdim_cnn_kernel_size,
+            xdim_fusion_hidden_dim=xdim_critic_fusion_hidden_dim,
+        )
         critic_model = build_value_network(backbone_config=critic_backbone_config).to(device)
     else:
         if model_type == "flat":
@@ -752,11 +229,35 @@ def train(
         critic_model.load_state_dict(critic_state_dict)
         print("  Critic weights loaded successfully.")
 
-    agent = SARLAgent(policy_model, model_type, device, critic_model=critic_model)
+    agent = PolicyAgent(policy_model, model_type, device)
     policy_optimizer = optim.Adam(policy_model.parameters(), lr=lr)
     critic_optimizer = (
         optim.Adam(critic_model.parameters(), lr=critic_lr) if critic_model is not None else None
     )
+
+    def predict_values(
+        actor_states: torch.Tensor,
+        critic_states: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if uses_privileged_critic:
+            if critic_states is None:
+                raise ValueError("critic_states must be provided when using privileged critic.")
+            assert critic_model is not None
+            return critic_model(critic_states).squeeze(-1)
+
+        if model_type == "flat":
+            _, values = policy_model(actor_states)
+        elif model_type == "hierarchical":
+            _, _, values = policy_model(actor_states)
+        else:
+            raise ValueError(f"Unknown model_type: {model_type}")
+        return values.squeeze(-1)
+
+    if uses_privileged_critic:
+        assert critic_model is not None
+        value_model: torch.nn.Module = critic_model
+    else:
+        value_model = policy_model
 
     # Create learning rate scheduler
     scheduler = None
@@ -790,14 +291,14 @@ def train(
             num_rollouts=rollout_steps,
             actor_state_dim=actor_input_dim,
             critic_state_dim=critic_input_dim,
-            action_space_size=num_actions,
+            action_space_size=action_space_size,
             num_envs=num_envs,
         )
     else:
         buffer = ExperienceBuffer(
             num_rollouts=rollout_steps,
             state_dim=actor_input_dim,
-            action_space_size=num_actions,
+            action_space_size=action_space_size,
             num_envs=num_envs,
         )
     pending_scheduler_steps = 0
@@ -868,12 +369,19 @@ def train(
                 if critic_states is not None
                 else None
             )
-            actions, log_probs, values, raw_argmax = agent.select_actions_batch(
+            actions, log_probs, raw_argmax = agent.select_actions_batch(
                 states_t,
                 valid_action_masks,
-                critic_states=critic_states_t,
                 deterministic=deterministic_policy,
             )
+            with torch.no_grad():
+                values = (
+                    predict_values(states_t, critic_states_t)
+                    .detach()
+                    .cpu()
+                    .numpy()
+                    .astype(np.float32, copy=False)
+                )
             raw_policy_argmax_buffer.append(raw_argmax)
 
             next_observations, rewards, terminations, truncations, infos = envs.step(actions)
@@ -979,28 +487,21 @@ def train(
 
                 # Log raw policy preference distribution (argmax before action-mask application).
                 if raw_policy_argmax_buffer:
-                    all_raw_argmax = np.concatenate(raw_policy_argmax_buffer)
-                    raw_action_type_dist, _ = compute_action_distributions(
-                        all_raw_argmax,
+                    raw_policy_log = build_raw_policy_log_dict(
+                        raw_policy_argmax_buffer,
                         action_to_type_idx,
                         action_type_names,
                         action_space_size,
-                    )
-                    raw_policy_log = {
-                        f"raw_policy/type_{name}": freq
-                        for name, freq in raw_action_type_dist.items()
-                    }
-                    raw_policy_log.update(
-                        {
-                            "train/rollout_steps_collected": int(buffer.steps_collected),
-                            "train/rollout_samples_collected": int(len(buffer)),
-                        }
+                        rollout_steps_collected=int(buffer.steps_collected),
+                        rollout_samples_collected=int(len(buffer)),
                     )
                     wandb.log(raw_policy_log, step=global_step)
                     raw_policy_argmax_buffer.clear()
 
-                metrics = ppo_update(
+                metrics = run_ppo_update(
                     agent=agent,
+                    value_model=value_model,
+                    predict_values=predict_values,
                     policy_optimizer=policy_optimizer,
                     buffer=buffer,
                     clip_epsilon=clip_epsilon,
@@ -1017,6 +518,8 @@ def train(
                     gae_lambda=gae_lambda,
                     max_grad_norm=max_grad_norm,
                     target_kl=target_kl,
+                    include_single_action_fraction=True,
+                    warn_on_empty=True,
                 )
                 buffer.clear()
                 policy_model.eval()

@@ -1,6 +1,10 @@
 import hashlib
+import random
 import sys
 from typing import Any
+
+import numpy as np
+import torch
 
 
 MAX_SEED = sys.maxsize
@@ -19,3 +23,14 @@ def derive_map_and_game_seeds(episode_seed: int) -> tuple[int, int]:
         derive_seed(episode_seed, "map"),
         derive_seed(episode_seed, "game"),
     )
+
+
+def set_global_seeds(seed: int | None) -> None:
+    """Seed Python, NumPy, and Torch in one place."""
+    if seed is None:
+        return
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
