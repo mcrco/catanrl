@@ -44,9 +44,7 @@ class AggregatedDataset(Dataset):
 
         # Actor state is subset of critic state; these indices convert critic -> actor
         # so we don't double store overlapping board state.
-        self.actor_indices: npt.NDArray[np.int_] = get_actor_indices_from_critic(
-            num_players, map_type
-        )
+        self.actor_indices = get_actor_indices_from_critic(num_players, map_type)
 
         # Preallocate full capacity.
         self.critic_states: npt.NDArray[np.float32] = np.zeros(
