@@ -5,9 +5,10 @@ Aggregated dataset for DAgger imitation learning with configurable eviction stra
 from __future__ import annotations
 
 from enum import Enum
-from typing import Dict, List, Literal, Tuple
+from typing import Dict, Literal, Tuple
 
 import numpy as np
+import numpy.typing as npt
 import torch
 from torch.utils.data import Dataset
 
@@ -23,13 +24,7 @@ class EvictionStrategy(str, Enum):
 
 
 class AggregatedDataset(Dataset):
-    """In-memory dataset for aggregated DAgger trajectories with configurable eviction.
-    
-    Supports multiple eviction strategies when the dataset is full:
-    - RANDOM: Randomly replace existing samples
-    - FIFO: Ring buffer approach, evict oldest samples first
-    - CORRECT: Evict samples the model predicts correctly (not yet implemented)
-    """
+    """In-memory (cpu) dataset for aggregated DAgger trajectories with configurable eviction."""
 
     def __init__(
         self,
@@ -47,16 +42,24 @@ class AggregatedDataset(Dataset):
         self.eviction_strategy = eviction_strategy
         self.action_space_size = get_action_space_size(num_players, map_type)
 
-        # Actor state is subset of critic state; these indices convert critic -> actor 
+        # Actor state is subset of critic state; these indices convert critic -> actor
         # so we don't double store overlapping board state.
-        self.actor_indices = get_actor_indices_from_critic(num_players, map_type)
+        self.actor_indices: npt.NDArray[np.int_] = get_actor_indices_from_critic(
+            num_players, map_type
+        )
 
-        # Preallocate full capacity - only store critic states
-        self.critic_states = np.zeros((self.max_size, critic_dim), dtype=np.float32)
-        self.actions = np.zeros((self.max_size,), dtype=np.int64)
-        self.returns = np.zeros((self.max_size,), dtype=np.float32)
-        self.is_single_action = np.zeros((self.max_size,), dtype=np.bool_)
-        self.action_masks = np.zeros((self.max_size, self.action_space_size), dtype=np.bool_)
+        # Preallocate full capacity.
+        self.critic_states: npt.NDArray[np.float32] = np.zeros(
+            (self.max_size, critic_dim), dtype=np.float32
+        )
+        self.actions: npt.NDArray[np.int64] = np.zeros((self.max_size,), dtype=np.int64)
+        self.returns: npt.NDArray[np.float32] = np.zeros((self.max_size,), dtype=np.float32)
+        self.is_single_action: npt.NDArray[np.bool_] = np.zeros(
+            (self.max_size,), dtype=np.bool_
+        )
+        self.action_masks: npt.NDArray[np.bool_] = np.zeros(
+            (self.max_size, self.action_space_size), dtype=np.bool_
+        )
 
         self.size = 0
         self.head = 0  # Write pointer for FIFO eviction
@@ -69,28 +72,27 @@ class AggregatedDataset(Dataset):
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         if idx >= self.size:
             raise IndexError(f"Index {idx} out of bounds for size {self.size}")
-        idx_int = int(idx)
 
-        critic = self.critic_states[idx_int]
+        critic = self.critic_states[idx]
         # derive actor state on demand
         actor = critic[self.actor_indices]
 
         return (
             torch.from_numpy(actor.copy()),
             torch.from_numpy(critic),
-            torch.tensor(np.take(self.actions, idx_int), dtype=torch.long),
-            torch.tensor(np.take(self.returns, idx_int), dtype=torch.float32),
-            torch.tensor(np.take(self.is_single_action, idx_int), dtype=torch.bool),
-            torch.from_numpy(np.take(self.action_masks, idx_int, axis=0)),
+            torch.tensor(np.take(self.actions, idx), dtype=torch.long),
+            torch.tensor(np.take(self.returns, idx), dtype=torch.float32),
+            torch.tensor(np.take(self.is_single_action, idx), dtype=torch.bool),
+            torch.from_numpy(np.take(self.action_masks, idx, axis=0)),
         )
 
     def add_samples(
         self,
-        critic_states: np.ndarray | List[np.ndarray],
-        expert_actions: np.ndarray | List[int],
-        returns: np.ndarray | List[float],
-        is_single_action: np.ndarray | List[bool],
-        action_masks: np.ndarray | List[np.ndarray],
+        critic_states: npt.NDArray[np.float32] | list[npt.NDArray[np.float32]],
+        expert_actions: npt.NDArray[np.int64] | list[int],
+        returns: npt.NDArray[np.float32] | list[float],
+        is_single_action: npt.NDArray[np.bool_] | list[bool],
+        action_masks: npt.NDArray[np.bool_] | list[npt.NDArray[np.bool_]],
     ) -> None:
         """Add precomputed transition samples using the configured eviction strategy."""
         if self.eviction_strategy == EvictionStrategy.CORRECT:
@@ -103,23 +105,6 @@ class AggregatedDataset(Dataset):
         returns = np.asarray(returns, dtype=np.float32)
         is_single_action = np.asarray(is_single_action, dtype=np.bool_)
         action_masks = np.asarray(action_masks, dtype=np.bool_)
-
-        self._add_samples(
-            critic_states=critic_states,
-            expert_actions=expert_actions,
-            returns=returns,
-            is_single_action=is_single_action,
-            action_masks=action_masks,
-        )
-
-    def _add_samples(
-        self,
-        critic_states: np.ndarray,
-        expert_actions: np.ndarray,
-        returns: np.ndarray,
-        is_single_action: np.ndarray,
-        action_masks: np.ndarray,
-    ) -> None:
         num_samples = len(critic_states)
         if num_samples == 0:
             return
