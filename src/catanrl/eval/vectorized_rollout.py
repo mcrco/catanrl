@@ -104,7 +104,6 @@ def _assert_actions_are_unmasked(
         f"Found {bad_indices.size} masked expert actions in {context}. Examples: {examples}"
     )
 
-
 def run_policy_value_eval_vectorized(
     policy_model: PolicyNetworkWrapper,
     critic_model: ValueNetworkWrapper,
@@ -227,7 +226,6 @@ def run_policy_value_eval_vectorized(
                     policy_logits,
                     torch.full_like(policy_logits, float("-inf")),
                 )
-                masked_logits = torch.clamp(masked_logits, min=-100, max=100)
                 if deterministic:
                     actions = torch.argmax(masked_logits, dim=-1).cpu().numpy()
                 else:

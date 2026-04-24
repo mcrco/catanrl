@@ -105,6 +105,18 @@ def main():
         help="Fixed seed used for trend-detection eval runs.",
     )
     parser.add_argument(
+        "--h2h-eval-games",
+        type=int,
+        default=0,
+        help="Optional current-vs-champion head-to-head games per eval pass (0 disables).",
+    )
+    parser.add_argument(
+        "--h2h-eval-seed",
+        type=int,
+        default=123,
+        help="Fixed seed used for current-vs-champion head-to-head eval runs.",
+    )
+    parser.add_argument(
         "--eval-every-updates",
         type=int,
         default=1,
@@ -146,6 +158,18 @@ def main():
     parser.add_argument("--wandb-run-name", type=str, default=None)
     parser.add_argument("--num-envs", type=int, default=4)
     parser.add_argument("--reward-function", type=str, default="shaped")
+    parser.add_argument(
+        "--vps-to-win",
+        type=int,
+        default=15,
+        help="Victory points required to win each game.",
+    )
+    parser.add_argument(
+        "--discard-limit",
+        type=int,
+        default=9,
+        help="Discard threshold used when a 7 is rolled.",
+    )
     parser.add_argument("--metric-window", type=int, default=200)
 
     args = parser.parse_args()
@@ -200,8 +224,12 @@ def main():
         "seed": args.seed,
         "trend_eval_games": args.trend_eval_games,
         "trend_eval_seed": args.trend_eval_seed,
+        "h2h_eval_games": args.h2h_eval_games,
+        "h2h_eval_seed": args.h2h_eval_seed,
         "eval_every_updates": args.eval_every_updates,
         "save_every_updates": args.save_every_updates,
+        "vps_to_win": args.vps_to_win,
+        "discard_limit": args.discard_limit,
     }
     if args.wandb:
         wandb_config = {
@@ -246,11 +274,15 @@ def main():
         eval_games_per_opponent=args.eval_games,
         trend_eval_games_per_opponent=args.trend_eval_games,
         trend_eval_seed=args.trend_eval_seed,
+        h2h_eval_games=args.h2h_eval_games,
+        h2h_eval_seed=args.h2h_eval_seed,
         eval_every_updates=args.eval_every_updates,
         save_every_updates=args.save_every_updates,
         target_kl=args.target_kl,
         num_envs=args.num_envs,
         reward_function=args.reward_function,
+        vps_to_win=args.vps_to_win,
+        discard_limit=args.discard_limit,
         metric_window=args.metric_window,
     )
 

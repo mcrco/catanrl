@@ -14,21 +14,16 @@ from typing import Any, Callable, Dict, List, Literal, Optional, Sequence, Tuple
 import numpy as np
 import torch
 import torch.nn.functional as F
-from pufferlib.emulation import nativize
 from sklearn.metrics import f1_score
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 import wandb
 
-from ...envs import (
-    extract_expert_actions_from_infos,
-    flatten_puffer_observation,
-    get_action_mask_from_obs,
-)
+from catanrl.algorithms.common import PolicyAgent, build_backbone_config, mask_action_logits
+from ...envs import decode_puffer_batch, extract_expert_actions_from_infos
 from ...envs.gym.single_env import compute_single_agent_dims, make_puffer_vectorized_envs
 from ...eval.training_eval import eval_policy_value_against_baselines
-from ...models.backbones import BackboneConfig, CrossDimensionalBackboneConfig, MLPBackboneConfig
 from ...models.models import (
     build_flat_policy_network,
     build_hierarchical_policy_network,
@@ -39,140 +34,6 @@ from ...features.catanatron_utils import get_actor_indices_from_critic
 from ...utils.catanatron_action_space import get_action_array, get_action_space_size
 from ...utils.seeding import derive_seed
 from .dataset import AggregatedDataset, EvictionStrategy
-
-
-def _mask_logits(
-    logits: torch.Tensor, valid_actions: np.ndarray, device: torch.device
-) -> torch.Tensor:
-    """Apply -inf mask to invalid actions."""
-    mask = torch.full_like(logits, float("-inf"))
-    if valid_actions.size == 0:
-        return logits
-    mask[:, valid_actions] = 0.0
-    masked_logits = torch.clamp(logits + mask, min=-100, max=100)
-    return masked_logits
-
-
-def _observation_to_state_vector(observation: Dict[str, np.ndarray]) -> np.ndarray:
-    """Flatten mixed observation (numeric + board tensor) into the training vector."""
-    numeric = observation["numeric"].astype(np.float32, copy=False)
-    board = observation["board"].astype(np.float32, copy=False)
-    board_ch_last = np.transpose(board, (1, 2, 0))
-    board_flat = board_ch_last.reshape(-1)
-    return np.concatenate([numeric, board_flat], axis=0)
-
-
-def _extract_valid_actions(info: Dict[str, Any] | None, action_space_size: int) -> np.ndarray:
-    valid_actions = None
-    if info is not None:
-        valid_actions = info.get("valid_actions")
-    if valid_actions is None or len(valid_actions) == 0:
-        return np.arange(action_space_size, dtype=np.int64)
-    return np.array(valid_actions, dtype=np.int64)
-
-
-def _get_policy_logits(
-    policy_model: PolicyNetworkWrapper,
-    states: torch.Tensor,
-    model_type: str,
-) -> torch.Tensor:
-    """Get flat action logits from policy model."""
-    if model_type == "flat":
-        return policy_model(states)
-    elif model_type == "hierarchical":
-        action_type_logits, param_logits = policy_model(states)
-        return policy_model.get_flat_action_logits(action_type_logits, param_logits)
-    else:
-        raise ValueError(f"Unknown model_type '{model_type}'")
-
-
-def _select_policy_action(
-    policy_model: PolicyNetworkWrapper,
-    state_vec: np.ndarray,
-    valid_actions: np.ndarray,
-    model_type: str,
-    device: torch.device,
-    deterministic: bool = False,
-) -> int:
-    """Sample or pick the highest-probability action under the current policy."""
-    state_t = torch.from_numpy(state_vec).float().unsqueeze(0).to(device)
-    was_training = policy_model.training
-    policy_model.eval()
-
-    with torch.no_grad():
-        policy_logits = _get_policy_logits(policy_model, state_t, model_type)
-        masked_logits = _mask_logits(policy_logits, valid_actions, device)
-        valid_logits = masked_logits[:, valid_actions]
-        if torch.isnan(valid_logits).any():
-            action_idx = random.choice(valid_actions.tolist())
-        else:
-            if deterministic:
-                local_idx = torch.argmax(valid_logits, dim=-1).item()
-            else:
-                probs = F.softmax(valid_logits, dim=-1)
-                probs = probs / (probs.sum(dim=-1, keepdim=True) + 1e-12)
-                dist = torch.distributions.Categorical(probs=probs.squeeze(0))
-                local_idx = dist.sample().item()
-            action_idx = int(valid_actions[local_idx])
-
-    if was_training:
-        policy_model.train()
-    return action_idx
-
-
-def _select_policy_actions_batch(
-    policy_model: PolicyNetworkWrapper,
-    states: torch.Tensor,
-    valid_action_masks: np.ndarray,
-    model_type: str,
-    device: torch.device,
-    deterministic: bool = False,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Vectorized action selection for multiple parallel environments.
-
-    Returns:
-        actions: Selected action indices (batch_size,)
-        log_probs: Log probabilities of selected actions (batch_size,)
-    """
-    was_training = policy_model.training
-    policy_model.eval()
-
-    with torch.no_grad():
-        policy_logits = _get_policy_logits(policy_model, states, model_type)
-
-        # Mask invalid actions
-        mask_tensor = torch.as_tensor(valid_action_masks, dtype=torch.bool, device=device)
-        if mask_tensor.ndim == 1:
-            mask_tensor = mask_tensor.unsqueeze(0)
-        # Handle case where no actions are valid (shouldn't happen)
-        no_valid = ~mask_tensor.any(dim=1, keepdim=True)
-        mask_tensor = torch.where(no_valid, torch.ones_like(mask_tensor), mask_tensor)
-
-        masked_logits = torch.where(
-            mask_tensor,
-            policy_logits,
-            torch.full_like(policy_logits, float("-inf")),
-        )
-        masked_logits = torch.clamp(masked_logits, min=-100, max=100)
-
-        probs = torch.softmax(masked_logits, dim=-1)
-        log_probs_all = torch.log_softmax(masked_logits, dim=-1)
-
-        if deterministic:
-            action_tensor = torch.argmax(masked_logits, dim=-1)
-        else:
-            dist = torch.distributions.Categorical(probs=probs)
-            action_tensor = dist.sample()
-
-        log_prob_tensor = log_probs_all.gather(1, action_tensor.unsqueeze(1)).squeeze(1)
-
-        actions = action_tensor.detach().cpu().numpy().astype(np.int64)
-        log_probs = log_prob_tensor.detach().cpu().numpy().astype(np.float32)
-
-    if was_training:
-        policy_model.train()
-
-    return actions, log_probs
 
 
 def _assert_actions_are_unmasked(
@@ -225,12 +86,11 @@ class DAggerRolloutBatch:
 
 
 def _policy_expert_agreement(
-    policy_model: PolicyNetworkWrapper,
+    policy_agent: PolicyAgent,
     critic_states: np.ndarray,
     expert_actions: np.ndarray,
     action_masks: np.ndarray,
     actor_indices: np.ndarray,
-    model_type: str,
     device: torch.device,
     batch_size: int = 512,
 ) -> float:
@@ -238,8 +98,8 @@ def _policy_expert_agreement(
     n = expert_actions.shape[0]
     if n == 0:
         return 0.0
-    was_training = policy_model.training
-    policy_model.eval()
+    was_training = policy_agent.model.training
+    policy_agent.model.eval()
     correct = 0
     try:
         with torch.no_grad():
@@ -249,20 +109,17 @@ def _policy_expert_agreement(
                 actor_t = torch.from_numpy(actor).float().to(device)
                 masks = action_masks[start:end]
                 expert = expert_actions[start:end]
-                policy_logits = _get_policy_logits(policy_model, actor_t, model_type)
-                mask_tensor = torch.as_tensor(masks, dtype=torch.bool, device=device)
-                no_valid = ~mask_tensor.any(dim=1, keepdim=True)
-                mask_tensor = torch.where(no_valid, torch.ones_like(mask_tensor), mask_tensor)
-                masked_logits = torch.where(
-                    mask_tensor,
+                policy_logits = policy_agent.policy_logits(actor_t)
+                masked_logits, _ = mask_action_logits(
                     policy_logits,
-                    torch.full_like(policy_logits, float("-inf")),
+                    masks,
+                    clamp_range=(-100.0, 100.0),
                 )
                 preds = torch.argmax(masked_logits, dim=-1).cpu().numpy()
                 correct += int((preds == expert).sum())
     finally:
         if was_training:
-            policy_model.train()
+            policy_agent.model.train()
     return correct / n
 
 
@@ -295,13 +152,12 @@ def _build_action_type_time_series_chart(
 
 def _collect_dagger_rollouts_vectorized(
     envs: Any,
-    policy_model: PolicyNetworkWrapper,
+    policy_agent: PolicyAgent,
     critic_model: ValueNetworkWrapper,
     dataset: AggregatedDataset,
     num_steps: int,
     beta: float,
     gamma: float,
-    model_type: str,
     device: torch.device,
     actor_dim: int,
     critic_dim: int,
@@ -354,25 +210,23 @@ def _collect_dagger_rollouts_vectorized(
 
     for step_idx in range(num_steps):
         batch_size = observations.shape[0]
-        actor_batch = np.zeros((batch_size, actor_dim), dtype=np.float32)
-        critic_batch = np.zeros((batch_size, critic_dim), dtype=np.float32)
-        action_masks = np.zeros((batch_size, action_space_size), dtype=np.bool_)
-
-        # Decode observations
-        for idx in range(batch_size):
-            structured = nativize(observations[idx], obs_space, obs_dtype)
-            actor_batch[idx], critic_batch[idx] = flatten_puffer_observation(structured)
-            action_masks[idx] = get_action_mask_from_obs(structured)
+        actor_batch, critic_batch, action_masks = decode_puffer_batch(
+            flat_obs=observations,
+            obs_space=obs_space,
+            obs_dtype=obs_dtype,
+            actor_dim=actor_dim,
+            critic_dim=critic_dim,
+        )
+        if critic_batch is None:
+            raise RuntimeError("Expected critic observations while collecting DAgger rollouts.")
 
         # Get policy actions
         actor_tensor = torch.from_numpy(actor_batch).float().to(device)
-        policy_actions, _ = _select_policy_actions_batch(
-            policy_model,
+        policy_actions, _, _ = policy_agent.select_actions_batch(
             actor_tensor,
             action_masks,
-            model_type,
-            device,
             deterministic=False,
+            clamp_range=(-100.0, 100.0),
         )
 
         # Get expert actions from info dict (computed by the env)
@@ -423,10 +277,15 @@ def _collect_dagger_rollouts_vectorized(
     # Bootstrap returns for unfinished episodes using critic value
     was_training = critic_model.training
     critic_model.eval()
-    last_critic_states = np.zeros((num_envs, critic_dim), dtype=np.float32)
-    for idx in range(num_envs):
-        structured = nativize(observations[idx], obs_space, obs_dtype)
-        _, last_critic_states[idx] = flatten_puffer_observation(structured)
+    _, last_critic_states, _ = decode_puffer_batch(
+        flat_obs=observations,
+        obs_space=obs_space,
+        obs_dtype=obs_dtype,
+        actor_dim=actor_dim,
+        critic_dim=critic_dim,
+    )
+    if last_critic_states is None:
+        raise RuntimeError("Expected critic observations when bootstrapping DAgger returns.")
 
     with torch.no_grad():
         last_critic_tensor = torch.from_numpy(last_critic_states).float().to(device)
@@ -471,19 +330,18 @@ def _collect_dagger_rollouts_vectorized(
 
 def _train_on_dataset(
     dataset: AggregatedDataset,
-    policy_model: PolicyNetworkWrapper,
+    policy_agent: PolicyAgent,
     critic_model: ValueNetworkWrapper,
     policy_optimizer: torch.optim.Optimizer,
     critic_optimizer: torch.optim.Optimizer,
     epochs: int,
     batch_size: int,
-    model_type: str,
     device: torch.device,
     num_players: int,
     map_type: Literal["BASE", "MINI", "TOURNAMENT"],
     max_grad_norm: float = 5.0,
     progress_desc: str = "Train",
-) -> Dict[str, float]:
+) -> Dict[str, Any]:
     """Run supervised updates on the aggregated dataset with separate policy/critic."""
     if len(dataset) == 0 or epochs <= 0:
         return {
@@ -498,7 +356,7 @@ def _train_on_dataset(
     action_array = get_action_array(num_players, map_type)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=False)
     total_batches = epochs * len(loader)
-    policy_model.train()
+    policy_agent.model.train()
     critic_model.train()
 
     pred_action_counter: Counter[str] = Counter()
@@ -543,15 +401,11 @@ def _train_on_dataset(
 
                 # Policy update (only on non-single-action steps since end-turn steps dominate otherwise)
                 policy_optimizer.zero_grad()
-                policy_logits = _get_policy_logits(policy_model, actor_features, model_type)
-                no_valid = ~action_masks.any(dim=1, keepdim=True)
-                safe_action_masks = torch.where(
-                    no_valid, torch.ones_like(action_masks), action_masks
-                )
-                masked_policy_logits = torch.where(
-                    safe_action_masks,
+                policy_logits = policy_agent.policy_logits(actor_features)
+                masked_policy_logits, _ = mask_action_logits(
                     policy_logits,
-                    torch.full_like(policy_logits, float("-inf")),
+                    action_masks.detach().cpu().numpy(),
+                    clamp_range=(-100.0, 100.0),
                 )
                 non_single_mask = ~is_single_action
                 if non_single_mask.any():
@@ -562,7 +416,7 @@ def _train_on_dataset(
                     policy_loss = policy_loss_per_sample[non_single_mask].mean()
                     policy_loss.backward()
                     torch.nn.utils.clip_grad_norm_(
-                        policy_model.parameters(), max_norm=max_grad_norm
+                        policy_agent.model.parameters(), max_norm=max_grad_norm
                     )
                     policy_optimizer.step()
                 else:
@@ -784,36 +638,18 @@ def train(
     print(f"Eval cadence: every {eval_every_iterations} iteration(s)")
     print(f"Save cadence: every {save_every_iterations} iteration(s)")
 
-    # Build policy backbone config based on backbone_type
-    if backbone_type == "mlp":
-        policy_backbone_config = BackboneConfig(
-            architecture="mlp",
-            args=MLPBackboneConfig(input_dim=actor_dim, hidden_dims=list(policy_hidden_dims)),
-        )
-    else:  # xdim / xdim_res
-        policy_output_dim = policy_hidden_dims[-1] if policy_hidden_dims else 256
-        policy_fusion_hidden_dim = (
-            xdim_policy_fusion_hidden_dim
-            if xdim_policy_fusion_hidden_dim is not None
-            else policy_output_dim
-        )
-        xdim_architecture = (
-            "residual_cross_dimensional" if backbone_type == "xdim_res" else "cross_dimensional"
-        )
-        policy_backbone_config = BackboneConfig(
-            architecture=xdim_architecture,
-            args=CrossDimensionalBackboneConfig(
-                board_height=BOARD_HEIGHT,
-                board_width=BOARD_WIDTH,
-                board_channels=board_channels,
-                numeric_dim=numeric_dim,
-                cnn_channels=xdim_cnn_channels,
-                cnn_kernel_size=xdim_cnn_kernel_size,
-                numeric_hidden_dims=list(policy_hidden_dims),
-                fusion_hidden_dim=policy_fusion_hidden_dim,
-                output_dim=policy_output_dim,
-            ),
-        )
+    policy_backbone_config = build_backbone_config(
+        backbone_type=backbone_type,
+        hidden_dims=policy_hidden_dims,
+        input_dim=actor_dim,
+        board_height=BOARD_HEIGHT,
+        board_width=BOARD_WIDTH,
+        board_channels=board_channels,
+        numeric_dim=numeric_dim,
+        xdim_cnn_channels=xdim_cnn_channels,
+        xdim_cnn_kernel_size=xdim_cnn_kernel_size,
+        xdim_fusion_hidden_dim=xdim_policy_fusion_hidden_dim,
+    )
 
     if model_type == "flat":
         policy_model = build_flat_policy_network(
@@ -828,36 +664,18 @@ def train(
     else:
         raise ValueError(f"Unknown model_type '{model_type}'")
 
-    # Build critic backbone config
-    if backbone_type == "mlp":
-        critic_backbone_config = BackboneConfig(
-            architecture="mlp",
-            args=MLPBackboneConfig(input_dim=critic_dim, hidden_dims=list(critic_hidden_dims)),
-        )
-    else:  # xdim / xdim_res
-        critic_output_dim = critic_hidden_dims[-1] if critic_hidden_dims else 256
-        critic_fusion_hidden_dim = (
-            xdim_critic_fusion_hidden_dim
-            if xdim_critic_fusion_hidden_dim is not None
-            else critic_output_dim
-        )
-        xdim_architecture = (
-            "residual_cross_dimensional" if backbone_type == "xdim_res" else "cross_dimensional"
-        )
-        critic_backbone_config = BackboneConfig(
-            architecture=xdim_architecture,
-            args=CrossDimensionalBackboneConfig(
-                board_height=BOARD_HEIGHT,
-                board_width=BOARD_WIDTH,
-                board_channels=board_channels,
-                numeric_dim=full_numeric_dim,  # critic uses full numeric features
-                cnn_channels=xdim_cnn_channels,
-                cnn_kernel_size=xdim_cnn_kernel_size,
-                numeric_hidden_dims=list(critic_hidden_dims),
-                fusion_hidden_dim=critic_fusion_hidden_dim,
-                output_dim=critic_output_dim,
-            ),
-        )
+    critic_backbone_config = build_backbone_config(
+        backbone_type=backbone_type,
+        hidden_dims=critic_hidden_dims,
+        input_dim=critic_dim,
+        board_height=BOARD_HEIGHT,
+        board_width=BOARD_WIDTH,
+        board_channels=board_channels,
+        numeric_dim=full_numeric_dim,
+        xdim_cnn_channels=xdim_cnn_channels,
+        xdim_cnn_kernel_size=xdim_cnn_kernel_size,
+        xdim_fusion_hidden_dim=xdim_critic_fusion_hidden_dim,
+    )
     critic_model = build_value_network(backbone_config=critic_backbone_config).to(torch_device)
 
     # Load weights if provided
@@ -877,6 +695,7 @@ def train(
 
     policy_optimizer = torch.optim.Adam(policy_model.parameters(), lr=policy_lr)
     critic_optimizer = torch.optim.Adam(critic_model.parameters(), lr=critic_lr)
+    policy_agent = PolicyAgent(policy_model, model_type, torch_device)
 
     # Create vectorized environments with expert player embedded
     # Each env will compute expert actions and include them in info dict
@@ -919,13 +738,12 @@ def train(
 
                 collect_stats, rollout_batch = _collect_dagger_rollouts_vectorized(
                     envs=envs,
-                    policy_model=policy_model,
+                    policy_agent=policy_agent,
                     critic_model=critic_model,
                     dataset=dataset,
                     num_steps=steps_per_iteration,
                     beta=beta,
                     gamma=gamma,
-                    model_type=model_type,
                     device=torch_device,
                     actor_dim=actor_dim,
                     critic_dim=critic_dim,
@@ -941,24 +759,22 @@ def train(
                 ) = dataset.summarize_imitation_stats()
 
                 agreement_pre = _policy_expert_agreement(
-                    policy_model=policy_model,
+                    policy_agent=policy_agent,
                     critic_states=rollout_batch.critic_states,
                     expert_actions=rollout_batch.expert_actions,
                     action_masks=rollout_batch.action_masks,
                     actor_indices=actor_indices,
-                    model_type=model_type,
                     device=torch_device,
                 )
 
                 train_stats = _train_on_dataset(
                     dataset=dataset,
-                    policy_model=policy_model,
+                    policy_agent=policy_agent,
                     critic_model=critic_model,
                     policy_optimizer=policy_optimizer,
                     critic_optimizer=critic_optimizer,
                     epochs=train_epochs,
                     batch_size=batch_size,
-                    model_type=model_type,
                     device=torch_device,
                     num_players=num_players,
                     map_type=map_type,
@@ -967,12 +783,11 @@ def train(
                 )
 
                 agreement_post = _policy_expert_agreement(
-                    policy_model=policy_model,
+                    policy_agent=policy_agent,
                     critic_states=rollout_batch.critic_states,
                     expert_actions=rollout_batch.expert_actions,
                     action_masks=rollout_batch.action_masks,
                     actor_indices=actor_indices,
-                    model_type=model_type,
                     device=torch_device,
                 )
 

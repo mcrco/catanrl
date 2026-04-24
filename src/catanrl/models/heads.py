@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from typing import Sequence, Tuple
 
+from catanatron.gym.envs.action_space import ACTION_TYPES
 from catanatron.models.enums import ActionType
 
 from .utils import orthogonal_init
@@ -56,38 +57,26 @@ class HierarchicalPolicyHead(nn.Module):
     """
     Hierarchical policy head that predicts action type first, then action parameters.
 
-    Action types in Catanatron:
-    0. ROLL (no params)
-    1. MOVE_ROBBER (tiles: 19 for BASE, 7 for MINI)
-    2. DISCARD_RESOURCE (5 resources)
-    3. BUILD_ROAD (edges: 72 for BASE, 30 for MINI)
-    4. BUILD_SETTLEMENT (nodes: 54 for BASE, 24 for MINI)
-    5. BUILD_CITY (nodes: 54 for BASE, 24 for MINI)
-    6. BUY_DEVELOPMENT_CARD (no params)
-    7. PLAY_KNIGHT_CARD (no params)
-    8. PLAY_YEAR_OF_PLENTY (20 resource combinations)
-    9. PLAY_ROAD_BUILDING (no params)
-    10. PLAY_MONOPOLY (5 resources)
-    11. MARITIME_TRADE (60 trade combinations)
-    12. END_TURN (no params)
+    Action-type indices are derived from Catanatron's live ACTION_TYPES ordering
+    so this head stays aligned if upstream reorders or expands the action space.
     """
 
-    # Action type indices (order matches ACTIONS_ARRAY in catanatron_env.py)
-    ROLL = 0
-    MOVE_ROBBER = 1
-    DISCARD = 2
-    BUILD_ROAD = 3
-    BUILD_SETTLEMENT = 4
-    BUILD_CITY = 5
-    BUY_DEVELOPMENT_CARD = 6
-    PLAY_KNIGHT_CARD = 7
-    PLAY_YEAR_OF_PLENTY = 8
-    PLAY_ROAD_BUILDING = 9
-    PLAY_MONOPOLY = 10
-    MARITIME_TRADE = 11
-    END_TURN = 12
+    ACTION_TYPE_ATTRS = {
+        ActionType.ROLL: "ROLL",
+        ActionType.MOVE_ROBBER: "MOVE_ROBBER",
+        ActionType.DISCARD_RESOURCE: "DISCARD",
+        ActionType.BUILD_ROAD: "BUILD_ROAD",
+        ActionType.BUILD_SETTLEMENT: "BUILD_SETTLEMENT",
+        ActionType.BUILD_CITY: "BUILD_CITY",
+        ActionType.BUY_DEVELOPMENT_CARD: "BUY_DEVELOPMENT_CARD",
+        ActionType.PLAY_KNIGHT_CARD: "PLAY_KNIGHT_CARD",
+        ActionType.PLAY_YEAR_OF_PLENTY: "PLAY_YEAR_OF_PLENTY",
+        ActionType.PLAY_ROAD_BUILDING: "PLAY_ROAD_BUILDING",
+        ActionType.PLAY_MONOPOLY: "PLAY_MONOPOLY",
+        ActionType.MARITIME_TRADE: "MARITIME_TRADE",
+        ActionType.END_TURN: "END_TURN",
+    }
 
-    NUM_ACTION_TYPES = 13
     NUM_RESOURCES = 5
 
     # Small gain for policy output layers to start with near-uniform action probs
@@ -100,8 +89,17 @@ class HierarchicalPolicyHead(nn.Module):
     ):
         super().__init__()
         self.actions_array = tuple(actions_array)
+        self.action_types = tuple(ACTION_TYPES)
+        self.NUM_ACTION_TYPES = len(self.action_types)
+        self.action_type_to_idx = {
+            action_type: idx for idx, action_type in enumerate(self.action_types)
+        }
+        for action_type, attr_name in self.ACTION_TYPE_ATTRS.items():
+            if action_type not in self.action_type_to_idx:
+                raise ValueError(f"Missing required action type in ACTION_TYPES: {action_type}")
+            setattr(self, attr_name, self.action_type_to_idx[action_type])
 
-        # Action type head (13 action types)
+        # Action type head aligned with the upstream action-type ordering.
         self.action_type_head = nn.Linear(input_dim, self.NUM_ACTION_TYPES)
 
         self._analyze_action_space()
@@ -171,23 +169,6 @@ class HierarchicalPolicyHead(nn.Module):
 
         self.action_space_size = len(self.actions_array)
 
-        # Map ActionType enum to our integer indices
-        self.action_type_to_idx = {
-            ActionType.ROLL: self.ROLL,
-            ActionType.MOVE_ROBBER: self.MOVE_ROBBER,
-            ActionType.DISCARD_RESOURCE: self.DISCARD,
-            ActionType.BUILD_ROAD: self.BUILD_ROAD,
-            ActionType.BUILD_SETTLEMENT: self.BUILD_SETTLEMENT,
-            ActionType.BUILD_CITY: self.BUILD_CITY,
-            ActionType.BUY_DEVELOPMENT_CARD: self.BUY_DEVELOPMENT_CARD,
-            ActionType.PLAY_KNIGHT_CARD: self.PLAY_KNIGHT_CARD,
-            ActionType.PLAY_YEAR_OF_PLENTY: self.PLAY_YEAR_OF_PLENTY,
-            ActionType.PLAY_ROAD_BUILDING: self.PLAY_ROAD_BUILDING,
-            ActionType.PLAY_MONOPOLY: self.PLAY_MONOPOLY,
-            ActionType.MARITIME_TRADE: self.MARITIME_TRADE,
-            ActionType.END_TURN: self.END_TURN,
-        }
-
         # Build index to (action_type_idx, param_idx) mapping
         self.flat_to_hierarchical = {}
         self.hierarchical_to_flat = {}
@@ -214,7 +195,7 @@ class HierarchicalPolicyHead(nn.Module):
             features: Output of the shared backbone.
 
         Returns:
-            action_type_logits: [batch_size, 13]
+            action_type_logits: [batch_size, NUM_ACTION_TYPES]
             param_logits: Dict[action_type_idx, logits]
         """
 
@@ -240,7 +221,7 @@ class HierarchicalPolicyHead(nn.Module):
         Convert hierarchical logits to flat action space logits.
 
         Args:
-            action_type_logits: [batch_size, 13]
+            action_type_logits: [batch_size, NUM_ACTION_TYPES]
             param_logits: Dict of parameter logits
 
         Returns:

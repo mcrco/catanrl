@@ -47,6 +47,7 @@ class AecCatanatronEnv(AECEnv):
         self.map_type = self.config.map_type
         self.action_space_size = get_action_space_size(self.num_players, self.map_type)
         self.vps_to_win = int(self.config.vps_to_win)
+        self.discard_limit = int(self.config.discard_limit)
         self.shared_critic = bool(self.config.shared_critic)
 
         self.possible_agents: List[str] = [f"player_{i}" for i in range(self.num_players)]
@@ -133,6 +134,7 @@ class AecCatanatronEnv(AECEnv):
         self.game = Game(
             players=players,
             seed=game_seed,
+            discard_limit=self.discard_limit,
             catan_map=catan_map,
             vps_to_win=self.vps_to_win,
         )
