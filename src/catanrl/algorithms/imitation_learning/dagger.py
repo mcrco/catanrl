@@ -22,7 +22,7 @@ import wandb
 
 from catanrl.algorithms.common import PolicyAgent, build_backbone_config, mask_action_logits
 from ...envs import decode_puffer_batch, extract_expert_actions_from_infos
-from ...envs.gym.single_env import compute_single_agent_dims, make_puffer_vectorized_envs
+from ...envs.puffer.single_agent_env import compute_single_agent_dims, make_puffer_vectorized_envs
 from ...eval.training_eval import eval_policy_value_against_baselines
 from ...models.models import (
     build_flat_policy_network,

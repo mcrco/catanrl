@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Literal, Union
 
 if TYPE_CHECKING:
-    from catanrl.envs.puffer.catanatron_puffer_env import SingleAgentCatanatronPufferEnv
+    from catanrl.envs.puffer.single_agent_env import SingleAgentCatanatronPufferEnv
 
 import gymnasium as gym
 from gymnasium import spaces
@@ -23,6 +23,11 @@ from catanatron.players.weighted_random import WeightedRandomPlayer
 from catanatron.gym.envs.catanatron_env import get_channels, get_feature_ordering, is_graph_feature, HIGH
 
 from catanrl.envs.gym.rewards import ShapedReward, WinReward, RewardFunction
+from catanrl.envs.puffer.common import (
+    compute_single_agent_dims as _compute_single_agent_dims,
+    create_expert as _create_expert,
+    create_opponents as _create_opponents,
+)
 from catanrl.features.catanatron_utils import (
     full_game_to_features,
     game_to_features,
@@ -42,50 +47,7 @@ BOARD_HEIGHT = 11
 
 
 def create_opponents(opponent_configs: List[str]) -> List:
-    """
-    Instantiate opponent AI players from CLI-like config strings.
-
-    Examples:
-        ["random", "AB:3", "M:500"]
-    """
-    colors = [Color.RED, Color.WHITE, Color.ORANGE]
-    opponents = []
-
-    for i, config in enumerate(opponent_configs):
-        color = colors[i % len(colors)]
-        parts = config.split(":")
-        player_type = parts[0].lower()
-        params = parts[1:] if len(parts) > 1 else []
-
-        try:
-            if player_type in {"random", "r"}:
-                opponents.append(RandomPlayer(color))
-            elif player_type in {"weighted", "w"}:
-                opponents.append(WeightedRandomPlayer(color))
-            elif player_type in {"value", "valuefunction", "f"}:
-                opponents.append(ValueFunctionPlayer(color))
-            elif player_type in {"victorypoint", "vp"}:
-                opponents.append(VictoryPointPlayer(color))
-            elif player_type in {"alphabeta", "ab"}:
-                depth = int(params[0]) if params else 2
-                pruning = params[1].lower() != "false" if len(params) > 1 else True
-                opponents.append(AlphaBetaPlayer(color, depth=depth, prunning=pruning))
-            elif player_type in {"sameturnalphabeta", "sab"}:
-                opponents.append(SameTurnAlphaBetaPlayer(color))
-            elif player_type in {"mcts", "m"}:
-                num_simulations = int(params[0]) if params else 100
-                opponents.append(MCTSPlayer(color, num_simulations))
-            elif player_type in {"playouts", "greedyplayouts", "g"}:
-                num_playouts = int(params[0]) if params else 25
-                opponents.append(GreedyPlayoutsPlayer(color, num_playouts))
-            else:
-                print(f"Warning: Unknown opponent type '{player_type}', defaulting to RandomPlayer")
-                opponents.append(RandomPlayer(color))
-        except Exception as exc:  # pragma: no cover - defensive fallback
-            print(f"Warning: Failed to create opponent '{config}': {exc}. Using RandomPlayer.")
-            opponents.append(RandomPlayer(color))
-
-    return opponents
+    return _create_opponents(opponent_configs)
 
 
 # Pretty much exactly CatanatronEnv, but uses reward defined in catanrl.envs.rewards
@@ -382,41 +344,7 @@ def make_vectorized_envs(
 
 
 def create_expert(expert_config: str) -> Player:
-    """
-    Create an expert player from a config string.
-
-    Uses the same format as create_opponents but creates a single player
-    with BLUE color (the learning agent's color).
-    """
-    parts = expert_config.split(":")
-    player_type = parts[0].lower()
-    params = parts[1:] if len(parts) > 1 else []
-
-    # Expert uses BLUE color to match the learning agent's perspective
-    color = Color.BLUE
-
-    if player_type in {"random", "r"}:
-        return RandomPlayer(color)
-    elif player_type in {"weighted", "w"}:
-        return WeightedRandomPlayer(color)
-    elif player_type in {"value", "valuefunction", "f"}:
-        return ValueFunctionPlayer(color)
-    elif player_type in {"victorypoint", "vp"}:
-        return VictoryPointPlayer(color)
-    elif player_type in {"alphabeta", "ab"}:
-        depth = int(params[0]) if params else 2
-        pruning = params[1].lower() != "false" if len(params) > 1 else True
-        return AlphaBetaPlayer(color, depth=depth, prunning=pruning)
-    elif player_type in {"sameturnalphabeta", "sab"}:
-        return SameTurnAlphaBetaPlayer(color)
-    elif player_type in {"mcts", "m"}:
-        num_simulations = int(params[0]) if params else 100
-        return MCTSPlayer(color, num_simulations)
-    elif player_type in {"playouts", "greedyplayouts", "g"}:
-        num_playouts = int(params[0]) if params else 25
-        return GreedyPlayoutsPlayer(color, num_playouts)
-    else:
-        raise ValueError(f"Unknown expert type: {expert_config}")
+    return _create_expert(expert_config)
 
 
 def _make_puffer_env(
@@ -437,7 +365,7 @@ def _make_puffer_env(
             are included in info dict (useful for imitation learning).
     """
 
-    from catanrl.envs.puffer.catanatron_puffer_env import SingleAgentCatanatronPufferEnv
+    from catanrl.envs.puffer.single_agent_env import SingleAgentCatanatronPufferEnv
 
     def _config():
         if reward_function == "shaped":
@@ -503,24 +431,4 @@ def compute_single_agent_dims(
     num_players: int,
     map_type: Literal["BASE", "MINI", "TOURNAMENT"],
 ) -> Dict[str, int]:
-    """
-    Compute input dimensions for single-agent environment.
-
-    Returns:
-        Dict with keys: actor_dim, critic_dim, numeric_dim, board_dim
-    """
-    numeric_dim = len(get_numeric_feature_names(num_players, map_type))
-    full_numeric_dim = len(get_full_numeric_feature_names(num_players, map_type))
-    board_channels = get_channels(num_players)
-    board_flat_dim = board_channels * BOARD_WIDTH * BOARD_HEIGHT
-    actor_dim = numeric_dim + board_flat_dim
-    critic_dim = full_numeric_dim + board_flat_dim
-
-    return {
-        "actor_dim": actor_dim,
-        "critic_dim": critic_dim,
-        "numeric_dim": numeric_dim,
-        "full_numeric_dim": full_numeric_dim,
-        "board_dim": board_flat_dim,
-        "board_channels": board_channels,
-    }
+    return _compute_single_agent_dims(num_players, map_type)

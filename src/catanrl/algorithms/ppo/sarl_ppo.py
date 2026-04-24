@@ -20,7 +20,7 @@ from tqdm import tqdm
 import wandb
 
 from ...envs import decode_puffer_batch
-from ...envs.gym.single_env import (
+from ...envs.puffer.single_agent_env import (
     BOARD_HEIGHT,
     BOARD_WIDTH,
     compute_single_agent_dims,

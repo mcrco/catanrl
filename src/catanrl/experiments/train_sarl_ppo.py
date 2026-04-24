@@ -2,7 +2,7 @@ import argparse
 import os
 import wandb
 
-from ..envs.gym.single_env import compute_single_agent_dims, create_opponents
+from ..envs.puffer.common import compute_single_agent_dims, create_opponents
 from ..algorithms.ppo.sarl_ppo import train
 from ..utils.catanatron_action_space import get_action_space_size
 

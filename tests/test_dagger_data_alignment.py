@@ -3,17 +3,19 @@
 from __future__ import annotations
 
 import numpy as np
+from pufferlib.emulation import nativize
 
 from catanrl.algorithms.imitation_learning.dataset import AggregatedDataset
 from catanrl.envs.gym.rewards import WinReward
-from catanrl.envs.gym.single_env import SingleAgentCatanatronEnv, create_expert, create_opponents
+from catanrl.envs.puffer.common import create_expert, create_opponents
+from catanrl.envs.puffer.single_agent_env import SingleAgentCatanatronPufferEnv
 from catanrl.envs.puffer.rollout_utils import flatten_puffer_observation, get_action_mask_from_obs
 from catanrl.features.catanatron_utils import full_game_to_features, game_to_features
 from catanrl.utils.catanatron_action_space import to_action_space
 
 
-def _make_debug_env() -> SingleAgentCatanatronEnv:
-    return SingleAgentCatanatronEnv(
+def _make_debug_env() -> SingleAgentCatanatronPufferEnv:
+    return SingleAgentCatanatronPufferEnv(
         config={
             "map_type": "BASE",
             "vps_to_win": 10,
@@ -26,10 +28,29 @@ def _make_debug_env() -> SingleAgentCatanatronEnv:
     )
 
 
-def _snapshot_state(env: SingleAgentCatanatronEnv, observation: dict, info: dict) -> dict:
+def _decode_observation(env: SingleAgentCatanatronPufferEnv, observation: np.ndarray) -> dict:
+    return nativize(observation[0], env.env_single_observation_space, env.obs_dtype)
+
+
+def _deep_copy_dict(value: dict) -> dict:
+    copied: dict = {}
+    for key, item in value.items():
+        if isinstance(item, dict):
+            copied[key] = _deep_copy_dict(item)
+        elif isinstance(item, np.ndarray):
+            copied[key] = item.copy()
+        elif isinstance(item, list):
+            copied[key] = list(item)
+        else:
+            copied[key] = item
+    return copied
+
+
+def _snapshot_state(env: SingleAgentCatanatronPufferEnv, observation: np.ndarray, info: dict) -> dict:
+    structured_observation = _decode_observation(env, observation)
     return {
-        "observation": observation,
-        "info": info,
+        "observation": _deep_copy_dict(structured_observation),
+        "info": _deep_copy_dict(info),
         "game": env.game.copy(),
         "num_players": env.num_players,
         "map_type": env.map_type,
@@ -39,17 +60,24 @@ def _snapshot_state(env: SingleAgentCatanatronEnv, observation: dict, info: dict
     }
 
 
-def _collect_structured_states(num_states: int = 4) -> tuple[SingleAgentCatanatronEnv, list[dict]]:
+def _collect_structured_states(
+    num_states: int = 4,
+) -> tuple[SingleAgentCatanatronPufferEnv, list[dict]]:
     env = _make_debug_env()
     states: list[dict] = []
     try:
-        observation, info = env.reset(seed=123)
+        observation, infos = env.reset(seed=123)
+        info = infos[0]
         for _ in range(num_states):
             states.append(_snapshot_state(env, observation, info))
             expert_action = int(info["expert_action"])
-            observation, _, terminated, truncated, info = env.step(expert_action)
-            if terminated or truncated:
-                observation, info = env.reset()
+            observation, _, terminated, truncated, infos = env.step(
+                np.asarray([expert_action], dtype=np.int32)
+            )
+            info = infos[0]
+            if bool(terminated[0] or truncated[0]):
+                observation, infos = env.reset()
+                info = infos[0]
     except Exception:
         env.close()
         raise

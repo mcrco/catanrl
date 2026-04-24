@@ -17,7 +17,7 @@ from ..envs import (
     get_action_mask_from_obs,
     init_episode_buffers,
 )
-from ..envs.gym.single_env import compute_single_agent_dims, make_puffer_vectorized_envs
+from ..envs.puffer.single_agent_env import compute_single_agent_dims, make_puffer_vectorized_envs
 from ..models.wrappers import PolicyNetworkWrapper, ValueNetworkWrapper
 from ..utils.seeding import derive_seed
 

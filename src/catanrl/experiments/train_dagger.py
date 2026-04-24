@@ -3,7 +3,7 @@ import os
 
 import wandb
 
-from ..envs.gym.single_env import create_opponents
+from ..envs.puffer.common import create_opponents
 from ..algorithms.imitation_learning.dagger import train as dagger_train
 from ..algorithms.imitation_learning.dataset import EvictionStrategy
 from ..utils.catanatron_action_space import get_action_space_size

@@ -14,7 +14,7 @@ from tqdm import tqdm
 import wandb
 
 from ...envs import compute_multiagent_input_dim, decode_puffer_batch
-from ...envs.zoo.multi_env import make_vectorized_envs as make_marl_vectorized_envs
+from ...envs.puffer.multi_agent_env import make_vectorized_envs as make_marl_vectorized_envs
 from ...eval.training_eval import eval_policy_against_champion, eval_policy_value_against_baselines
 from ...features.catanatron_utils import (
     get_full_numeric_feature_names,
