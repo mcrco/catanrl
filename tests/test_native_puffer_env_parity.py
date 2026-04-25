@@ -222,3 +222,31 @@ def test_vectorized_native_puffer_envs_decode_batches():
     finally:
         single_envs.close()
         multi_envs.close()
+
+
+def test_single_agent_step_ignores_stale_action_after_done():
+    env = SingleAgentCatanatronPufferEnv(
+        config={
+            "map_type": "BASE",
+            "vps_to_win": 10,
+            "discard_limit": 7,
+            "enemies": create_opponents(["F"]),
+            "reward_function": WinReward(),
+            "shared_critic": True,
+            "expert_player": create_expert("F"),
+        }
+    )
+
+    try:
+        observations, infos = env.reset(seed=123)
+        env._episode_done = True
+        reset_observations, reset_rewards, reset_terminals, reset_truncations, reset_infos = env.step(
+            np.asarray([97], dtype=np.int32)
+        )
+        assert reset_observations.shape == observations.shape
+        assert float(reset_rewards[0]) == 0.0
+        assert len(reset_infos) == 1
+        assert bool(reset_terminals[0]) is False
+        assert bool(reset_truncations[0]) is False
+    finally:
+        env.close()

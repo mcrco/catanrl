@@ -226,7 +226,8 @@ class SingleAgentCatanatronPufferEnv(PufferEnv):
         if not self.initialized:
             raise RuntimeError("step() before reset()")
         if self._episode_done:
-            self.reset(seed=None)
+            observations, infos = self.reset(seed=None)
+            return observations, self.rewards, self.terminals, self.truncations, infos
 
         if isinstance(actions, np.ndarray):
             action = actions.ravel()

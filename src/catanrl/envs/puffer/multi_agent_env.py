@@ -232,9 +232,9 @@ class ParallelCatanatronPufferEnv(PufferEnv):
     def step(self, actions: np.ndarray):
         if not self.initialized:
             raise RuntimeError("step() before reset()")
-        if not self.agents:
-            self.reset(seed=None)
-            self._all_done = False
+        if self.done:
+            observations, infos = self.reset(seed=None)
+            return observations, self.rewards, self.terminals, self.truncations, infos
 
         if isinstance(actions, np.ndarray):
             if len(actions) != self.num_agents:
@@ -313,9 +313,9 @@ class ParallelCatanatronPufferEnv(PufferEnv):
         for idx, agent in enumerate(self.possible_agents):
             if agent not in observations:
                 self.observations[idx] = 0
-                self.rewards[idx] = 0.0
-                self.terminals[idx] = True
-                self.truncations[idx] = False
+                self.rewards[idx] = float(rewards.get(agent, 0.0))
+                self.terminals[idx] = bool(dones.get(agent, True))
+                self.truncations[idx] = bool(truncateds.get(agent, False))
                 self.masks[idx] = False
                 continue
 
