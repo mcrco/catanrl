@@ -6,15 +6,16 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
 import yaml
-from catanatron.models.player import Color
+from catanatron.models.player import Color, Player
 
 from catanrl.algorithms.common.backbone_builder import build_backbone_config
 from catanrl.envs.puffer.common import BOARD_HEIGHT, BOARD_WIDTH, compute_single_agent_dims
+from catanrl.features.catanatron_utils import game_to_features
 from catanrl.models.models import build_flat_policy_network, build_hierarchical_policy_network
-from catanrl.players.nn_policy_player import NNPolicyPlayer
-from catanrl.utils.catanatron_action_space import get_action_space_size
+from catanrl.utils.catanatron_action_space import get_action_space_size, to_action_space
 
 
 DEFAULT_RUN_NAME = "marl-cc-f-xdim-flat-shaped-pretrained-dagger"
@@ -133,14 +134,71 @@ def _create_policy_player(
     weights_path: str,
     map_type: str,
     num_players: int,
-) -> NNPolicyPlayer:
-    model, model_type = _load_policy_model(config_path, weights_path, map_type, num_players)
-    return NNPolicyPlayer(
+) -> "CatanRLWebPolicyPlayer":
+    return CatanRLWebPolicyPlayer(
         color=color,
-        model_type=model_type,
-        model=model,
+        config_path=config_path,
+        weights_path=weights_path,
         map_type=map_type,
+        num_players=num_players,
     )
+
+
+class CatanRLWebPolicyPlayer(Player):
+    """Pickle-light CatanRL policy player for Catanatron web games."""
+
+    def __init__(
+        self,
+        color: Color,
+        config_path: str,
+        weights_path: str,
+        map_type: str,
+        num_players: int,
+    ) -> None:
+        super().__init__(color, is_bot=True)
+        self.config_path = config_path
+        self.weights_path = weights_path
+        self.map_type = map_type
+        self.num_players = num_players
+
+    def decide(self, game, playable_actions):
+        if len(playable_actions) == 1:
+            return playable_actions[0]
+
+        model, model_type, device = _load_policy_model(
+            self.config_path,
+            self.weights_path,
+            self.map_type,
+            self.num_players,
+        )
+        features = game_to_features(
+            game,
+            self.color,
+            len(game.state.colors),
+            self.map_type,
+        ).reshape(1, -1)
+        game_tensor = torch.from_numpy(features.astype(np.float32, copy=False)).to(device)
+
+        with torch.inference_mode():
+            if model_type == "flat":
+                policy_logits = model(game_tensor)
+            elif model_type == "hierarchical":
+                action_type_logits, param_logits = model(game_tensor)
+                policy_logits = model.get_flat_action_logits(action_type_logits, param_logits)
+            else:
+                raise ValueError(f"Unsupported CatanRL model_type '{model_type}'.")
+            logits = policy_logits.squeeze(0).detach().cpu().numpy()
+
+        game_colors = tuple(game.state.colors)
+        playable_action_indices = [
+            to_action_space(action, len(game.state.colors), self.map_type, game_colors)
+            for action in playable_actions
+        ]
+        best_offset = int(np.argmax(logits[playable_action_indices]))
+        return playable_actions[best_offset]
+
+    def __repr__(self) -> str:
+        return f"CatanRLWebPolicyPlayer:{self.color.value}"
 
 
 @lru_cache(maxsize=8)
@@ -200,8 +258,17 @@ def _load_policy_model(
     else:
         raise ValueError(f"Unsupported CatanRL model_type '{model_type}'.")
 
+    device = _model_device()
     state_dict = torch.load(weights_path, map_location="cpu")
     model.load_state_dict(state_dict)
+    model.to(device)
     model.eval()
-    logging.info("Loaded CatanRL policy model from %s", weights_path)
-    return model, model_type
+    logging.info("Loaded CatanRL policy model from %s on %s", weights_path, device)
+    return model, model_type, device
+
+
+def _model_device() -> torch.device:
+    requested_device = os.environ.get("CATANRL_WEB_PLAYER_DEVICE")
+    if requested_device:
+        return torch.device(requested_device)
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
