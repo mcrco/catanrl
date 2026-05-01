@@ -321,21 +321,33 @@ def train(
         wandb.log({**fresh_log, **trend_log, **h2h_log}, step=global_step)
 
         if champion_available and champion_policy_path is not None:
-            h2h_metrics = eval_policy_against_champion(
-                policy_model=policy_model,
-                model_type=model_type,
-                map_type=map_type,
-                num_players=num_players,
-                champion_policy_path=champion_policy_path,
-                num_games=h2h_eval_games,
-                seed=h2h_eval_seed if h2h_eval_seed is not None else 0,
-                vps_to_win=vps_to_win,
-                discard_limit=discard_limit,
-                log_to_wandb=False,
-                global_step=global_step,
-            )
-            if h2h_metrics:
-                wandb.log(h2h_metrics, step=global_step)
+            h2h_metrics_all: Dict[str, float] = {}
+            base_h2h_seed = h2h_eval_seed if h2h_eval_seed is not None else 0
+            for seat_mode in ("first", "second", "random"):
+                h2h_metrics = eval_policy_against_champion(
+                    policy_model=policy_model,
+                    model_type=model_type,
+                    map_type=map_type,
+                    num_players=num_players,
+                    champion_policy_path=champion_policy_path,
+                    num_games=h2h_eval_games,
+                    seed=base_h2h_seed,
+                    vps_to_win=vps_to_win,
+                    discard_limit=discard_limit,
+                    log_to_wandb=False,
+                    global_step=global_step,
+                    num_envs=num_envs,
+                    device=device,
+                    nn_seat=seat_mode,
+                )
+                prefix = f"eval_h2h_{seat_mode}"
+                for key, value in h2h_metrics.items():
+                    suffix = key.split("/", 1)[1] if "/" in key else key
+                    h2h_metrics_all[f"{prefix}/{suffix}"] = value
+                h2h_metrics_all[f"{prefix}/seed"] = base_h2h_seed
+                h2h_metrics_all[f"{prefix}/games"] = float(h2h_eval_games)
+            if h2h_metrics_all:
+                wandb.log(h2h_metrics_all, step=global_step)
         elif h2h_eval_games > 0:
             print("  → Skipping H2H eval (no champion checkpoint available yet)")
 
