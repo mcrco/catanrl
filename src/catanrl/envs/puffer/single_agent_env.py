@@ -192,12 +192,16 @@ class SingleAgentCatanatronPufferEnv(PufferEnv):
     def _build_info(self) -> Dict[str, Any]:
         assert self.game is not None
         winning_color = self.game.winning_color()
+        is_terminal = winning_color is not None or self.game.state.num_turns >= TURNS_LIMIT
         info: Dict[str, Any] = {
             "valid_actions": self.get_valid_actions(),
             "nn_won": bool(winning_color == self.p0.color),
         }
         if self.expert_player is not None:
-            info["expert_action"] = self._get_expert_action()
+            valid_actions = info["valid_actions"]
+            info["expert_action"] = (
+                int(valid_actions[0]) if is_terminal else self._get_expert_action()
+            )
         return info
 
     def _get_observation(self) -> Dict[str, Any]:
