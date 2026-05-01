@@ -27,9 +27,7 @@ from ...envs.puffer.single_agent_env import (
     create_opponents,
     make_puffer_vectorized_envs,
 )
-from ...eval.training_eval import eval_policy_against_baselines
-from ...models import policy_value_to_policy_only
-from ...models.wrappers import PolicyValueNetworkWrapper
+from ...eval.training_eval import eval_policy_value_against_baselines
 from ...models.models import (
     build_flat_policy_network,
     build_flat_policy_value_network,
@@ -581,32 +579,38 @@ def train(
                         torch.save(critic_model.state_dict(), critic_snapshot_path)
 
                 if do_eval and ppo_update_count % eval_every_updates == 0:
-                    policy_only = (
-                        policy_value_to_policy_only(policy_model)
-                        if isinstance(policy_model, PolicyValueNetworkWrapper)
-                        else policy_model
-                    )
-                    fresh_eval_metrics = eval_policy_against_baselines(
-                        policy_model=policy_only,
+                    eval_value_model = critic_model if critic_model is not None else policy_model
+                    fresh_eval_metrics = eval_policy_value_against_baselines(
+                        policy_model=policy_model,
+                        critic_model=eval_value_model,
                         model_type=model_type,
                         map_type=map_type,
+                        eval_opponent_configs=opponent_configs,
                         num_games=eval_games_per_opponent,
+                        gamma=gamma,
                         seed=random.randint(0, sys.maxsize),
                         vps_to_win=vps_to_win,
                         discard_limit=discard_limit,
                         log_to_wandb=False,
                         global_step=global_step,
+                        device=str(device),
+                        num_envs=num_envs,
                     )
-                    trend_eval_metrics = eval_policy_against_baselines(
-                        policy_model=policy_only,
+                    trend_eval_metrics = eval_policy_value_against_baselines(
+                        policy_model=policy_model,
+                        critic_model=eval_value_model,
                         model_type=model_type,
                         map_type=map_type,
+                        eval_opponent_configs=opponent_configs,
                         num_games=trend_eval_games,
+                        gamma=gamma,
                         seed=trend_eval_seed if trend_eval_seed is not None else 0,
                         vps_to_win=vps_to_win,
                         discard_limit=discard_limit,
                         log_to_wandb=False,
                         global_step=global_step,
+                        device=str(device),
+                        num_envs=num_envs,
                     )
                     fresh_log = {}
                     for key, value in fresh_eval_metrics.items():
