@@ -30,7 +30,7 @@ from ...models.models import (
     build_value_network,
 )
 from ...models.wrappers import PolicyNetworkWrapper, ValueNetworkWrapper
-from ...features.catanatron_utils import get_actor_indices_from_critic
+from ...features.catanatron_utils import ActorObservationLevel, get_actor_indices_from_full
 from ...utils.catanatron_action_space import get_action_array, get_action_space_size
 from ...utils.seeding import derive_seed
 from .dataset import AggregatedDataset, EvictionStrategy
@@ -493,6 +493,7 @@ def train(
     expert_config: str = "AB:2",
     opponent_configs: Optional[Sequence[str]] = None,
     map_type: Literal["BASE", "MINI", "TOURNAMENT"] = "BASE",
+    actor_observation_level: ActorObservationLevel = "private",
     vps_to_win: int = 15,
     discard_limit: int = 9,
     beta_init: float = 1.0,
@@ -609,10 +610,18 @@ def train(
     action_space_size = num_actions or get_action_space_size(num_players, map_type)
     action_array = get_action_array(num_players, map_type)
     action_type_names = list(dict.fromkeys(action[0].name for action in action_array))
-    dims = compute_single_agent_dims(num_players, map_type)
+    dims = compute_single_agent_dims(
+        num_players,
+        map_type,
+        actor_observation_level=actor_observation_level,
+    )
     actor_dim = dims["actor_dim"]
     critic_dim = dims["critic_dim"]
-    actor_indices = get_actor_indices_from_critic(num_players, map_type)
+    actor_indices = get_actor_indices_from_full(
+        num_players,
+        map_type,
+        level=actor_observation_level,
+    )
     numeric_dim = dims["numeric_dim"]
     full_numeric_dim = dims["full_numeric_dim"]
     board_channels = dims["board_channels"]
@@ -627,7 +636,10 @@ def train(
     print(f"Device: {device}")
     print(f"Map type: {map_type} | Players: {num_players}")
     print(f"Game params: vps_to_win={vps_to_win}, discard_limit={discard_limit}")
-    print(f"Backbone: {backbone_type} | Model type: {model_type}")
+    print(
+        f"Backbone: {backbone_type} | Model type: {model_type} | "
+        f"Actor observation: {actor_observation_level}"
+    )
     print(f"Actor input dim: {actor_dim} | Critic input dim: {critic_dim}")
     if backbone_type in ("xdim", "xdim_res"):
         print(
@@ -711,6 +723,7 @@ def train(
         vps_to_win=vps_to_win,
         discard_limit=discard_limit,
         expert_config=expert_config,
+        actor_observation_level=actor_observation_level,
     )
 
     if max_dataset_size is None:
@@ -720,6 +733,7 @@ def train(
         critic_dim=critic_dim,
         num_players=num_players,
         map_type=map_type,
+        actor_observation_level=actor_observation_level,
         max_size=max_dataset_size,
         eviction_strategy=eviction_strategy,
     )
@@ -817,6 +831,7 @@ def train(
                             seed=random.randint(0, sys.maxsize),
                             vps_to_win=vps_to_win,
                             discard_limit=discard_limit,
+                            actor_observation_level=actor_observation_level,
                             log_to_wandb=False,
                             global_step=global_step,
                             device=device,

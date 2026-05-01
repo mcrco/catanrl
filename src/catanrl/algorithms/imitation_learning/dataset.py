@@ -12,7 +12,7 @@ import numpy.typing as npt
 import torch
 from torch.utils.data import Dataset
 
-from catanrl.features.catanatron_utils import get_actor_indices_from_critic
+from catanrl.features.catanatron_utils import ActorObservationLevel, get_actor_indices_from_full
 from catanrl.utils.catanatron_action_space import get_action_array, get_action_space_size
 
 
@@ -31,12 +31,14 @@ class AggregatedDataset(Dataset):
         critic_dim: int,
         num_players: int,
         map_type: Literal["BASE", "MINI", "TOURNAMENT"],
+        actor_observation_level: ActorObservationLevel = "private",
         max_size: int = 100_000_000,
         eviction_strategy: EvictionStrategy = EvictionStrategy.RANDOM,
     ):
         self.critic_dim = critic_dim
         self.num_players = num_players
         self.map_type = map_type
+        self.actor_observation_level = actor_observation_level
         self.max_size = max_size
         self.capacity = max_size
         self.eviction_strategy = eviction_strategy
@@ -44,7 +46,11 @@ class AggregatedDataset(Dataset):
 
         # Actor state is subset of critic state; these indices convert critic -> actor
         # so we don't double store overlapping board state.
-        self.actor_indices = get_actor_indices_from_critic(num_players, map_type)
+        self.actor_indices = get_actor_indices_from_full(
+            num_players,
+            map_type,
+            level=actor_observation_level,
+        )
 
         # Preallocate full capacity.
         self.critic_states: npt.NDArray[np.float32] = np.zeros(

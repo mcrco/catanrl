@@ -12,6 +12,16 @@ def main():
     parser.add_argument("--num-players", type=int, default=2, choices=[2, 3, 4])
     parser.add_argument("--map-type", type=str, default="BASE", choices=["BASE", "MINI"])
     parser.add_argument(
+        "--actor-observation-level",
+        type=str,
+        choices=["private", "public", "full"],
+        default="private",
+        help=(
+            "Actor information level: private (current behavior), public "
+            "(1v1 opponent resources), or full/privileged (default: private)"
+        ),
+    )
+    parser.add_argument(
         "--model-type",
         type=str,
         choices=["flat", "hierarchical"],
@@ -212,6 +222,7 @@ def main():
         "critic_hidden_dims": critic_hidden_dims,
         "num_players": args.num_players,
         "map_type": args.map_type,
+        "actor_observation_level": args.actor_observation_level,
         "model_type": args.model_type,
         "backbone_type": args.backbone_type,
         "xdim_cnn_channels": xdim_cnn_channels,
@@ -244,6 +255,7 @@ def main():
     train(
         num_players=args.num_players,
         map_type=args.map_type,
+        actor_observation_level=args.actor_observation_level,
         model_type=args.model_type,
         backbone_type=args.backbone_type,
         xdim_cnn_channels=xdim_cnn_channels,

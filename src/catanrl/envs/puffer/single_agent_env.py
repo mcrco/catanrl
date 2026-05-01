@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Any, Callable, Dict, List, Literal, Optional
 
 import numpy as np
-import pufferlib
 import pufferlib.vector as puffer_vector
 from gymnasium import spaces
 from pufferlib.emulation import emulate, emulate_action_space, emulate_observation_space, nativize
@@ -25,7 +24,11 @@ from catanrl.envs.puffer.common import (
     create_opponents,
     normalize_reset_seed,
 )
-from catanrl.features.catanatron_utils import full_game_to_features, game_to_features
+from catanrl.features.catanatron_utils import (
+    ActorObservationLevel,
+    full_game_to_features,
+    get_actor_indices_from_full,
+)
 from catanrl.utils.catanatron_action_space import (
     from_action_space,
     get_action_space_size,
@@ -60,6 +63,9 @@ class SingleAgentCatanatronPufferEnv(PufferEnv):
         self.shared_critic = bool(self.config.get("shared_critic", True))
         if not self.shared_critic:
             raise ValueError("SingleAgentCatanatronPufferEnv requires shared_critic=True")
+        self.actor_observation_level: ActorObservationLevel = self.config.get(
+            "actor_observation_level", "private"
+        )
 
         self.reward_function = _resolve_reward_function(self.config.get("reward_function"))
         self.expert_player: Player | None = self.config.get("expert_player")
@@ -70,12 +76,22 @@ class SingleAgentCatanatronPufferEnv(PufferEnv):
         self.num_players = len(self.players)
         self.action_space_size = get_action_space_size(self.num_players, self.map_type)
 
-        dims = compute_single_agent_dims(self.num_players, self.map_type)
+        dims = compute_single_agent_dims(
+            self.num_players,
+            self.map_type,
+            actor_observation_level=self.actor_observation_level,
+        )
         self.numeric_dim = dims["numeric_dim"]
         self.full_numeric_dim = dims["full_numeric_dim"]
         self.board_channels = dims["board_channels"]
         self.board_tensor_shape = (self.board_channels, BOARD_WIDTH, BOARD_HEIGHT)
         self.critic_vector_dim = dims["critic_dim"]
+        self.actor_indices = get_actor_indices_from_full(
+            self.num_players,
+            self.map_type,
+            level=self.actor_observation_level,
+        )
+        self.actor_numeric_indices = self.actor_indices[: self.numeric_dim]
 
         self.env_single_observation_space = build_shared_critic_observation_space(
             numeric_dim=self.numeric_dim,
@@ -136,8 +152,13 @@ class SingleAgentCatanatronPufferEnv(PufferEnv):
 
     def _actor_observation(self) -> Dict[str, np.ndarray]:
         assert self.game is not None
-        vector = game_to_features(self.game, self.p0.color, self.num_players, self.map_type)
-        numeric = vector[: self.numeric_dim]
+        full_vector = full_game_to_features(
+            self.game,
+            self.num_players,
+            self.map_type,
+            base_color=self.p0.color,
+        )
+        numeric = full_vector[self.actor_numeric_indices]
         board = create_board_tensor(self.game, self.p0.color, channels_first=True).astype(
             np.float32,
             copy=False,
@@ -285,6 +306,7 @@ def _make_puffer_env(
     vps_to_win: int = 15,
     discard_limit: int = 9,
     expert_config: str | None = None,
+    actor_observation_level: ActorObservationLevel = "private",
 ) -> Callable[..., SingleAgentCatanatronPufferEnv]:
     def _config() -> Dict[str, Any]:
         expert_player = create_expert(expert_config) if expert_config else None
@@ -296,6 +318,7 @@ def _make_puffer_env(
             "reward_function": _resolve_reward_function(reward_function),
             "shared_critic": True,
             "expert_player": expert_player,
+            "actor_observation_level": actor_observation_level,
         }
 
     return lambda **kwargs: SingleAgentCatanatronPufferEnv(config=_config(), **kwargs)
@@ -309,6 +332,7 @@ def make_puffer_vectorized_envs(
     vps_to_win: int = 15,
     discard_limit: int = 9,
     expert_config: str | None = None,
+    actor_observation_level: ActorObservationLevel = "private",
 ):
     return puffer_vector.make(
         _make_puffer_env(
@@ -318,6 +342,7 @@ def make_puffer_vectorized_envs(
             vps_to_win,
             discard_limit,
             expert_config,
+            actor_observation_level,
         ),
         num_envs=num_envs,
         backend=puffer_vector.Multiprocessing,

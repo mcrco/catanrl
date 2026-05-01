@@ -16,9 +16,9 @@ from catanatron.players.value import ValueFunctionPlayer
 from catanatron.players.weighted_random import WeightedRandomPlayer
 
 from catanrl.features.catanatron_utils import (
-    compute_feature_vector_dim,
+    ActorObservationLevel,
+    get_actor_numeric_feature_names,
     get_full_numeric_feature_names,
-    get_numeric_feature_names,
 )
 from catanrl.utils.catanatron_action_space import PLAYER_COLOR_ORDER
 
@@ -176,8 +176,14 @@ def build_shared_critic_observation_space(
     )
 
 
-def compute_single_agent_dims(num_players: int, map_type: MapType) -> Dict[str, int]:
-    numeric_dim = len(get_numeric_feature_names(num_players, map_type))
+def compute_single_agent_dims(
+    num_players: int,
+    map_type: MapType,
+    actor_observation_level: ActorObservationLevel = "private",
+) -> Dict[str, int]:
+    numeric_dim = len(
+        get_actor_numeric_feature_names(num_players, map_type, actor_observation_level)
+    )
     full_numeric_dim = len(get_full_numeric_feature_names(num_players, map_type))
     board_channels = get_channels(num_players)
     board_flat_dim = board_channels * BOARD_WIDTH * BOARD_HEIGHT
@@ -196,8 +202,15 @@ def compute_single_agent_dims(num_players: int, map_type: MapType) -> Dict[str, 
 def compute_multiagent_input_dim(
     num_players: int,
     map_type: MapType,
+    actor_observation_level: ActorObservationLevel = "private",
 ) -> Tuple[int, tuple[int, int, int], int]:
-    numeric_dim = len(get_numeric_feature_names(num_players, map_type))
-    vector_dim = compute_feature_vector_dim(num_players, map_type)
+    numeric_dim = len(
+        get_actor_numeric_feature_names(num_players, map_type, actor_observation_level)
+    )
+    vector_dim = numeric_dim + _board_flat_dim(num_players)
     board_shape = (get_channels(num_players), BOARD_WIDTH, BOARD_HEIGHT)
     return vector_dim, board_shape, numeric_dim
+
+
+def _board_flat_dim(num_players: int) -> int:
+    return get_channels(num_players) * BOARD_WIDTH * BOARD_HEIGHT

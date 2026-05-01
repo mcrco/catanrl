@@ -224,6 +224,69 @@ def test_vectorized_native_puffer_envs_decode_batches():
         multi_envs.close()
 
 
+def test_actor_observation_level_shapes_match_computed_dims():
+    for level in ("private", "public", "full"):
+        single_env = SingleAgentCatanatronPufferEnv(
+            config={
+                "map_type": "BASE",
+                "vps_to_win": 10,
+                "discard_limit": 7,
+                "enemies": create_opponents(["F"]),
+                "reward_function": WinReward(),
+                "shared_critic": True,
+                "expert_player": create_expert("F"),
+                "actor_observation_level": level,
+            }
+        )
+        multi_env = ParallelCatanatronPufferEnv(
+            config=MultiAgentCatanatronEnvConfig(
+                num_players=2,
+                map_type="BASE",
+                vps_to_win=10,
+                discard_limit=7,
+                shared_critic=True,
+                reward_function="win",
+                actor_observation_level=level,
+            )
+        )
+        try:
+            single_obs, _ = single_env.reset(seed=101)
+            single_dims = compute_single_agent_dims(2, "BASE", actor_observation_level=level)
+            single_actor, single_critic, _ = decode_puffer_batch(
+                flat_obs=single_obs,
+                obs_space=single_env.env_single_observation_space,
+                obs_dtype=single_env.obs_dtype,
+                actor_dim=single_dims["actor_dim"],
+                critic_dim=single_dims["critic_dim"],
+            )
+            assert single_actor.shape == (1, single_dims["actor_dim"])
+            assert single_critic is not None
+            assert single_critic.shape == (1, single_dims["critic_dim"])
+
+            multi_obs, _ = multi_env.reset(seed=202)
+            actor_dim, board_shape, numeric_dim = compute_multiagent_input_dim(
+                2,
+                "BASE",
+                actor_observation_level=level,
+            )
+            assert board_shape is not None
+            critic_dim = len(get_full_numeric_feature_names(2, "BASE")) + int(np.prod(board_shape))
+            multi_actor, multi_critic, _ = decode_puffer_batch(
+                flat_obs=multi_obs,
+                obs_space=multi_env.env_single_observation_space,
+                obs_dtype=multi_env.obs_dtype,
+                actor_dim=actor_dim,
+                critic_dim=critic_dim,
+            )
+            assert multi_actor.shape == (2, actor_dim)
+            assert multi_critic is not None
+            assert multi_critic.shape == (2, critic_dim)
+            assert numeric_dim > 0
+        finally:
+            single_env.close()
+            multi_env.close()
+
+
 def test_single_agent_step_ignores_stale_action_after_done():
     env = SingleAgentCatanatronPufferEnv(
         config={

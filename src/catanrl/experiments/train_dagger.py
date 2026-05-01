@@ -202,6 +202,16 @@ def main():
         help="Board template to use (default: BASE)",
     )
     parser.add_argument(
+        "--actor-observation-level",
+        type=str,
+        choices=["private", "public", "full"],
+        default="private",
+        help=(
+            "Actor information level: private (current behavior), public "
+            "(1v1 opponent resources), or full/privileged (default: private)"
+        ),
+    )
+    parser.add_argument(
         "--num-envs",
         type=int,
         default=4,
@@ -360,6 +370,7 @@ def main():
                 "expert": args.expert,
                 "opponents": args.opponents,
                 "map_type": args.map_type,
+                "actor_observation_level": args.actor_observation_level,
                 "num_envs": args.num_envs,
                 "vps_to_win": args.vps_to_win,
                 "discard_limit": args.discard_limit,
@@ -399,6 +410,7 @@ def main():
         expert_config=args.expert,
         opponent_configs=args.opponents,
         map_type=args.map_type,
+        actor_observation_level=args.actor_observation_level,
         vps_to_win=args.vps_to_win,
         discard_limit=args.discard_limit,
         beta_init=args.beta_init,

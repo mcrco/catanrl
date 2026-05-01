@@ -20,6 +20,7 @@ from ..envs import (
 )
 from ..envs.puffer.multi_agent_env import make_vectorized_envs as make_marl_vectorized_envs
 from ..envs.puffer.single_agent_env import compute_single_agent_dims, make_puffer_vectorized_envs
+from ..features.catanatron_utils import ActorObservationLevel
 from ..models.wrappers import PolicyNetworkWrapper, PolicyValueNetworkWrapper, ValueNetworkWrapper
 from ..utils.seeding import derive_seed
 
@@ -169,6 +170,7 @@ def run_policy_value_eval_vectorized(
     deterministic: bool = True,
     compare_to_expert: bool = False,
     expert_config: Optional[str] = None,
+    actor_observation_level: ActorObservationLevel = "private",
     seed: Optional[int] = None,
     progress_callback: Optional[Callable[[int], None]] = None,
 ) -> Tuple[int, List[int], List[float], List[float], List[int], List[int]]:
@@ -197,7 +199,11 @@ def run_policy_value_eval_vectorized(
         return (0, [], [], [], [], [])
 
     num_players = len(opponent_configs) + 1
-    dims = compute_single_agent_dims(num_players, map_type)
+    dims = compute_single_agent_dims(
+        num_players,
+        map_type,
+        actor_observation_level=actor_observation_level,
+    )
     actor_dim = dims["actor_dim"]
     critic_dim = dims["critic_dim"]
 
@@ -213,6 +219,7 @@ def run_policy_value_eval_vectorized(
         vps_to_win=vps_to_win,
         discard_limit=discard_limit,
         expert_config=expert_config if compare_to_expert else None,
+        actor_observation_level=actor_observation_level,
     )
 
     driver_env = envs.driver_env
@@ -421,6 +428,7 @@ def run_policy_h2h_eval_vectorized(
     discard_limit: int = 9,
     deterministic: bool = True,
     nn_seat: SeatOption = "first",
+    actor_observation_level: ActorObservationLevel = "private",
     seed: Optional[int] = None,
     progress_callback: Optional[Callable[[int], None]] = None,
 ) -> Tuple[int, List[int]]:
@@ -451,6 +459,7 @@ def run_policy_h2h_eval_vectorized(
         shared_critic=False,
         reward_function="win",
         num_envs=num_envs,
+        actor_observation_level=actor_observation_level,
     )
 
     driver_env = envs.driver_env

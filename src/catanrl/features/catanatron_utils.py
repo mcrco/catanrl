@@ -17,6 +17,16 @@ COLOR_ORDER: Tuple[Color, ...] = (
     Color.ORANGE,
     Color.WHITE,
 )
+ActorObservationLevel = Literal["private", "public", "full"]
+RESOURCE_IN_HAND_SUFFIXES = frozenset(
+    {
+        "BRICK_IN_HAND",
+        "ORE_IN_HAND",
+        "SHEEP_IN_HAND",
+        "WHEAT_IN_HAND",
+        "WOOD_IN_HAND",
+    }
+)
 
 
 def _build_dummy_game(
@@ -87,6 +97,46 @@ def get_full_numeric_feature_names(
     return tuple(base_names)
 
 
+def _validate_actor_observation_level(level: ActorObservationLevel) -> None:
+    if level not in ("private", "public", "full"):
+        raise ValueError(
+            f"Unknown actor_observation_level '{level}'. "
+            "Expected one of: private, public, full."
+        )
+
+
+@lru_cache(maxsize=None)
+def get_actor_numeric_feature_names(
+    num_players: int,
+    map_type: Literal["BASE", "MINI", "TOURNAMENT"],
+    level: ActorObservationLevel = "private",
+) -> Tuple[str, ...]:
+    """Return actor numeric feature names for the selected information level.
+
+    Ordering always follows the full privileged numeric vector so these names can
+    be used to index directly into `full_game_to_features`.
+    """
+    _validate_actor_observation_level(level)
+    if level == "private":
+        return get_numeric_feature_names(num_players, map_type)
+    if level == "full":
+        return get_full_numeric_feature_names(num_players, map_type)
+
+    if num_players != 2:
+        raise ValueError("actor_observation_level='public' is currently supported only for 1v1.")
+
+    private_names = set(get_numeric_feature_names(num_players, map_type))
+    public_opponent_resource_names = {
+        f"P1_{suffix}"
+        for suffix in _private_feature_suffixes(num_players, map_type)
+        if suffix in RESOURCE_IN_HAND_SUFFIXES
+    }
+    selected = private_names | public_opponent_resource_names
+    return tuple(
+        name for name in get_full_numeric_feature_names(num_players, map_type) if name in selected
+    )
+
+
 def compute_feature_vector_dim(
     num_players: int, map_type: Literal["BASE", "MINI", "TOURNAMENT"]
 ) -> int:
@@ -95,26 +145,44 @@ def compute_feature_vector_dim(
     return numeric_len + _board_tensor_size(num_players, map_type)
 
 
+def compute_actor_feature_vector_dim(
+    num_players: int,
+    map_type: Literal["BASE", "MINI", "TOURNAMENT"],
+    level: ActorObservationLevel = "private",
+) -> int:
+    """Return flattened actor feature length for the selected observation level."""
+    numeric_len = len(get_actor_numeric_feature_names(num_players, map_type, level))
+    return numeric_len + _board_tensor_size(num_players, map_type)
+
+
+def get_actor_indices_from_full(
+    num_players: int,
+    map_type: Literal["BASE", "MINI", "TOURNAMENT"],
+    level: ActorObservationLevel = "private",
+) -> np.ndarray:
+    """Return indices into the full feature vector that yield actor features.
+
+    Both actor and full observations use [numeric, board]. Numeric features are
+    selected by name for the requested level; the board tail is always preserved.
+    """
+    full_names = get_full_numeric_feature_names(num_players, map_type)
+    full_name_to_index = {name: idx for idx, name in enumerate(full_names)}
+    actor_numeric_names = get_actor_numeric_feature_names(num_players, map_type, level)
+    full_numeric_dim = len(get_full_numeric_feature_names(num_players, map_type))
+    board_dim = _board_tensor_size(num_players, map_type)
+
+    numeric_indices = np.array(
+        [full_name_to_index[name] for name in actor_numeric_names], dtype=np.int64
+    )
+    board_indices = np.arange(full_numeric_dim, full_numeric_dim + board_dim)
+    return np.concatenate([numeric_indices, board_indices])
+
+
 def get_actor_indices_from_critic(
     num_players: int, map_type: Literal["BASE", "MINI", "TOURNAMENT"]
 ) -> np.ndarray:
-    """Return indices into critic feature vector that yield actor feature vector.
-    
-    The actor observation is [numeric, board] and the critic observation is
-    [full_numeric, board]. Since numeric is a prefix of full_numeric and the
-    board is identical, actor can be extracted from critic as:
-        actor = critic[indices]
-    where indices = [0..numeric_dim-1, full_numeric_dim..end]
-    
-    This allows storing only critic observations and deriving actor on demand.
-    """
-    numeric_dim = len(get_numeric_feature_names(num_players, map_type))
-    full_numeric_dim = len(get_full_numeric_feature_names(num_players, map_type))
-    board_dim = _board_tensor_size(num_players, map_type)
-    
-    numeric_indices = np.arange(numeric_dim)
-    board_indices = np.arange(full_numeric_dim, full_numeric_dim + board_dim)
-    return np.concatenate([numeric_indices, board_indices])
+    """Return private actor indices from the full critic feature vector."""
+    return get_actor_indices_from_full(num_players, map_type, level="private")
 
 
 def _augment_with_private_features(

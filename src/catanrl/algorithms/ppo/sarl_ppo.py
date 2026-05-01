@@ -28,6 +28,7 @@ from ...envs.puffer.single_agent_env import (
     make_puffer_vectorized_envs,
 )
 from ...eval.training_eval import eval_policy_value_against_baselines
+from ...features.catanatron_utils import ActorObservationLevel
 from ...models.models import (
     build_flat_policy_network,
     build_flat_policy_value_network,
@@ -74,6 +75,7 @@ def train(
     device: str | torch.device = "cuda" if torch.cuda.is_available() else "cpu",
     wandb_config: dict | None = None,
     map_type: Literal["BASE", "TOURNAMENT", "MINI"] = "BASE",
+    actor_observation_level: ActorObservationLevel = "private",
     vps_to_win: int = 15,
     discard_limit: int = 9,
     opponent_configs: List[str] | None = None,
@@ -116,7 +118,11 @@ def train(
     num_players = len(opponents) + 1  # add the learning agent
     action_space_size = num_actions or get_action_space_size(num_players, map_type)
     _, action_to_type_idx, action_type_names = build_action_type_metadata(num_players, map_type)
-    dims = compute_single_agent_dims(num_players, map_type)
+    dims = compute_single_agent_dims(
+        num_players,
+        map_type,
+        actor_observation_level=actor_observation_level,
+    )
     actor_input_dim = dims["actor_dim"]
     critic_input_dim = dims["critic_dim"]
     numeric_dim = dims["numeric_dim"]
@@ -130,7 +136,10 @@ def train(
 
     print(f"Number of players: {num_players}")
     print(f"Opponents: {[repr(o) for o in opponents]}")
-    print(f"Backbone: {backbone_type} | Model type: {model_type} | Critic mode: {critic_mode}")
+    print(
+        f"Backbone: {backbone_type} | Model type: {model_type} | "
+        f"Critic mode: {critic_mode} | Actor observation: {actor_observation_level}"
+    )
 
     if wandb.run is None:
         if wandb_config:
@@ -336,6 +345,7 @@ def train(
         num_envs=num_envs,
         vps_to_win=vps_to_win,
         discard_limit=discard_limit,
+        actor_observation_level=actor_observation_level,
     )
     driver_env = envs.driver_env
     if hasattr(driver_env, "env_single_observation_space"):
@@ -608,6 +618,7 @@ def train(
                         seed=random.randint(0, sys.maxsize),
                         vps_to_win=vps_to_win,
                         discard_limit=discard_limit,
+                        actor_observation_level=actor_observation_level,
                         log_to_wandb=False,
                         global_step=global_step,
                         device=str(device),
@@ -624,6 +635,7 @@ def train(
                         seed=trend_eval_seed if trend_eval_seed is not None else 0,
                         vps_to_win=vps_to_win,
                         discard_limit=discard_limit,
+                        actor_observation_level=actor_observation_level,
                         log_to_wandb=False,
                         global_step=global_step,
                         device=str(device),
