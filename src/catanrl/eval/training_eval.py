@@ -19,11 +19,11 @@ from catanatron.players.value import ValueFunctionPlayer
 from sklearn.metrics import f1_score
 
 from ..features.catanatron_utils import COLOR_ORDER
-from ..models.wrappers import PolicyNetworkWrapper, ValueNetworkWrapper
+from ..models.wrappers import PolicyNetworkWrapper, PolicyValueNetworkWrapper, ValueNetworkWrapper
 from ..players.nn_policy_player import NNPolicyPlayer
 from ..utils.seeding import derive_seed
 from .eval_nn_vs_catanatron import eval
-from .vectorized_rollout import run_policy_value_eval_vectorized
+from .vectorized_rollout import SeatOption, run_policy_h2h_eval_vectorized, run_policy_value_eval_vectorized
 
 
 def eval_policy_against_baselines(
@@ -109,6 +109,9 @@ def eval_policy_against_champion(
     discard_limit: int = 9,
     log_to_wandb: bool = True,
     global_step: Optional[int] = None,
+    num_envs: int = 1,
+    device: Optional[str] = None,
+    nn_seat: SeatOption = "random",
 ) -> Dict[str, float]:
     """Evaluate the current policy against a frozen champion checkpoint."""
     metrics: Dict[str, float] = {}
@@ -117,80 +120,36 @@ def eval_policy_against_champion(
     if num_players < 2:
         raise ValueError("Champion eval requires at least 2 players.")
 
-    device = next(policy_model.parameters()).device
-    champion_model = copy.deepcopy(policy_model).to(device)
-    champion_state = torch.load(champion_policy_path, map_location=device)
+    torch_device = torch.device(device) if device is not None else next(policy_model.parameters()).device
+    champion_model = copy.deepcopy(policy_model).to(torch_device)
+    champion_state = torch.load(champion_policy_path, map_location=torch_device)
     champion_model.load_state_dict(champion_state)
     champion_model.eval()
     policy_model.eval()
 
-    current_player = NNPolicyPlayer(
-        COLOR_ORDER[0],
+    wins, turns = run_policy_h2h_eval_vectorized(
+        policy_model=policy_model,
+        champion_model=champion_model,
         model_type=model_type,
-        model=policy_model,
         map_type=map_type,
+        num_players=num_players,
+        num_envs=num_envs,
+        num_games=num_games,
+        device=str(torch_device),
+        vps_to_win=vps_to_win,
+        discard_limit=discard_limit,
+        nn_seat=nn_seat,
+        seed=seed,
     )
-    champion_opponents = [
-        NNPolicyPlayer(
-            COLOR_ORDER[player_idx],
-            model_type=model_type,
-            model=champion_model,
-            map_type=map_type,
-        )
-        for player_idx in range(1, num_players)
-    ]
 
-    games_as_first = (num_games + 1) // 2
-    games_as_second = num_games // 2
-
-    total_wins = 0
-    all_vps: list[float] = []
-    all_total_vps: list[float] = []
-    all_turns: list[float] = []
-
-    if games_as_first > 0:
-        wins, vps, total_vps, turns = eval(
-            current_player,
-            champion_opponents,
-            map_type=map_type,
-            num_games=games_as_first,
-            seed=derive_seed(seed, "h2h", "first"),
-            vps_to_win=vps_to_win,
-            discard_limit=discard_limit,
-            nn_seat="first",
-        )
-        total_wins += wins
-        all_vps.extend(vps)
-        all_total_vps.extend(total_vps)
-        all_turns.extend(turns)
-
-    if games_as_second > 0:
-        wins, vps, total_vps, turns = eval(
-            current_player,
-            champion_opponents,
-            map_type=map_type,
-            num_games=games_as_second,
-            seed=derive_seed(seed, "h2h", "second"),
-            vps_to_win=vps_to_win,
-            discard_limit=discard_limit,
-            nn_seat="second",
-        )
-        total_wins += wins
-        all_vps.extend(vps)
-        all_total_vps.extend(total_vps)
-        all_turns.extend(turns)
-
-    total_games = games_as_first + games_as_second
-    metrics["eval_h2h/win_rate_vs_champion"] = total_wins / total_games if total_games else 0.0
-    metrics["eval_h2h/avg_vps_vs_champion"] = sum(all_vps) / len(all_vps) if all_vps else 0.0
-    metrics["eval_h2h/avg_total_vps_vs_champion"] = (
-        sum(all_total_vps) / len(all_total_vps) if all_total_vps else 0.0
-    )
+    metrics["eval_h2h/win_rate_vs_champion"] = wins / num_games if num_games else 0.0
     metrics["eval_h2h/avg_turns_vs_champion"] = (
-        sum(all_turns) / len(all_turns) if all_turns else 0.0
+        sum(turns) / len(turns) if turns else 0.0
     )
-    metrics["eval_h2h/games_as_first"] = float(games_as_first)
-    metrics["eval_h2h/games_as_second"] = float(games_as_second)
+    metrics["eval_h2h/games"] = float(num_games)
+    metrics["eval_h2h/seat_first"] = float(nn_seat == "first")
+    metrics["eval_h2h/seat_second"] = float(nn_seat == "second")
+    metrics["eval_h2h/seat_random"] = float(nn_seat == "random")
 
     if log_to_wandb and global_step is not None:
         wandb.log(metrics, step=global_step)
@@ -199,8 +158,8 @@ def eval_policy_against_champion(
 
 
 def eval_policy_value_against_baselines(
-    policy_model: PolicyNetworkWrapper,
-    critic_model: ValueNetworkWrapper,
+    policy_model: PolicyNetworkWrapper | PolicyValueNetworkWrapper,
+    critic_model: ValueNetworkWrapper | PolicyValueNetworkWrapper,
     model_type: str,
     map_type: Literal["BASE", "TOURNAMENT", "MINI"],
     num_envs: int,
