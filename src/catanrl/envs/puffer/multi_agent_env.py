@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
+from typing import Any, Callable, Dict, List, Literal, Optional
 
 import numpy as np
-import pufferlib
 import pufferlib.vector as puffer_vector
 from gymnasium import spaces
 from pufferlib.emulation import emulate, emulate_action_space, emulate_observation_space, nativize
@@ -28,7 +27,6 @@ from catanrl.envs.zoo.rewards import ShapedReward, WinReward
 from catanrl.features.catanatron_utils import (
     full_game_to_features,
     get_full_numeric_feature_names,
-    get_numeric_feature_names,
     game_to_features,
 )
 from catanrl.utils.catanatron_action_space import (
@@ -190,6 +188,20 @@ class ParallelCatanatronPufferEnv(PufferEnv):
             )
         return info
 
+    def _winner_info(self) -> Dict[str, Any]:
+        assert self.game is not None
+        winning_color = self.game.winning_color()
+        winner_agent = self.color_to_agent_name.get(winning_color) if winning_color else None
+        winner_agent_index = (
+            self.possible_agents.index(winner_agent) if winner_agent in self.possible_agents else -1
+        )
+        return {
+            "winning_color": winning_color.value if winning_color is not None else None,
+            "winner_agent": winner_agent,
+            "winner_agent_index": winner_agent_index,
+            "player_0_won": winner_agent == "player_0",
+        }
+
     def reset(self, seed=None):
         seed = normalize_reset_seed(seed)
         episode_seed = self._next_episode_seed(seed)
@@ -289,7 +301,9 @@ class ParallelCatanatronPufferEnv(PufferEnv):
         truncateds = {agent: False for agent in self.agents}
 
         winning_color = self.game.winning_color()
+        terminal_winner_info: Dict[str, Any] = {}
         if winning_color is not None:
+            terminal_winner_info = self._winner_info()
             for agent in self.agents:
                 dones[agent] = True
             self.agents = []
@@ -328,7 +342,10 @@ class ParallelCatanatronPufferEnv(PufferEnv):
         self._all_done = all(dones.values()) or all(truncateds.values())
         info_list: List[Dict[str, Any]] = []
         for agent in self.possible_agents:
-            info_list.append(infos.get(agent, {}))
+            info = infos.get(agent, {})
+            if terminal_winner_info:
+                info = {**info, **terminal_winner_info}
+            info_list.append(info)
         return self.observations, self.rewards, self.terminals, self.truncations, info_list
 
     def close(self):
