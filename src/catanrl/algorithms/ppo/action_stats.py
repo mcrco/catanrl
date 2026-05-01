@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from typing import Dict, Sequence, Tuple
+from typing import Any, Dict, Sequence, Tuple
 
 import numpy as np
 from catanatron.gym.envs.action_space import ACTION_TYPES
+import wandb
 
 
 def compute_action_distributions(
@@ -63,4 +64,23 @@ def build_raw_policy_log_dict(
     return raw_policy_log
 
 
-__all__ = ["build_raw_policy_log_dict", "compute_action_distributions"]
+def build_action_type_time_series_chart(
+    title: str,
+    x_values: Sequence[int],
+    history_by_type: Dict[str, list[float]],
+) -> Any:
+    """Build a W&B line chart for action-type ratios over training time."""
+    return wandb.plot.line_series(
+        xs=list(x_values),
+        ys=[history_by_type[name] for name in history_by_type],
+        keys=list(history_by_type.keys()),
+        title=title,
+        xname="global_step",
+    )
+
+
+__all__ = [
+    "build_action_type_time_series_chart",
+    "build_raw_policy_log_dict",
+    "compute_action_distributions",
+]

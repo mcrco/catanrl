@@ -82,6 +82,7 @@ class DAggerRolloutBatch:
 
     critic_states: np.ndarray
     expert_actions: np.ndarray
+    played_actions: np.ndarray
     action_masks: np.ndarray
 
 
@@ -185,6 +186,7 @@ def _collect_dagger_rollouts_vectorized(
     # Preallocated buffers for the full collection phase (time x env)
     critic_states_tmj = np.zeros((num_steps, num_envs, critic_dim), dtype=np.float32)
     expert_actions_tmj = np.zeros((num_steps, num_envs), dtype=np.int64)
+    played_actions_tmj = np.zeros((num_steps, num_envs), dtype=np.int64)
     rewards_tmj = np.zeros((num_steps, num_envs), dtype=np.float32)
     is_single_action_tmj = np.zeros((num_steps, num_envs), dtype=np.bool_)
     action_masks_tmj = np.zeros((num_steps, num_envs, action_space_size), dtype=np.bool_)
@@ -252,6 +254,7 @@ def _collect_dagger_rollouts_vectorized(
         # Store experience in time-major buffers
         critic_states_tmj[step_idx] = critic_batch
         expert_actions_tmj[step_idx] = expert_actions
+        played_actions_tmj[step_idx] = actions_to_play
         is_single_action_tmj[step_idx] = is_single_action_batch
         action_masks_tmj[step_idx] = action_masks
 
@@ -323,6 +326,7 @@ def _collect_dagger_rollouts_vectorized(
     rollout = DAggerRolloutBatch(
         critic_states=critic_states_tmj.reshape(-1, critic_dim),
         expert_actions=expert_actions_tmj.reshape(-1),
+        played_actions=played_actions_tmj.reshape(-1),
         action_masks=action_masks_tmj.reshape(-1, action_space_size),
     )
     return stats, rollout
@@ -725,8 +729,8 @@ def train(
     best_eval_critic_mse = float("inf")
     total_steps = n_iterations * num_envs * steps_per_iteration
     global_step = 0
-    policy_pred_action_type_steps: List[int] = []
-    policy_pred_action_type_history: Dict[str, List[float]] = {
+    played_action_type_steps: List[int] = []
+    played_action_type_history: Dict[str, List[float]] = {
         name: [] for name in action_type_names
     }
 
@@ -881,17 +885,21 @@ def train(
                         "dagger/expert_action_type", expert_action_type_counts
                     )
                 )
-                policy_pred_action_type_steps.append(global_step)
-                normalized_pred_action_type_counts = _normalize_action_type_counts(
-                    action_type_names, train_stats["pred_action_type_counts"]
+                played_action_type_counts: Counter[str] = Counter()
+                for played_action in rollout_batch.played_actions.tolist():
+                    played_action_type_counts[action_array[int(played_action)][0].name] += 1
+                normalized_played_action_type_counts = _normalize_action_type_counts(
+                    action_type_names, dict(played_action_type_counts)
                 )
-                for action_type_name, normalized_count in normalized_pred_action_type_counts.items():
-                    policy_pred_action_type_history[action_type_name].append(normalized_count)
-                wandb_log["dagger/policy_pred_action_type_over_time"] = (
+                played_action_type_steps.append(global_step)
+                for action_type_name, normalized_count in normalized_played_action_type_counts.items():
+                    played_action_type_history[action_type_name].append(normalized_count)
+                    wandb_log[f"dagger/played_action_type/{action_type_name}"] = normalized_count
+                wandb_log["dagger/played_action_type_over_time"] = (
                     _build_action_type_time_series_chart(
-                        title="DAgger Policy Predicted Action Type Over Time",
-                        x_values=policy_pred_action_type_steps,
-                        history_by_type=policy_pred_action_type_history,
+                        title="DAgger Played Action Type Over Time",
+                        x_values=played_action_type_steps,
+                        history_by_type=played_action_type_history,
                     )
                 )
                 wandb.log(wandb_log, step=global_step)

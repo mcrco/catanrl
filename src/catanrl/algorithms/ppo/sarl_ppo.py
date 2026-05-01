@@ -8,7 +8,7 @@ import os
 import random
 import sys
 from collections import deque
-from typing import List, Literal, Sequence, Tuple, cast
+from typing import Any, List, Literal, Sequence, Tuple, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -38,7 +38,7 @@ from ...models.models import (
 from ...utils.catanatron_action_space import build_action_type_metadata, get_action_space_size
 from .buffers import CentralCriticExperienceBuffer, ExperienceBuffer
 from .agent import PolicyAgent
-from .action_stats import build_raw_policy_log_dict
+from .action_stats import build_action_type_time_series_chart, compute_action_distributions
 from .backbone_builder import build_backbone_config
 from .ppo_update import run_ppo_update
 
@@ -323,7 +323,11 @@ def train(
         if trend_eval_games_per_opponent is None
         else max(1, trend_eval_games_per_opponent)
     )
-    raw_policy_argmax_buffer: list[np.ndarray] = []
+    played_action_buffer: list[np.ndarray] = []
+    played_action_type_steps: list[int] = []
+    played_action_type_history: dict[str, list[float]] = {
+        name: [] for name in action_type_names
+    }
 
     envs = make_puffer_vectorized_envs(
         reward_function=reward_function,
@@ -367,11 +371,12 @@ def train(
                 if critic_states is not None
                 else None
             )
-            actions, log_probs, raw_argmax = agent.select_actions_batch(
+            actions, log_probs, _ = agent.select_actions_batch(
                 states_t,
                 valid_action_masks,
                 deterministic=deterministic_policy,
             )
+            played_action_buffer.append(actions)
             with torch.no_grad():
                 values = (
                     predict_values(states_t, critic_states_t)
@@ -380,8 +385,6 @@ def train(
                     .numpy()
                     .astype(np.float32, copy=False)
                 )
-            raw_policy_argmax_buffer.append(raw_argmax)
-
             next_observations, rewards, terminations, truncations, infos = envs.step(actions)
 
             dones = np.logical_or(terminations, truncations)
@@ -483,18 +486,32 @@ def train(
                     observations
                 )
 
-                # Log raw policy preference distribution (argmax before action-mask application).
-                if raw_policy_argmax_buffer:
-                    raw_policy_log = build_raw_policy_log_dict(
-                        raw_policy_argmax_buffer,
+                played_action_log: dict[str, Any] = {
+                    "train/rollout_steps_collected": float(buffer.steps_collected),
+                    "train/rollout_samples_collected": float(len(buffer)),
+                }
+                if played_action_buffer:
+                    played_actions = np.concatenate(played_action_buffer)
+                    played_action_type_dist, _ = compute_action_distributions(
+                        played_actions,
                         action_to_type_idx,
                         action_type_names,
                         action_space_size,
-                        rollout_steps_collected=int(buffer.steps_collected),
-                        rollout_samples_collected=int(len(buffer)),
                     )
-                    wandb.log(raw_policy_log, step=global_step)
-                    raw_policy_argmax_buffer.clear()
+                    played_action_type_steps.append(global_step)
+                    for name in action_type_names:
+                        ratio = played_action_type_dist.get(name, 0.0)
+                        played_action_type_history[name].append(ratio)
+                        played_action_log[f"rollout_played_action_type/{name}"] = ratio
+                    played_action_log["rollout/played_action_type_over_time"] = (
+                        build_action_type_time_series_chart(
+                            title="SARL PPO Played Action Type Over Time",
+                            x_values=played_action_type_steps,
+                            history_by_type=played_action_type_history,
+                        )
+                    )
+                    played_action_buffer.clear()
+                wandb.log(played_action_log, step=global_step)
 
                 metrics = run_ppo_update(
                     agent=agent,

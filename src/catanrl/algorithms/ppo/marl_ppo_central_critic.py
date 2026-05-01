@@ -4,7 +4,7 @@ import os
 import random
 import sys
 from collections import deque
-from typing import Dict, Literal, Optional, Sequence, Tuple
+from typing import Any, Dict, Literal, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -28,7 +28,7 @@ from ...models.models import (
 from ...models.wrappers import PolicyNetworkWrapper, ValueNetworkWrapper
 from ...utils.catanatron_action_space import build_action_type_metadata, get_action_space_size
 from ...utils.seeding import set_global_seeds
-from .action_stats import build_raw_policy_log_dict
+from .action_stats import build_action_type_time_series_chart, compute_action_distributions
 from .agent import PolicyAgent
 from .backbone_builder import build_backbone_config
 from .buffers import CentralCriticExperienceBuffer
@@ -254,8 +254,11 @@ def train(
     episode_lengths: list[int] = [0 for _ in range(num_envs)]
     length_window = deque(maxlen=metric_window)
 
-    # Track raw policy preferences (argmax before masking) for diagnostics
-    raw_policy_argmax_buffer: list[np.ndarray] = []
+    played_action_buffer: list[np.ndarray] = []
+    played_action_type_steps: list[int] = []
+    played_action_type_history: dict[str, list[float]] = {
+        name: [] for name in action_type_names
+    }
 
     def run_and_log_evals() -> None:
         nonlocal best_eval_win_rate, best_eval_critic_mse
@@ -390,10 +393,10 @@ def train(
             while global_step < total_timesteps:
                 actor_batch, critic_batch, valid_masks = decode_observations(observations)
                 actor_tensor = torch.from_numpy(actor_batch).float().to(device)
-                actions, log_probs, raw_argmax = policy_agent.select_actions_batch(
+                actions, log_probs, _ = policy_agent.select_actions_batch(
                     actor_tensor, valid_masks, deterministic=deterministic_policy
                 )
-                raw_policy_argmax_buffer.append(raw_argmax)
+                played_action_buffer.append(actions)
 
                 critic_inputs = torch.from_numpy(critic_batch).float().to(device)
                 critic_model.eval()
@@ -438,18 +441,32 @@ def train(
                 observations = next_observations
 
                 if buffer.steps_collected >= rollout_steps and len(buffer) >= batch_size * 2:
-                    # Log raw policy preference distribution (argmax before masking)
-                    # This reveals what the network inherently prefers, regardless of action validity
-                    raw_policy_log = build_raw_policy_log_dict(
-                        raw_policy_argmax_buffer,
-                        action_to_type_idx,
-                        action_type_names,
-                        action_space_size,
-                        rollout_steps_collected=int(buffer.steps_collected),
-                        rollout_samples_collected=int(len(buffer)),
-                    )
-                    wandb.log(raw_policy_log, step=global_step)
-                    raw_policy_argmax_buffer.clear()
+                    played_action_log: Dict[str, Any] = {
+                        "train/rollout_steps_collected": float(buffer.steps_collected),
+                        "train/rollout_samples_collected": float(len(buffer)),
+                    }
+                    if played_action_buffer:
+                        played_actions = np.concatenate(played_action_buffer)
+                        played_action_type_dist, _ = compute_action_distributions(
+                            played_actions,
+                            action_to_type_idx,
+                            action_type_names,
+                            action_space_size,
+                        )
+                        played_action_type_steps.append(global_step)
+                        for name in action_type_names:
+                            ratio = played_action_type_dist.get(name, 0.0)
+                            played_action_type_history[name].append(ratio)
+                            played_action_log[f"rollout_played_action_type/{name}"] = ratio
+                        played_action_log["rollout/played_action_type_over_time"] = (
+                            build_action_type_time_series_chart(
+                                title="MARL PPO Played Action Type Over Time",
+                                x_values=played_action_type_steps,
+                                history_by_type=played_action_type_history,
+                            )
+                        )
+                        played_action_buffer.clear()
+                    wandb.log(played_action_log, step=global_step)
 
                     bootstrap_actor_batch, bootstrap_critic_batch, _ = decode_observations(
                         observations
