@@ -142,6 +142,26 @@ def main():
         help="Map type to use (default: BASE)",
     )
     parser.add_argument(
+        "--actor-observation-level",
+        type=str,
+        choices=["private", "public", "full"],
+        default="private",
+        help=(
+            "Actor information level: private (current behavior), public "
+            "(1v1 opponent resources), or full/privileged (default: private)"
+        ),
+    )
+    parser.add_argument(
+        "--critic-observation-level",
+        type=str,
+        choices=["private", "public", "full"],
+        default="full",
+        help=(
+            "Separate critic information level when --critic-mode privileged: private, "
+            "public (1v1 opponent resources), or full/privileged (default: full)"
+        ),
+    )
+    parser.add_argument(
         "--vps-to-win",
         type=int,
         default=15,
@@ -305,7 +325,11 @@ def main():
     action_space_size = get_action_space_size(num_players, args.map_type)
 
     # Compute feature dimensions for this player/map setup.
-    dims = compute_single_agent_dims(num_players, args.map_type)
+    dims = compute_single_agent_dims(
+        num_players,
+        args.map_type,
+        actor_observation_level=args.actor_observation_level,
+    )
     input_dim = dims["actor_dim"]
     print(f"Number of players: {num_players}")
     print(f"Input dimension: {input_dim}")
@@ -364,6 +388,8 @@ def main():
                 "xdim_fusion_hidden_dim": args.xdim_fusion_hidden_dim,
                 "xdim_critic_fusion_hidden_dim": args.xdim_critic_fusion_hidden_dim,
                 "map_type": args.map_type,
+                "actor_observation_level": args.actor_observation_level,
+                "critic_observation_level": args.critic_observation_level,
                 "vps_to_win": args.vps_to_win,
                 "discard_limit": args.discard_limit,
                 "load_weights": args.load_weights,
@@ -415,6 +441,8 @@ def main():
         save_every_updates=args.save_every_updates,
         wandb_config=wandb_config,
         map_type=args.map_type,
+        actor_observation_level=args.actor_observation_level,
+        critic_observation_level=args.critic_observation_level,
         vps_to_win=args.vps_to_win,
         discard_limit=args.discard_limit,
         opponent_configs=args.opponents,

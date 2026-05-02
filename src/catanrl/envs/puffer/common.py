@@ -16,9 +16,9 @@ from catanatron.players.value import ValueFunctionPlayer
 from catanatron.players.weighted_random import WeightedRandomPlayer
 
 from catanrl.features.catanatron_utils import (
-    compute_feature_vector_dim,
-    get_full_numeric_feature_names,
-    get_numeric_feature_names,
+    ActorObservationLevel,
+    CriticObservationLevel,
+    get_observation_numeric_feature_names,
 )
 from catanrl.utils.catanatron_action_space import PLAYER_COLOR_ORDER
 
@@ -176,18 +176,28 @@ def build_shared_critic_observation_space(
     )
 
 
-def compute_single_agent_dims(num_players: int, map_type: MapType) -> Dict[str, int]:
-    numeric_dim = len(get_numeric_feature_names(num_players, map_type))
-    full_numeric_dim = len(get_full_numeric_feature_names(num_players, map_type))
+def compute_single_agent_dims(
+    num_players: int,
+    map_type: MapType,
+    actor_observation_level: ActorObservationLevel = "private",
+    critic_observation_level: CriticObservationLevel = "full",
+) -> Dict[str, int]:
+    actor_numeric_dim = len(
+        get_observation_numeric_feature_names(num_players, map_type, actor_observation_level)
+    )
+    critic_numeric_dim = len(
+        get_observation_numeric_feature_names(num_players, map_type, critic_observation_level)
+    )
     board_channels = get_channels(num_players)
     board_flat_dim = board_channels * BOARD_WIDTH * BOARD_HEIGHT
-    actor_dim = numeric_dim + board_flat_dim
-    critic_dim = full_numeric_dim + board_flat_dim
+    actor_dim = actor_numeric_dim + board_flat_dim
+    critic_dim = critic_numeric_dim + board_flat_dim
     return {
         "actor_dim": actor_dim,
         "critic_dim": critic_dim,
-        "numeric_dim": numeric_dim,
-        "full_numeric_dim": full_numeric_dim,
+        "actor_numeric_dim": actor_numeric_dim,
+        "numeric_dim": actor_numeric_dim,
+        "critic_numeric_dim": critic_numeric_dim,
         "board_dim": board_flat_dim,
         "board_channels": board_channels,
     }
@@ -196,8 +206,15 @@ def compute_single_agent_dims(num_players: int, map_type: MapType) -> Dict[str, 
 def compute_multiagent_input_dim(
     num_players: int,
     map_type: MapType,
+    actor_observation_level: ActorObservationLevel = "private",
 ) -> Tuple[int, tuple[int, int, int], int]:
-    numeric_dim = len(get_numeric_feature_names(num_players, map_type))
-    vector_dim = compute_feature_vector_dim(num_players, map_type)
+    actor_numeric_dim = len(
+        get_observation_numeric_feature_names(num_players, map_type, actor_observation_level)
+    )
+    vector_dim = actor_numeric_dim + _board_flat_dim(num_players)
     board_shape = (get_channels(num_players), BOARD_WIDTH, BOARD_HEIGHT)
-    return vector_dim, board_shape, numeric_dim
+    return vector_dim, board_shape, actor_numeric_dim
+
+
+def _board_flat_dim(num_players: int) -> int:
+    return get_channels(num_players) * BOARD_WIDTH * BOARD_HEIGHT

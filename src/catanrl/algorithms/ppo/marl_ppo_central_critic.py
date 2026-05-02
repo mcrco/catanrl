@@ -13,12 +13,13 @@ from tqdm import tqdm
 
 import wandb
 
-from ...envs import compute_multiagent_input_dim, decode_puffer_batch
+from ...envs import compute_multiagent_input_dim, compute_single_agent_dims, decode_puffer_batch
 from ...envs.puffer.multi_agent_env import make_vectorized_envs as make_marl_vectorized_envs
 from ...eval.training_eval import eval_policy_against_champion, eval_policy_value_against_baselines
 from ...features.catanatron_utils import (
-    get_full_numeric_feature_names,
-    get_numeric_feature_names,
+    ActorObservationLevel,
+    CriticObservationLevel,
+    get_observation_indices_from_full,
 )
 from ...models.models import (
     build_flat_policy_network,
@@ -38,6 +39,8 @@ from .ppo_update import run_ppo_update
 def train(
     num_players: int = 2,
     map_type: Literal["BASE", "TOURNAMENT", "MINI"] = "BASE",
+    actor_observation_level: ActorObservationLevel = "private",
+    critic_observation_level: CriticObservationLevel = "full",
     model_type: str = "flat",
     backbone_type: str = "mlp",
     xdim_cnn_channels: Sequence[int] = (64, 128, 128),
@@ -93,11 +96,31 @@ def train(
     action_space_size = get_action_space_size(num_players, map_type)
     _, action_to_type_idx, action_type_names = build_action_type_metadata(num_players, map_type)
 
-    actor_input_dim, board_shape, numeric_dim = compute_multiagent_input_dim(num_players, map_type)
-    numeric_dim = numeric_dim or len(get_numeric_feature_names(num_players, map_type))
-    board_dim = actor_input_dim - numeric_dim
-    full_numeric_len = len(get_full_numeric_feature_names(num_players, map_type))
-    critic_input_dim = full_numeric_len + board_dim
+    actor_input_dim, board_shape, actor_numeric_dim = compute_multiagent_input_dim(
+        num_players,
+        map_type,
+        actor_observation_level=actor_observation_level,
+    )
+    dims = compute_single_agent_dims(
+        num_players,
+        map_type,
+        actor_observation_level=actor_observation_level,
+        critic_observation_level=critic_observation_level,
+    )
+    full_dims = compute_single_agent_dims(
+        num_players,
+        map_type,
+        actor_observation_level=actor_observation_level,
+        critic_observation_level="full",
+    )
+    critic_input_dim = dims["critic_dim"]
+    full_critic_input_dim = full_dims["critic_dim"]
+    critic_numeric_dim = dims["critic_numeric_dim"]
+    critic_observation_indices = get_observation_indices_from_full(
+        num_players,
+        map_type,
+        level=critic_observation_level,
+    )
 
     print(f"\n{'=' * 60}")
     print("Centralized Critic Multi-Agent PPO Training")
@@ -105,10 +128,14 @@ def train(
     print(f"Device: {device}")
     print(f"Map type: {map_type} | Players: {num_players}")
     print(f"Game config: vps_to_win={vps_to_win} | discard_limit={discard_limit}")
-    print(f"Backbone: {backbone_type} | Model type: {model_type}")
+    print(
+        f"Backbone: {backbone_type} | Model type: {model_type} | "
+        f"Actor observation: {actor_observation_level} | "
+        f"Critic observation: {critic_observation_level}"
+    )
     print(f"Actor input dim: {actor_input_dim} | Critic input dim: {critic_input_dim}")
     if backbone_type in ("xdim", "xdim_res"):
-        print(f"Board shape (C, W, H): {board_shape} | Numeric dim: {numeric_dim}")
+        print(f"Board shape (C, W, H): {board_shape} | Actor numeric dim: {actor_numeric_dim}")
         print(
             f"XDim config: cnn_channels={xdim_cnn_channels}, kernel={xdim_cnn_kernel_size}, "
             f"policy_fusion={xdim_policy_fusion_hidden_dim}, critic_fusion={xdim_critic_fusion_hidden_dim}"
@@ -135,7 +162,7 @@ def train(
         board_height=board_height,
         board_width=board_width,
         board_channels=board_channels,
-        numeric_dim=numeric_dim,
+        numeric_dim=actor_numeric_dim,
         xdim_cnn_channels=xdim_cnn_channels,
         xdim_cnn_kernel_size=xdim_cnn_kernel_size,
         xdim_fusion_hidden_dim=xdim_policy_fusion_hidden_dim,
@@ -161,7 +188,7 @@ def train(
         board_height=board_height,
         board_width=board_width,
         board_channels=board_channels,
-        numeric_dim=full_numeric_len,
+        numeric_dim=critic_numeric_dim,
         xdim_cnn_channels=xdim_cnn_channels,
         xdim_cnn_kernel_size=xdim_cnn_kernel_size,
         xdim_fusion_hidden_dim=xdim_critic_fusion_hidden_dim,
@@ -203,6 +230,7 @@ def train(
         shared_critic=True,
         reward_function=reward_function,
         num_envs=num_envs,
+        actor_observation_level=actor_observation_level,
     )
     driver_env = envs.driver_env
     obs_space = driver_env.env_single_observation_space
@@ -220,10 +248,11 @@ def train(
             obs_space=obs_space,
             obs_dtype=obs_dtype,
             actor_dim=actor_input_dim,
-            critic_dim=critic_input_dim,
+            critic_dim=full_critic_input_dim,
         )
         if critic_batch is None:
             raise RuntimeError("Expected critic observations for MARL centralized critic training.")
+        critic_batch = critic_batch[:, critic_observation_indices]
         return actor_batch, critic_batch, action_masks
 
     metric_window = max(1, metric_window)
@@ -277,6 +306,8 @@ def train(
                 seed=random.randint(0, sys.maxsize),
                 vps_to_win=vps_to_win,
                 discard_limit=discard_limit,
+                actor_observation_level=actor_observation_level,
+                critic_observation_level=critic_observation_level,
                 log_to_wandb=False,
                 global_step=global_step,
                 device=device,
@@ -293,6 +324,8 @@ def train(
                 seed=trend_eval_seed if trend_eval_seed is not None else 0,
                 vps_to_win=vps_to_win,
                 discard_limit=discard_limit,
+                actor_observation_level=actor_observation_level,
+                critic_observation_level=critic_observation_level,
                 log_to_wandb=False,
                 global_step=global_step,
                 device=device,
@@ -342,6 +375,7 @@ def train(
                     num_envs=num_envs,
                     device=device,
                     nn_seat=seat_mode,
+                    actor_observation_level=actor_observation_level,
                 )
                 prefix = f"eval_h2h_{seat_mode}"
                 for key, value in h2h_metrics.items():
