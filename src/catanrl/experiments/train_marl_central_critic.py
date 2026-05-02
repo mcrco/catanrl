@@ -22,6 +22,16 @@ def main():
         ),
     )
     parser.add_argument(
+        "--critic-observation-level",
+        type=str,
+        choices=["private", "public", "full"],
+        default="full",
+        help=(
+            "Central critic information level: private, public (1v1 opponent resources), "
+            "or full/privileged (default: full)"
+        ),
+    )
+    parser.add_argument(
         "--model-type",
         type=str,
         choices=["flat", "hierarchical"],
@@ -223,6 +233,7 @@ def main():
         "num_players": args.num_players,
         "map_type": args.map_type,
         "actor_observation_level": args.actor_observation_level,
+        "critic_observation_level": args.critic_observation_level,
         "model_type": args.model_type,
         "backbone_type": args.backbone_type,
         "xdim_cnn_channels": xdim_cnn_channels,
@@ -256,6 +267,7 @@ def main():
         num_players=args.num_players,
         map_type=args.map_type,
         actor_observation_level=args.actor_observation_level,
+        critic_observation_level=args.critic_observation_level,
         model_type=args.model_type,
         backbone_type=args.backbone_type,
         xdim_cnn_channels=xdim_cnn_channels,

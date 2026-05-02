@@ -83,25 +83,27 @@ class ParallelCatanatronPufferEnv(PufferEnv):
         else:
             raise ValueError(f"Invalid reward function: {self.config.reward_function}")
 
-        actor_dim, board_shape, numeric_dim = compute_multiagent_input_dim(
+        actor_dim, board_shape, actor_numeric_dim = compute_multiagent_input_dim(
             self.num_players,
             self.map_type,
             actor_observation_level=self.actor_observation_level,
         )
         self.vector_dim = actor_dim
         self.board_tensor_shape = board_shape
-        self.numeric_dim = numeric_dim
+        self.actor_numeric_dim = actor_numeric_dim
+        self.numeric_dim = self.actor_numeric_dim
         full_numeric_dim = len(get_full_numeric_feature_names(self.num_players, self.map_type))
-        self.critic_vector_dim = self.vector_dim + (full_numeric_dim - self.numeric_dim)
-        self.actor_indices = get_actor_indices_from_full(
+        self.critic_vector_dim = self.vector_dim + (full_numeric_dim - self.actor_numeric_dim)
+        self.critic_numeric_dim = full_numeric_dim
+        self.actor_observation_indices = get_actor_indices_from_full(
             self.num_players,
             self.map_type,
             level=self.actor_observation_level,
         )
-        self.actor_numeric_indices = self.actor_indices[: self.numeric_dim]
+        self.actor_numeric_indices = self.actor_observation_indices[: self.actor_numeric_dim]
 
         self.env_single_observation_space = build_shared_critic_observation_space(
-            numeric_dim=self.numeric_dim,
+            numeric_dim=self.actor_numeric_dim,
             board_tensor_shape=self.board_tensor_shape,
             critic_dim=self.critic_vector_dim,
             action_space_size=self.action_space_size,

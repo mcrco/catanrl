@@ -81,20 +81,21 @@ class SingleAgentCatanatronPufferEnv(PufferEnv):
             self.map_type,
             actor_observation_level=self.actor_observation_level,
         )
-        self.numeric_dim = dims["numeric_dim"]
-        self.full_numeric_dim = dims["full_numeric_dim"]
+        self.actor_numeric_dim = dims["actor_numeric_dim"]
+        self.numeric_dim = self.actor_numeric_dim
+        self.critic_numeric_dim = dims["critic_numeric_dim"]
         self.board_channels = dims["board_channels"]
         self.board_tensor_shape = (self.board_channels, BOARD_WIDTH, BOARD_HEIGHT)
         self.critic_vector_dim = dims["critic_dim"]
-        self.actor_indices = get_actor_indices_from_full(
+        self.actor_observation_indices = get_actor_indices_from_full(
             self.num_players,
             self.map_type,
             level=self.actor_observation_level,
         )
-        self.actor_numeric_indices = self.actor_indices[: self.numeric_dim]
+        self.actor_numeric_indices = self.actor_observation_indices[: self.actor_numeric_dim]
 
         self.env_single_observation_space = build_shared_critic_observation_space(
-            numeric_dim=self.numeric_dim,
+            numeric_dim=self.actor_numeric_dim,
             board_tensor_shape=self.board_tensor_shape,
             critic_dim=self.critic_vector_dim,
             action_space_size=self.action_space_size,
@@ -170,7 +171,12 @@ class SingleAgentCatanatronPufferEnv(PufferEnv):
 
     def _critic_observation(self) -> np.ndarray:
         assert self.game is not None
-        return full_game_to_features(self.game, self.num_players, self.map_type)
+        return full_game_to_features(
+            self.game,
+            self.num_players,
+            self.map_type,
+            base_color=self.p0.color,
+        )
 
     def _action_mask(self) -> np.ndarray:
         mask = np.zeros(self.action_space_size, dtype=np.int8)

@@ -18,7 +18,7 @@ from catanatron.models.player import RandomPlayer
 from catanatron.players.value import ValueFunctionPlayer
 from sklearn.metrics import f1_score
 
-from ..features.catanatron_utils import ActorObservationLevel, COLOR_ORDER
+from ..features.catanatron_utils import ActorObservationLevel, COLOR_ORDER, CriticObservationLevel
 from ..models.wrappers import PolicyNetworkWrapper, PolicyValueNetworkWrapper, ValueNetworkWrapper
 from ..players.nn_policy_player import NNPolicyPlayer
 from ..utils.seeding import derive_seed
@@ -113,6 +113,7 @@ def eval_policy_against_champion(
     device: Optional[str] = None,
     nn_seat: SeatOption = "random",
     actor_observation_level: ActorObservationLevel = "private",
+    critic_observation_level: CriticObservationLevel = "full",
 ) -> Dict[str, float]:
     """Evaluate the current policy against a frozen champion checkpoint."""
     metrics: Dict[str, float] = {}
@@ -141,6 +142,7 @@ def eval_policy_against_champion(
         discard_limit=discard_limit,
         nn_seat=nn_seat,
         actor_observation_level=actor_observation_level,
+        critic_observation_level=critic_observation_level,
         seed=seed,
     )
 
@@ -178,6 +180,7 @@ def eval_policy_value_against_baselines(
     compare_to_expert: bool = False,
     expert_config: Optional[str] = None,
     actor_observation_level: ActorObservationLevel = "private",
+    critic_observation_level: CriticObservationLevel = "full",
     progress_desc: Optional[str] = None,
 ) -> Dict[str, float]:
     """
@@ -272,6 +275,7 @@ def eval_policy_value_against_baselines(
                     compare_to_expert=compare_to_expert,
                     expert_config=expert_config,
                     actor_observation_level=actor_observation_level,
+                    critic_observation_level=critic_observation_level,
                     seed=opponent_seed,
                     progress_callback=eval_pbar.update,
                 )
@@ -314,6 +318,7 @@ def eval_policy_value_against_baselines(
                 compare_to_expert=compare_to_expert,
                 expert_config=expert_config,
                 actor_observation_level=actor_observation_level,
+                critic_observation_level=critic_observation_level,
                 seed=opponent_seed,
             )
 

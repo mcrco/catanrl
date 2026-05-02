@@ -20,7 +20,11 @@ from ..envs import (
 )
 from ..envs.puffer.multi_agent_env import make_vectorized_envs as make_marl_vectorized_envs
 from ..envs.puffer.single_agent_env import compute_single_agent_dims, make_puffer_vectorized_envs
-from ..features.catanatron_utils import ActorObservationLevel
+from ..features.catanatron_utils import (
+    ActorObservationLevel,
+    CriticObservationLevel,
+    get_observation_indices_from_full,
+)
 from ..models.wrappers import PolicyNetworkWrapper, PolicyValueNetworkWrapper, ValueNetworkWrapper
 from ..utils.seeding import derive_seed
 
@@ -171,6 +175,7 @@ def run_policy_value_eval_vectorized(
     compare_to_expert: bool = False,
     expert_config: Optional[str] = None,
     actor_observation_level: ActorObservationLevel = "private",
+    critic_observation_level: CriticObservationLevel = "full",
     seed: Optional[int] = None,
     progress_callback: Optional[Callable[[int], None]] = None,
 ) -> Tuple[int, List[int], List[float], List[float], List[int], List[int]]:
@@ -203,9 +208,21 @@ def run_policy_value_eval_vectorized(
         num_players,
         map_type,
         actor_observation_level=actor_observation_level,
+        critic_observation_level=critic_observation_level,
+    )
+    full_dims = compute_single_agent_dims(
+        num_players,
+        map_type,
+        actor_observation_level=actor_observation_level,
+        critic_observation_level="full",
     )
     actor_dim = dims["actor_dim"]
-    critic_dim = dims["critic_dim"]
+    full_critic_dim = full_dims["critic_dim"]
+    critic_observation_indices = get_observation_indices_from_full(
+        num_players,
+        map_type,
+        level=critic_observation_level,
+    )
 
     if num_envs < 1:
         raise ValueError(f"num_envs must be >= 1, got {num_envs}")
@@ -258,7 +275,7 @@ def run_policy_value_eval_vectorized(
         while episodes_completed < num_games:
             batch_size = observations.shape[0]
             actor_batch = np.zeros((batch_size, actor_dim), dtype=np.float32)
-            critic_batch = np.zeros((batch_size, critic_dim), dtype=np.float32)
+            critic_batch = np.zeros((batch_size, full_critic_dim), dtype=np.float32)
             action_masks: np.ndarray | None = None
 
             for idx in range(batch_size):
@@ -272,7 +289,11 @@ def run_policy_value_eval_vectorized(
                 raise ValueError("No action masks available from vectorized observations.")
 
             for idx in range(batch_size):
-                value_state = actor_batch[idx] if critic_uses_actor_states else critic_batch[idx]
+                value_state = (
+                    actor_batch[idx]
+                    if critic_uses_actor_states
+                    else critic_batch[idx, critic_observation_indices]
+                )
                 ep_buffers[idx].critic_states.append(value_state.copy())
                 ep_buffers[idx].steps += 1
 
@@ -429,6 +450,7 @@ def run_policy_h2h_eval_vectorized(
     deterministic: bool = True,
     nn_seat: SeatOption = "first",
     actor_observation_level: ActorObservationLevel = "private",
+    critic_observation_level: CriticObservationLevel = "full",
     seed: Optional[int] = None,
     progress_callback: Optional[Callable[[int], None]] = None,
 ) -> Tuple[int, List[int]]:

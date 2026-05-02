@@ -30,7 +30,12 @@ from ...models.models import (
     build_value_network,
 )
 from ...models.wrappers import PolicyNetworkWrapper, ValueNetworkWrapper
-from ...features.catanatron_utils import ActorObservationLevel, get_actor_indices_from_full
+from ...features.catanatron_utils import (
+    ActorObservationLevel,
+    CriticObservationLevel,
+    get_actor_indices_from_full,
+    get_observation_indices_from_full,
+)
 from ...utils.catanatron_action_space import get_action_array, get_action_space_size
 from ...utils.seeding import derive_seed
 from .dataset import AggregatedDataset, EvictionStrategy
@@ -80,7 +85,7 @@ class DAggerCollectStats:
 class DAggerRolloutBatch:
     """Flattened on-policy batch from the latest collection phase (for agreement metrics)."""
 
-    critic_states: np.ndarray
+    full_states: np.ndarray
     expert_actions: np.ndarray
     played_actions: np.ndarray
     action_masks: np.ndarray
@@ -88,10 +93,10 @@ class DAggerRolloutBatch:
 
 def _policy_expert_agreement(
     policy_agent: PolicyAgent,
-    critic_states: np.ndarray,
+    full_states: np.ndarray,
     expert_actions: np.ndarray,
     action_masks: np.ndarray,
-    actor_indices: np.ndarray,
+    actor_observation_indices: np.ndarray,
     device: torch.device,
     batch_size: int = 512,
 ) -> float:
@@ -106,7 +111,7 @@ def _policy_expert_agreement(
         with torch.no_grad():
             for start in range(0, n, batch_size):
                 end = min(start + batch_size, n)
-                actor = critic_states[start:end][:, actor_indices]
+                actor = full_states[start:end][:, actor_observation_indices]
                 actor_t = torch.from_numpy(actor).float().to(device)
                 masks = action_masks[start:end]
                 expert = expert_actions[start:end]
@@ -161,7 +166,8 @@ def _collect_dagger_rollouts_vectorized(
     gamma: float,
     device: torch.device,
     actor_dim: int,
-    critic_dim: int,
+    full_state_dim: int,
+    critic_observation_indices: np.ndarray,
     progress_callback: Optional[Callable[[int], None]] = None,
     seed: int | None = None,
 ) -> Tuple[DAggerCollectStats, DAggerRolloutBatch]:
@@ -184,7 +190,7 @@ def _collect_dagger_rollouts_vectorized(
         obs_dtype = np.float32
 
     # Preallocated buffers for the full collection phase (time x env)
-    critic_states_tmj = np.zeros((num_steps, num_envs, critic_dim), dtype=np.float32)
+    full_states_tmj = np.zeros((num_steps, num_envs, full_state_dim), dtype=np.float32)
     expert_actions_tmj = np.zeros((num_steps, num_envs), dtype=np.int64)
     played_actions_tmj = np.zeros((num_steps, num_envs), dtype=np.int64)
     rewards_tmj = np.zeros((num_steps, num_envs), dtype=np.float32)
@@ -217,7 +223,7 @@ def _collect_dagger_rollouts_vectorized(
             obs_space=obs_space,
             obs_dtype=obs_dtype,
             actor_dim=actor_dim,
-            critic_dim=critic_dim,
+            critic_dim=full_state_dim,
         )
         if critic_batch is None:
             raise RuntimeError("Expected critic observations while collecting DAgger rollouts.")
@@ -252,7 +258,7 @@ def _collect_dagger_rollouts_vectorized(
         total_actions += batch_size
 
         # Store experience in time-major buffers
-        critic_states_tmj[step_idx] = critic_batch
+        full_states_tmj[step_idx] = critic_batch
         expert_actions_tmj[step_idx] = expert_actions
         played_actions_tmj[step_idx] = actions_to_play
         is_single_action_tmj[step_idx] = is_single_action_batch
@@ -285,13 +291,15 @@ def _collect_dagger_rollouts_vectorized(
         obs_space=obs_space,
         obs_dtype=obs_dtype,
         actor_dim=actor_dim,
-        critic_dim=critic_dim,
+        critic_dim=full_state_dim,
     )
     if last_critic_states is None:
         raise RuntimeError("Expected critic observations when bootstrapping DAgger returns.")
 
     with torch.no_grad():
-        last_critic_tensor = torch.from_numpy(last_critic_states).float().to(device)
+        last_critic_tensor = torch.from_numpy(
+            last_critic_states[:, critic_observation_indices]
+        ).float().to(device)
         bootstrap_values = critic_model(last_critic_tensor).squeeze(-1).cpu().numpy()
     bootstrap_values = bootstrap_values.astype(np.float32, copy=False)
     bootstrap_values = np.where(dones_tmj[-1], 0.0, bootstrap_values)
@@ -307,7 +315,7 @@ def _collect_dagger_rollouts_vectorized(
         running_returns = np.where(dones_tmj[step_idx], 0.0, running_returns)
 
     dataset.add_samples(
-        critic_states=critic_states_tmj.reshape(-1, critic_dim),
+        full_states=full_states_tmj.reshape(-1, full_state_dim),
         expert_actions=expert_actions_tmj.reshape(-1),
         returns=returns_tmj.reshape(-1),
         is_single_action=is_single_action_tmj.reshape(-1),
@@ -324,7 +332,7 @@ def _collect_dagger_rollouts_vectorized(
         dataset_size=len(dataset),
     )
     rollout = DAggerRolloutBatch(
-        critic_states=critic_states_tmj.reshape(-1, critic_dim),
+        full_states=full_states_tmj.reshape(-1, full_state_dim),
         expert_actions=expert_actions_tmj.reshape(-1),
         played_actions=played_actions_tmj.reshape(-1),
         action_masks=action_masks_tmj.reshape(-1, action_space_size),
@@ -494,6 +502,7 @@ def train(
     opponent_configs: Optional[Sequence[str]] = None,
     map_type: Literal["BASE", "MINI", "TOURNAMENT"] = "BASE",
     actor_observation_level: ActorObservationLevel = "private",
+    critic_observation_level: CriticObservationLevel = "full",
     vps_to_win: int = 15,
     discard_limit: int = 9,
     beta_init: float = 1.0,
@@ -614,17 +623,30 @@ def train(
         num_players,
         map_type,
         actor_observation_level=actor_observation_level,
+        critic_observation_level=critic_observation_level,
+    )
+    full_dims = compute_single_agent_dims(
+        num_players,
+        map_type,
+        actor_observation_level=actor_observation_level,
+        critic_observation_level="full",
     )
     actor_dim = dims["actor_dim"]
     critic_dim = dims["critic_dim"]
-    actor_indices = get_actor_indices_from_full(
+    full_state_dim = full_dims["critic_dim"]
+    actor_numeric_dim = dims["actor_numeric_dim"]
+    critic_numeric_dim = dims["critic_numeric_dim"]
+    board_channels = dims["board_channels"]
+    actor_observation_indices = get_actor_indices_from_full(
         num_players,
         map_type,
         level=actor_observation_level,
     )
-    numeric_dim = dims["numeric_dim"]
-    full_numeric_dim = dims["full_numeric_dim"]
-    board_channels = dims["board_channels"]
+    critic_observation_indices = get_observation_indices_from_full(
+        num_players,
+        map_type,
+        level=critic_observation_level,
+    )
 
     # Board shape for xdim backbone (C, W, H)
     BOARD_WIDTH = 21
@@ -638,12 +660,14 @@ def train(
     print(f"Game params: vps_to_win={vps_to_win}, discard_limit={discard_limit}")
     print(
         f"Backbone: {backbone_type} | Model type: {model_type} | "
-        f"Actor observation: {actor_observation_level}"
+        f"Actor observation: {actor_observation_level} | "
+        f"Critic observation: {critic_observation_level}"
     )
     print(f"Actor input dim: {actor_dim} | Critic input dim: {critic_dim}")
     if backbone_type in ("xdim", "xdim_res"):
         print(
-            f"Board shape (C, W, H): ({board_channels}, {BOARD_WIDTH}, {BOARD_HEIGHT}) | Numeric dim: {numeric_dim}"
+            f"Board shape (C, W, H): ({board_channels}, {BOARD_WIDTH}, {BOARD_HEIGHT}) | "
+            f"Actor numeric dim: {actor_numeric_dim} | Critic numeric dim: {critic_numeric_dim}"
         )
         print(
             f"XDim config: cnn_channels={xdim_cnn_channels}, kernel={xdim_cnn_kernel_size}, "
@@ -661,7 +685,7 @@ def train(
         board_height=BOARD_HEIGHT,
         board_width=BOARD_WIDTH,
         board_channels=board_channels,
-        numeric_dim=numeric_dim,
+        numeric_dim=actor_numeric_dim,
         xdim_cnn_channels=xdim_cnn_channels,
         xdim_cnn_kernel_size=xdim_cnn_kernel_size,
         xdim_fusion_hidden_dim=xdim_policy_fusion_hidden_dim,
@@ -687,7 +711,7 @@ def train(
         board_height=BOARD_HEIGHT,
         board_width=BOARD_WIDTH,
         board_channels=board_channels,
-        numeric_dim=full_numeric_dim,
+        numeric_dim=critic_numeric_dim,
         xdim_cnn_channels=xdim_cnn_channels,
         xdim_cnn_kernel_size=xdim_cnn_kernel_size,
         xdim_fusion_hidden_dim=xdim_critic_fusion_hidden_dim,
@@ -730,10 +754,11 @@ def train(
         max_dataset_size = 100_000_000
 
     dataset = AggregatedDataset(
-        critic_dim=critic_dim,
+        full_state_dim=full_state_dim,
         num_players=num_players,
         map_type=map_type,
         actor_observation_level=actor_observation_level,
+        critic_observation_level=critic_observation_level,
         max_size=max_dataset_size,
         eviction_strategy=eviction_strategy,
     )
@@ -764,7 +789,8 @@ def train(
                     gamma=gamma,
                     device=torch_device,
                     actor_dim=actor_dim,
-                    critic_dim=critic_dim,
+                    full_state_dim=full_state_dim,
+                    critic_observation_indices=critic_observation_indices,
                     progress_callback=pbar.update,
                     seed=collect_seed,
                 )
@@ -778,10 +804,10 @@ def train(
 
                 agreement_pre = _policy_expert_agreement(
                     policy_agent=policy_agent,
-                    critic_states=rollout_batch.critic_states,
+                    full_states=rollout_batch.full_states,
                     expert_actions=rollout_batch.expert_actions,
                     action_masks=rollout_batch.action_masks,
-                    actor_indices=actor_indices,
+                    actor_observation_indices=actor_observation_indices,
                     device=torch_device,
                 )
 
@@ -802,10 +828,10 @@ def train(
 
                 agreement_post = _policy_expert_agreement(
                     policy_agent=policy_agent,
-                    critic_states=rollout_batch.critic_states,
+                    full_states=rollout_batch.full_states,
                     expert_actions=rollout_batch.expert_actions,
                     action_masks=rollout_batch.action_masks,
-                    actor_indices=actor_indices,
+                    actor_observation_indices=actor_observation_indices,
                     device=torch_device,
                 )
 
@@ -832,6 +858,7 @@ def train(
                             vps_to_win=vps_to_win,
                             discard_limit=discard_limit,
                             actor_observation_level=actor_observation_level,
+                            critic_observation_level=critic_observation_level,
                             log_to_wandb=False,
                             global_step=global_step,
                             device=device,

@@ -152,6 +152,16 @@ def main():
         ),
     )
     parser.add_argument(
+        "--critic-observation-level",
+        type=str,
+        choices=["private", "public", "full"],
+        default="full",
+        help=(
+            "Separate critic information level when --critic-mode privileged: private, "
+            "public (1v1 opponent resources), or full/privileged (default: full)"
+        ),
+    )
+    parser.add_argument(
         "--vps-to-win",
         type=int,
         default=15,
@@ -379,6 +389,7 @@ def main():
                 "xdim_critic_fusion_hidden_dim": args.xdim_critic_fusion_hidden_dim,
                 "map_type": args.map_type,
                 "actor_observation_level": args.actor_observation_level,
+                "critic_observation_level": args.critic_observation_level,
                 "vps_to_win": args.vps_to_win,
                 "discard_limit": args.discard_limit,
                 "load_weights": args.load_weights,
@@ -431,6 +442,7 @@ def main():
         wandb_config=wandb_config,
         map_type=args.map_type,
         actor_observation_level=args.actor_observation_level,
+        critic_observation_level=args.critic_observation_level,
         vps_to_win=args.vps_to_win,
         discard_limit=args.discard_limit,
         opponent_configs=args.opponents,

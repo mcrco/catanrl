@@ -6,7 +6,7 @@ import pytest
 from catanrl.features.catanatron_utils import (
     get_actor_indices_from_critic,
     get_actor_indices_from_full,
-    get_actor_numeric_feature_names,
+    get_observation_numeric_feature_names,
     get_full_numeric_feature_names,
 )
 
@@ -27,7 +27,7 @@ def test_full_indices_are_identity_over_full_observation():
 
 
 def test_public_level_adds_only_opponent_resource_cards_for_1v1():
-    names = get_actor_numeric_feature_names(2, "BASE", "public")
+    names = get_observation_numeric_feature_names(2, "BASE", "public")
 
     for resource in ("BRICK", "ORE", "SHEEP", "WHEAT", "WOOD"):
         assert f"P1_{resource}_IN_HAND" in names
@@ -39,4 +39,4 @@ def test_public_level_adds_only_opponent_resource_cards_for_1v1():
 
 def test_public_level_is_currently_1v1_only():
     with pytest.raises(ValueError, match="1v1"):
-        get_actor_numeric_feature_names(3, "BASE", "public")
+        get_observation_numeric_feature_names(3, "BASE", "public")

@@ -28,7 +28,11 @@ from ...envs.puffer.single_agent_env import (
     make_puffer_vectorized_envs,
 )
 from ...eval.training_eval import eval_policy_value_against_baselines
-from ...features.catanatron_utils import ActorObservationLevel
+from ...features.catanatron_utils import (
+    ActorObservationLevel,
+    CriticObservationLevel,
+    get_observation_indices_from_full,
+)
 from ...models.models import (
     build_flat_policy_network,
     build_flat_policy_value_network,
@@ -76,6 +80,7 @@ def train(
     wandb_config: dict | None = None,
     map_type: Literal["BASE", "TOURNAMENT", "MINI"] = "BASE",
     actor_observation_level: ActorObservationLevel = "private",
+    critic_observation_level: CriticObservationLevel = "full",
     vps_to_win: int = 15,
     discard_limit: int = 9,
     opponent_configs: List[str] | None = None,
@@ -100,6 +105,9 @@ def train(
     if critic_mode not in ("shared", "privileged"):
         raise ValueError(f"Unknown critic_mode '{critic_mode}'")
     uses_privileged_critic = critic_mode == "privileged"
+    effective_critic_observation_level = (
+        critic_observation_level if uses_privileged_critic else actor_observation_level
+    )
     critic_lr = lr if critic_lr is None else critic_lr
     critic_hidden_dims = tuple(hidden_dims if critic_hidden_dims is None else critic_hidden_dims)
 
@@ -122,12 +130,25 @@ def train(
         num_players,
         map_type,
         actor_observation_level=actor_observation_level,
+        critic_observation_level=effective_critic_observation_level,
+    )
+    full_dims = compute_single_agent_dims(
+        num_players,
+        map_type,
+        actor_observation_level=actor_observation_level,
+        critic_observation_level="full",
     )
     actor_input_dim = dims["actor_dim"]
     critic_input_dim = dims["critic_dim"]
-    numeric_dim = dims["numeric_dim"]
-    full_numeric_dim = dims["full_numeric_dim"]
+    full_critic_input_dim = full_dims["critic_dim"]
+    actor_numeric_dim = dims["actor_numeric_dim"]
+    critic_numeric_dim = dims["critic_numeric_dim"]
     board_channels = dims["board_channels"]
+    critic_observation_indices = get_observation_indices_from_full(
+        num_players,
+        map_type,
+        level=effective_critic_observation_level,
+    )
     if input_dim is not None and int(input_dim) != actor_input_dim:
         print(
             f"Warning: input_dim={input_dim} does not match computed actor dim {actor_input_dim}. "
@@ -138,7 +159,8 @@ def train(
     print(f"Opponents: {[repr(o) for o in opponents]}")
     print(
         f"Backbone: {backbone_type} | Model type: {model_type} | "
-        f"Critic mode: {critic_mode} | Actor observation: {actor_observation_level}"
+        f"Critic mode: {critic_mode} | Actor observation: {actor_observation_level} | "
+        f"Critic observation: {effective_critic_observation_level}"
     )
 
     if wandb.run is None:
@@ -168,7 +190,7 @@ def train(
         board_height=BOARD_HEIGHT,
         board_width=BOARD_WIDTH,
         board_channels=board_channels,
-        numeric_dim=numeric_dim,
+        numeric_dim=actor_numeric_dim,
         xdim_cnn_channels=xdim_cnn_channels,
         xdim_cnn_kernel_size=xdim_cnn_kernel_size,
         xdim_fusion_hidden_dim=xdim_fusion_hidden_dim,
@@ -195,7 +217,7 @@ def train(
             board_height=BOARD_HEIGHT,
             board_width=BOARD_WIDTH,
             board_channels=board_channels,
-            numeric_dim=full_numeric_dim,
+            numeric_dim=critic_numeric_dim,
             xdim_cnn_channels=xdim_cnn_channels,
             xdim_cnn_kernel_size=xdim_cnn_kernel_size,
             xdim_fusion_hidden_dim=xdim_critic_fusion_hidden_dim,
@@ -362,8 +384,10 @@ def train(
             obs_space=obs_space,
             obs_dtype=obs_dtype,
             actor_dim=actor_input_dim,
-            critic_dim=critic_input_dim if uses_privileged_critic else None,
+            critic_dim=full_critic_input_dim if uses_privileged_critic else None,
         )
+        if critic_batch is not None:
+            critic_batch = critic_batch[:, critic_observation_indices]
         return actor_batch, critic_batch, action_masks
 
     env_episode_rewards = np.zeros(num_envs)
@@ -619,6 +643,7 @@ def train(
                         vps_to_win=vps_to_win,
                         discard_limit=discard_limit,
                         actor_observation_level=actor_observation_level,
+                        critic_observation_level=effective_critic_observation_level,
                         log_to_wandb=False,
                         global_step=global_step,
                         device=str(device),
@@ -636,6 +661,7 @@ def train(
                         vps_to_win=vps_to_win,
                         discard_limit=discard_limit,
                         actor_observation_level=actor_observation_level,
+                        critic_observation_level=effective_critic_observation_level,
                         log_to_wandb=False,
                         global_step=global_step,
                         device=str(device),
