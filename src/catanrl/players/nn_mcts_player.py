@@ -22,9 +22,11 @@ from catanatron.players.value import ValueFunctionPlayer
 from catanatron.players.weighted_random import WeightedRandomPlayer
 
 from catanrl.features.catanatron_utils import (
+    ActorObservationLevel,
+    CriticObservationLevel,
     full_game_to_features,
-    game_to_features,
     get_full_numeric_feature_names,
+    get_observation_indices_from_full,
 )
 from catanrl.models import PolicyNetworkWrapper, ValueNetworkWrapper
 from catanrl.utils.catanatron_action_space import to_action_space
@@ -77,6 +79,8 @@ class NNMCTSPlayer(Player):
         opponent_policy: str = "self",
         opponent_factory: Callable[[Color], Player] | None = None,
         critic_mode: Literal["full", "guessed_dev_cards"] = "full",
+        actor_observation_level: ActorObservationLevel = "private",
+        critic_observation_level: CriticObservationLevel = "full",
         **kwargs,
     ):
         super().__init__(color, is_bot=True, **kwargs)
@@ -90,8 +94,11 @@ class NNMCTSPlayer(Player):
         self.opponent_policy = opponent_policy.lower()
         self.opponent_factory = opponent_factory
         self.critic_mode = self._normalize_critic_mode(critic_mode)
+        self.actor_observation_level = actor_observation_level
+        self.critic_observation_level = critic_observation_level
         self._opponents_by_color: dict[Color, Player] = {}
         self._critic_index_cache: dict[int, dict[str, int]] = {}
+        self._observation_index_cache: dict[tuple[int, str], np.ndarray] = {}
         self._starting_dev_counter = Counter(starting_devcard_bank())
 
         if self.opponent_factory is None and self.opponent_policy != "self":
@@ -242,11 +249,10 @@ class NNMCTSPlayer(Player):
 
     def _policy_priors(self, game, color: Color, actions) -> dict[object, float]:
         with torch.no_grad():
-            actor_features = game_to_features(
+            actor_features = self._observation_features(
                 game,
                 color,
-                len(game.state.colors),
-                self.map_type,
+                self.actor_observation_level,
             ).reshape(1, -1)
             actor_tensor = torch.from_numpy(actor_features).to(self.device)
             if self.model_type == "flat":
@@ -270,18 +276,46 @@ class NNMCTSPlayer(Player):
     def _critic_value(self, game) -> float:
         with torch.no_grad():
             if self.critic_mode == "full":
-                critic_features = full_game_to_features(
+                critic_features = self._observation_features(
                     game,
-                    len(game.state.colors),
-                    self.map_type,
-                    base_color=self.color,
+                    self.color,
+                    self.critic_observation_level,
                 )
             else:
-                critic_features = self._guessed_dev_cards_features(game)
+                full_guess = self._guessed_dev_cards_features(game)
+                critic_features = self._select_observation_features(
+                    full_guess,
+                    len(game.state.colors),
+                    self.critic_observation_level,
+                )
             critic_features = critic_features.reshape(1, -1)
             critic_tensor = torch.from_numpy(critic_features).to(self.device)
             value = float(self.critic_model(critic_tensor).squeeze(0).item())
         return float(np.clip(value, -1.0, 1.0))
+
+    def _observation_features(
+        self,
+        game,
+        color: Color,
+        level: ActorObservationLevel | CriticObservationLevel,
+    ) -> np.ndarray:
+        num_players = len(game.state.colors)
+        full_features = full_game_to_features(
+            game,
+            num_players,
+            self.map_type,
+            base_color=color,
+        )
+        return self._select_observation_features(full_features, num_players, level)
+
+    def _select_observation_features(
+        self,
+        full_features: np.ndarray,
+        num_players: int,
+        level: ActorObservationLevel | CriticObservationLevel,
+    ) -> np.ndarray:
+        indices = self._get_observation_indices(num_players, level)
+        return full_features[indices].astype(np.float32, copy=False)
 
     def _guessed_dev_cards_features(self, game) -> np.ndarray:
         num_players = len(game.state.colors)
@@ -353,6 +387,19 @@ class NNMCTSPlayer(Player):
         index = {name: idx for idx, name in enumerate(numeric_names)}
         self._critic_index_cache[num_players] = index
         return index
+
+    def _get_observation_indices(
+        self,
+        num_players: int,
+        level: ActorObservationLevel | CriticObservationLevel,
+    ) -> np.ndarray:
+        cache_key = (num_players, level)
+        indices = self._observation_index_cache.get(cache_key)
+        if indices is not None:
+            return indices
+        indices = get_observation_indices_from_full(num_players, self.map_type, level)
+        self._observation_index_cache[cache_key] = indices
+        return indices
 
     def _resolve_root_action(
         self,
