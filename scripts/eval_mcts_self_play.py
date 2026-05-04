@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import Literal, Sequence
 
 import torch
+import wandb
 from catanatron.game import Game
 from catanatron.models.actions import generate_playable_actions
 from catanatron.models.player import Color
@@ -376,6 +377,29 @@ def main():
         default=None,
         help="Device to use (cuda or cpu). Defaults to cuda if available.",
     )
+    parser.add_argument(
+        "--wandb",
+        action="store_true",
+        help="Log evaluation config and summary metrics to Weights & Biases",
+    )
+    parser.add_argument(
+        "--wandb-project",
+        type=str,
+        default="catan-evals",
+        help="Weights & Biases project name",
+    )
+    parser.add_argument(
+        "--wandb-run-name",
+        type=str,
+        default=None,
+        help="Weights & Biases run name",
+    )
+    parser.add_argument(
+        "--wandb-group",
+        type=str,
+        default=None,
+        help="Optional Weights & Biases group name",
+    )
 
     args = parser.parse_args()
 
@@ -403,6 +427,15 @@ def main():
     print(f"Prunning: {args.prunning}")
     print(f"Games: {args.num_games}")
     print(f"VPs to win: {args.vps_to_win} | Discard limit: {args.discard_limit}")
+
+    if args.wandb:
+        wandb.init(
+            project=args.wandb_project,
+            name=args.wandb_run_name,
+            group=args.wandb_group,
+            job_type="eval",
+            config=vars(args),
+        )
 
     policy_model = build_policy_model(
         backbone_type=args.backbone_type,
@@ -469,6 +502,17 @@ def main():
         )
     avg_turns = sum(turns) / len(turns) if turns else 0.0
     print(f"\nAverage Turns: {avg_turns:.1f}")
+
+    if args.wandb:
+        metrics = {"avg_turns": avg_turns}
+        for player in players:
+            player_stats = stats[player.color]
+            label = color_label(player.color).lower()
+            metrics[f"{label}/wins"] = player_stats.wins
+            metrics[f"{label}/win_rate"] = player_stats.wins / args.num_games if args.num_games else 0.0
+            metrics[f"{label}/avg_vps"] = player_stats.avg_vps
+        wandb.log(metrics)
+        wandb.finish()
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ import argparse
 from typing import Literal, Sequence
 
 import torch
+import wandb
 from catanatron.players.value import ValueFunctionPlayer
 
 from catanrl.envs.puffer.common import compute_single_agent_dims
@@ -187,6 +188,29 @@ def main():
         default=None,
         help="Device to use (cuda or cpu). Defaults to cuda if available.",
     )
+    parser.add_argument(
+        "--wandb",
+        action="store_true",
+        help="Log evaluation config and summary metrics to Weights & Biases",
+    )
+    parser.add_argument(
+        "--wandb-project",
+        type=str,
+        default="catan-evals",
+        help="Weights & Biases project name",
+    )
+    parser.add_argument(
+        "--wandb-run-name",
+        type=str,
+        default=None,
+        help="Weights & Biases run name",
+    )
+    parser.add_argument(
+        "--wandb-group",
+        type=str,
+        default=None,
+        help="Optional Weights & Biases group name",
+    )
 
     args = parser.parse_args()
 
@@ -212,6 +236,15 @@ def main():
     print(f"NN seat: {args.nn_seat}")
     print(f"Games: {args.num_games}")
     print(f"VPs to win: {args.vps_to_win} | Discard limit: {args.discard_limit}")
+
+    if args.wandb:
+        wandb.init(
+            project=args.wandb_project,
+            name=args.wandb_run_name,
+            group=args.wandb_group,
+            job_type="eval",
+            config=vars(args) | {"num_players": num_players},
+        )
 
     # Build model
     model = build_policy_model(
@@ -264,6 +297,18 @@ def main():
     print(f"Average VPs: {sum(vps) / len(vps):.2f}")
     print(f"Average Total VPs: {sum(total_vps) / len(total_vps):.2f}")
     print(f"Average Turns: {sum(turns) / len(turns):.1f}")
+
+    if args.wandb:
+        wandb.log(
+            {
+                "wins": wins,
+                "win_rate": wins / args.num_games if args.num_games else 0.0,
+                "avg_vps": sum(vps) / len(vps) if vps else 0.0,
+                "avg_total_vps": sum(total_vps) / len(total_vps) if total_vps else 0.0,
+                "avg_turns": sum(turns) / len(turns) if turns else 0.0,
+            }
+        )
+        wandb.finish()
 
 
 if __name__ == "__main__":
