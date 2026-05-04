@@ -18,8 +18,12 @@ from catanatron.models.player import Color
 from catanatron.state_functions import get_actual_victory_points
 from tqdm import tqdm
 
-from catanrl.envs.gym.single_env import compute_single_agent_dims
-from catanrl.features.catanatron_utils import COLOR_ORDER
+from catanrl.envs.puffer.common import compute_single_agent_dims
+from catanrl.features.catanatron_utils import (
+    ActorObservationLevel,
+    COLOR_ORDER,
+    CriticObservationLevel,
+)
 from catanrl.models.backbones import (
     BackboneConfig,
     CrossDimensionalBackboneConfig,
@@ -56,9 +60,14 @@ def build_policy_model(
     hidden_dims: Sequence[int],
     num_players: int,
     map_type: Literal["BASE", "MINI", "TOURNAMENT"],
+    actor_observation_level: ActorObservationLevel,
     device: torch.device,
 ) -> PolicyNetworkWrapper:
-    dims = compute_single_agent_dims(num_players, map_type)
+    dims = compute_single_agent_dims(
+        num_players,
+        map_type,
+        actor_observation_level=actor_observation_level,
+    )
     actor_dim = dims["actor_dim"]
     numeric_dim = dims["numeric_dim"]
     board_channels = dims["board_channels"]
@@ -108,11 +117,16 @@ def build_critic_model(
     hidden_dims: Sequence[int],
     num_players: int,
     map_type: Literal["BASE", "MINI", "TOURNAMENT"],
+    critic_observation_level: CriticObservationLevel,
     device: torch.device,
 ) -> ValueNetworkWrapper:
-    dims = compute_single_agent_dims(num_players, map_type)
+    dims = compute_single_agent_dims(
+        num_players,
+        map_type,
+        critic_observation_level=critic_observation_level,
+    )
     critic_dim = dims["critic_dim"]
-    full_numeric_dim = dims["full_numeric_dim"]
+    critic_numeric_dim = dims["critic_numeric_dim"]
     board_channels = dims["board_channels"]
 
     if backbone_type == "mlp":
@@ -127,7 +141,7 @@ def build_critic_model(
                 board_height=BOARD_HEIGHT,
                 board_width=BOARD_WIDTH,
                 board_channels=board_channels,
-                numeric_dim=full_numeric_dim,
+                numeric_dim=critic_numeric_dim,
                 cnn_channels=[64, 128, 128],
                 cnn_kernel_size=(3, 5),
                 numeric_hidden_dims=list(hidden_dims),
@@ -152,6 +166,8 @@ def build_self_play_players(
     c_puct: float,
     prunning: bool,
     critic_mode: str,
+    actor_observation_level: ActorObservationLevel,
+    critic_observation_level: CriticObservationLevel,
 ) -> list[NNMCTSPlayer]:
     return [
         NNMCTSPlayer(
@@ -165,6 +181,8 @@ def build_self_play_players(
             prunning=prunning,
             opponent_policy="self",
             critic_mode=critic_mode,
+            actor_observation_level=actor_observation_level,
+            critic_observation_level=critic_observation_level,
         )
         for color in COLOR_ORDER[:num_players]
     ]
@@ -270,6 +288,26 @@ def main():
         help="Catan map type",
     )
     parser.add_argument(
+        "--actor-observation-level",
+        type=str,
+        choices=["private", "public", "full"],
+        default="private",
+        help=(
+            "Information level used by the policy network: private, public "
+            "(1v1 opponent resources), or full/privileged."
+        ),
+    )
+    parser.add_argument(
+        "--critic-observation-level",
+        type=str,
+        choices=["private", "public", "full"],
+        default="full",
+        help=(
+            "Information level used by the critic network: private, public "
+            "(1v1 opponent resources), or full/privileged."
+        ),
+    )
+    parser.add_argument(
         "--policy-weights",
         type=str,
         required=True,
@@ -352,6 +390,10 @@ def main():
     print(f"Device: {device}")
     print(f"Map type: {args.map_type} | Players: {args.num_players}")
     print(f"Backbone: {args.backbone_type} | Model type: {args.model_type}")
+    print(
+        f"Actor observation: {args.actor_observation_level} | "
+        f"Critic observation: {args.critic_observation_level}"
+    )
     print(f"Policy hidden dims: {args.policy_hidden_dims}")
     print(f"Critic hidden dims: {args.critic_hidden_dims}")
     print(f"Policy weights: {args.policy_weights}")
@@ -368,6 +410,7 @@ def main():
         hidden_dims=args.policy_hidden_dims,
         num_players=args.num_players,
         map_type=args.map_type,
+        actor_observation_level=args.actor_observation_level,
         device=device,
     )
     critic_model = build_critic_model(
@@ -375,6 +418,7 @@ def main():
         hidden_dims=args.critic_hidden_dims,
         num_players=args.num_players,
         map_type=args.map_type,
+        critic_observation_level=args.critic_observation_level,
         device=device,
     )
 
@@ -395,6 +439,8 @@ def main():
         c_puct=args.c_puct,
         prunning=args.prunning,
         critic_mode=args.critic_mode,
+        actor_observation_level=args.actor_observation_level,
+        critic_observation_level=args.critic_observation_level,
     )
 
     print(f"\nRunning {args.num_games} self-play games...")

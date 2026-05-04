@@ -12,9 +12,9 @@ import torch
 from catanatron.cli.cli_players import CLI_PLAYERS
 from catanatron.models.player import Player
 
+from catanrl.envs.puffer.common import compute_single_agent_dims
 from catanrl.eval.eval_nn_vs_catanatron import eval
-from catanrl.envs.gym.single_env import compute_single_agent_dims
-from catanrl.features.catanatron_utils import COLOR_ORDER
+from catanrl.features.catanatron_utils import ActorObservationLevel, COLOR_ORDER
 from catanrl.models.backbones import (
     BackboneConfig,
     CrossDimensionalBackboneConfig,
@@ -36,10 +36,15 @@ def build_policy_model(
     hidden_dims: Sequence[int],
     num_players: int,
     map_type: Literal["BASE", "MINI", "TOURNAMENT"],
+    actor_observation_level: ActorObservationLevel,
     device: torch.device,
 ) -> PolicyNetworkWrapper:
     """Build a policy network with the same configuration as dagger.py."""
-    dims = compute_single_agent_dims(num_players, map_type)
+    dims = compute_single_agent_dims(
+        num_players,
+        map_type,
+        actor_observation_level=actor_observation_level,
+    )
     actor_dim = dims["actor_dim"]
     numeric_dim = dims["numeric_dim"]
     board_channels = dims["board_channels"]
@@ -160,6 +165,16 @@ def main():
             "Examples: 'F', 'AB:2', 'F,AB:2,R'"
         ),
     )
+    parser.add_argument(
+        "--actor-observation-level",
+        type=str,
+        choices=["private", "public", "full"],
+        default="private",
+        help=(
+            "Information level used by the policy network: private, public "
+            "(1v1 opponent resources), or full/privileged."
+        ),
+    )
 
     # Model weights
     parser.add_argument(
@@ -224,6 +239,7 @@ def main():
     print(f"Device: {device}")
     print(f"Map type: {args.map_type} | Players: {num_players}")
     print(f"Backbone: {args.backbone_type} | Model type: {args.model_type}")
+    print(f"Actor observation: {args.actor_observation_level}")
     print(f"Hidden dims: {args.policy_hidden_dims}")
     print(f"Policy weights: {args.policy_weights}")
     print(f"Opponents: {args.opponents}")
@@ -238,6 +254,7 @@ def main():
         hidden_dims=args.policy_hidden_dims,
         num_players=num_players,
         map_type=args.map_type,
+        actor_observation_level=args.actor_observation_level,
         device=device,
     )
 
@@ -253,6 +270,7 @@ def main():
         model_type=args.model_type,
         model=model,
         map_type=args.map_type,
+        actor_observation_level=args.actor_observation_level,
     )
 
     # Run evaluation
