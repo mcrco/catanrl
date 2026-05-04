@@ -26,6 +26,17 @@ from .eval_nn_vs_catanatron import eval
 from .vectorized_rollout import SeatOption, run_policy_h2h_eval_vectorized, run_policy_value_eval_vectorized
 
 
+def _seat_split_games(num_games: int) -> int:
+    if num_games < 2:
+        raise ValueError("Seat-split baseline eval requires at least 2 games per opponent.")
+    if num_games % 2 != 0:
+        raise ValueError(
+            "Seat-split baseline eval requires an even num_games so first and second seats "
+            "use the same number of games."
+        )
+    return num_games // 2
+
+
 def eval_policy_against_baselines(
     policy_model: PolicyNetworkWrapper,
     model_type: str,
@@ -241,7 +252,8 @@ def eval_policy_value_against_baselines(
     all_expert_labels = []
     all_expert_masked_preds = []
 
-    eval_total_games = len(opponent_configs_list) * num_games
+    seat_eval_games = _seat_split_games(num_games)
+    eval_total_games = len(opponent_configs_list) * seat_eval_games * 2
     if progress_desc and eval_total_games > 0:
         with tqdm(
             total=eval_total_games,
@@ -252,19 +264,66 @@ def eval_policy_value_against_baselines(
         ) as eval_pbar:
             for opponent_idx, (opponent_name, opponent_configs) in enumerate(opponent_configs_list):
                 opponent_seed = derive_seed(seed, "opponent", opponent_name, opponent_idx)
-                (
-                    wins,
-                    turns_list,
-                    value_preds,
-                    returns,
-                    expert_labels,
-                    expert_masked_preds,
-                ) = run_policy_value_eval_vectorized(
+                seat_results: dict[str, tuple[int, list[int], list[float], list[float], list[int], list[int]]] = {}
+                for seat_mode in ("first", "second"):
+                    seat_seed = derive_seed(opponent_seed, "seat", seat_mode)
+                    seat_results[seat_mode] = run_policy_value_eval_vectorized(
+                        policy_model=policy_model,
+                        critic_model=critic_model,
+                        model_type=model_type,
+                        map_type=map_type,
+                        num_games=seat_eval_games,
+                        gamma=gamma,
+                        opponent_configs=opponent_configs,
+                        device=device,
+                        num_envs=num_envs,
+                        vps_to_win=vps_to_win,
+                        discard_limit=discard_limit,
+                        deterministic=deterministic,
+                        nn_seat=seat_mode,
+                        compare_to_expert=compare_to_expert,
+                        expert_config=expert_config,
+                        actor_observation_level=actor_observation_level,
+                        critic_observation_level=critic_observation_level,
+                        seed=seat_seed,
+                        progress_callback=eval_pbar.update,
+                    )
+
+                first_wins, first_turns, first_value_preds, first_returns, first_expert_labels, first_expert_preds = seat_results["first"]
+                second_wins, second_turns, second_value_preds, second_returns, second_expert_labels, second_expert_preds = seat_results["second"]
+
+                first_rate = first_wins / seat_eval_games
+                second_rate = second_wins / seat_eval_games
+                metrics[f"eval/games_vs_{opponent_name}_first"] = float(seat_eval_games)
+                metrics[f"eval/games_vs_{opponent_name}_second"] = float(seat_eval_games)
+                metrics[f"eval/win_rate_vs_{opponent_name}_first"] = first_rate
+                metrics[f"eval/win_rate_vs_{opponent_name}_second"] = second_rate
+                metrics[f"eval/win_rate_vs_{opponent_name}"] = 0.5 * (first_rate + second_rate)
+                turns_list = first_turns + second_turns
+                metrics[f"eval/avg_turns_vs_{opponent_name}"] = (
+                    sum(turns_list) / len(turns_list) if turns_list else 0.0
+                )
+
+                all_value_preds.extend(first_value_preds)
+                all_value_preds.extend(second_value_preds)
+                all_returns.extend(first_returns)
+                all_returns.extend(second_returns)
+                all_expert_labels.extend(first_expert_labels)
+                all_expert_labels.extend(second_expert_labels)
+                all_expert_masked_preds.extend(first_expert_preds)
+                all_expert_masked_preds.extend(second_expert_preds)
+    else:
+        for opponent_idx, (opponent_name, opponent_configs) in enumerate(opponent_configs_list):
+            opponent_seed = derive_seed(seed, "opponent", opponent_name, opponent_idx)
+            seat_results: dict[str, tuple[int, list[int], list[float], list[float], list[int], list[int]]] = {}
+            for seat_mode in ("first", "second"):
+                seat_seed = derive_seed(opponent_seed, "seat", seat_mode)
+                seat_results[seat_mode] = run_policy_value_eval_vectorized(
                     policy_model=policy_model,
                     critic_model=critic_model,
                     model_type=model_type,
                     map_type=map_type,
-                    num_games=num_games,
+                    num_games=seat_eval_games,
                     gamma=gamma,
                     opponent_configs=opponent_configs,
                     device=device,
@@ -272,68 +331,37 @@ def eval_policy_value_against_baselines(
                     vps_to_win=vps_to_win,
                     discard_limit=discard_limit,
                     deterministic=deterministic,
+                    nn_seat=seat_mode,
                     compare_to_expert=compare_to_expert,
                     expert_config=expert_config,
                     actor_observation_level=actor_observation_level,
                     critic_observation_level=critic_observation_level,
-                    seed=opponent_seed,
-                    progress_callback=eval_pbar.update,
+                    seed=seat_seed,
                 )
 
-                # Log policy metrics for this opponent
-                metrics[f"eval/win_rate_vs_{opponent_name}"] = (
-                    wins / num_games if num_games > 0 else 0.0
-                )
-                metrics[f"eval/avg_turns_vs_{opponent_name}"] = (
-                    sum(turns_list) / len(turns_list) if turns_list else 0.0
-                )
+            first_wins, first_turns, first_value_preds, first_returns, first_expert_labels, first_expert_preds = seat_results["first"]
+            second_wins, second_turns, second_value_preds, second_returns, second_expert_labels, second_expert_preds = seat_results["second"]
 
-                all_value_preds.extend(value_preds)
-                all_returns.extend(returns)
-                all_expert_labels.extend(expert_labels)
-                all_expert_masked_preds.extend(expert_masked_preds)
-    else:
-        for opponent_idx, (opponent_name, opponent_configs) in enumerate(opponent_configs_list):
-            opponent_seed = derive_seed(seed, "opponent", opponent_name, opponent_idx)
-            (
-                wins,
-                turns_list,
-                value_preds,
-                returns,
-                expert_labels,
-                expert_masked_preds,
-            ) = run_policy_value_eval_vectorized(
-                policy_model=policy_model,
-                critic_model=critic_model,
-                model_type=model_type,
-                map_type=map_type,
-                num_games=num_games,
-                gamma=gamma,
-                opponent_configs=opponent_configs,
-                device=device,
-                num_envs=num_envs,
-                vps_to_win=vps_to_win,
-                discard_limit=discard_limit,
-                deterministic=deterministic,
-                compare_to_expert=compare_to_expert,
-                expert_config=expert_config,
-                actor_observation_level=actor_observation_level,
-                critic_observation_level=critic_observation_level,
-                seed=opponent_seed,
-            )
-
-            # Log policy metrics for this opponent
-            metrics[f"eval/win_rate_vs_{opponent_name}"] = (
-                wins / num_games if num_games > 0 else 0.0
-            )
+            first_rate = first_wins / seat_eval_games
+            second_rate = second_wins / seat_eval_games
+            metrics[f"eval/games_vs_{opponent_name}_first"] = float(seat_eval_games)
+            metrics[f"eval/games_vs_{opponent_name}_second"] = float(seat_eval_games)
+            metrics[f"eval/win_rate_vs_{opponent_name}_first"] = first_rate
+            metrics[f"eval/win_rate_vs_{opponent_name}_second"] = second_rate
+            metrics[f"eval/win_rate_vs_{opponent_name}"] = 0.5 * (first_rate + second_rate)
+            turns_list = first_turns + second_turns
             metrics[f"eval/avg_turns_vs_{opponent_name}"] = (
                 sum(turns_list) / len(turns_list) if turns_list else 0.0
             )
 
-            all_value_preds.extend(value_preds)
-            all_returns.extend(returns)
-            all_expert_labels.extend(expert_labels)
-            all_expert_masked_preds.extend(expert_masked_preds)
+            all_value_preds.extend(first_value_preds)
+            all_value_preds.extend(second_value_preds)
+            all_returns.extend(first_returns)
+            all_returns.extend(second_returns)
+            all_expert_labels.extend(first_expert_labels)
+            all_expert_labels.extend(second_expert_labels)
+            all_expert_masked_preds.extend(first_expert_preds)
+            all_expert_masked_preds.extend(second_expert_preds)
 
     # Compute critic metrics
     if len(all_value_preds) > 0:

@@ -331,3 +331,41 @@ def test_single_agent_step_ignores_stale_action_after_done():
         assert bool(reset_truncations[0]) is False
     finally:
         env.close()
+
+
+def test_single_agent_fixed_seat_reset_respects_requested_order():
+    first_env = SingleAgentCatanatronPufferEnv(
+        config={
+            "map_type": "BASE",
+            "vps_to_win": 10,
+            "discard_limit": 7,
+            "enemies": create_opponents(["F"]),
+            "reward_function": WinReward(),
+            "shared_critic": True,
+            "nn_seat": "first",
+        }
+    )
+    second_env = SingleAgentCatanatronPufferEnv(
+        config={
+            "map_type": "BASE",
+            "vps_to_win": 10,
+            "discard_limit": 7,
+            "enemies": create_opponents(["F"]),
+            "reward_function": WinReward(),
+            "shared_critic": True,
+            "nn_seat": "second",
+        }
+    )
+
+    try:
+        first_env.reset(seed=123)
+        second_env.reset(seed=123)
+
+        assert first_env.game is not None
+        assert second_env.game is not None
+        assert first_env.game.state.colors[0] == first_env.p0.color
+        assert second_env.game.state.colors[1] == second_env.p0.color
+        assert second_env.game.state.colors[0] != second_env.p0.color
+    finally:
+        first_env.close()
+        second_env.close()

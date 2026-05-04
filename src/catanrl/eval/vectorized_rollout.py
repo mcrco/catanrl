@@ -172,6 +172,7 @@ def run_policy_value_eval_vectorized(
     vps_to_win: int = 15,
     discard_limit: int = 9,
     deterministic: bool = True,
+    nn_seat: SeatOption = "random",
     compare_to_expert: bool = False,
     expert_config: Optional[str] = None,
     actor_observation_level: ActorObservationLevel = "private",
@@ -204,6 +205,8 @@ def run_policy_value_eval_vectorized(
         return (0, [], [], [], [], [])
 
     num_players = len(opponent_configs) + 1
+    if nn_seat == "second" and num_players < 2:
+        raise ValueError("Second-seat baseline eval requires at least two players.")
     dims = compute_single_agent_dims(
         num_players,
         map_type,
@@ -233,6 +236,7 @@ def run_policy_value_eval_vectorized(
         map_type=map_type,
         opponent_configs=list(opponent_configs),
         num_envs=num_envs,
+        nn_seat=nn_seat,
         vps_to_win=vps_to_win,
         discard_limit=discard_limit,
         expert_config=expert_config if compare_to_expert else None,
