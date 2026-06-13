@@ -3,6 +3,7 @@
 wandb/
 JSettlers2/
 **/weights
+/experiments/
 *.svg
 third_party/
 

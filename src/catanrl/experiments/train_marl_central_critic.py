@@ -2,6 +2,15 @@ import argparse
 import os
 import wandb
 from catanrl.algorithms.ppo.marl_ppo_central_critic import train
+from catanrl.experiment_store import (
+    GameConfig,
+    KIND_POLICY,
+    KIND_VALUE,
+    default_checkpoints_dir,
+    make_experiment_name,
+    network_spec_from_model,
+    save_experiment,
+)
 
 
 def main():
@@ -105,7 +114,6 @@ def main():
         default="512,512",
         help="Hidden dimensions for critic network (comma-separated)",
     )
-    parser.add_argument("--save-path", type=str, default="weights/marl_central_critic")
     parser.add_argument(
         "--eval-games",
         type=int,
@@ -173,6 +181,13 @@ def main():
         action="store_true",
         help="Use greedy action selection during data collection (default: sample)",
     )
+    parser.add_argument(
+        "--experiment-name",
+        type=str,
+        default=None,
+        help="Experiment name (folder under experiments/ and W&B run name). "
+        "Defaults to --wandb-run-name, else an auto-generated name.",
+    )
     parser.add_argument("--wandb", action="store_true", help="Enable Weights & Biases logging")
     parser.add_argument("--wandb-project", type=str, default="catan-marl")
     parser.add_argument("--wandb-run-name", type=str, default=None)
@@ -201,6 +216,13 @@ def main():
     if args.load_critic_weights and not os.path.exists(args.load_critic_weights):
         print(f"Error: Critic weights file '{args.load_critic_weights}' not found!")
         return
+
+    # Resolve experiment identity (shared by the folder and the W&B run).
+    experiment_name = make_experiment_name("marl-cc", args.wandb_run_name, args.experiment_name)
+    if args.wandb and not args.wandb_run_name:
+        args.wandb_run_name = experiment_name
+    args.save_path = default_checkpoints_dir(experiment_name)
+    os.makedirs(args.save_path, exist_ok=True)
 
     # Parse hidden dimensions
     policy_hidden_dims = [int(dim) for dim in args.policy_hidden_dims.split(",") if dim.strip()]
@@ -263,7 +285,7 @@ def main():
         wandb_config = {"mode": "disabled", "config": config_dict}
 
     # Train model
-    train(
+    policy_model, critic_model = train(
         num_players=args.num_players,
         map_type=args.map_type,
         actor_observation_level=args.actor_observation_level,
@@ -310,13 +332,44 @@ def main():
         metric_window=args.metric_window,
     )
 
+    networks = {
+        "policy": network_spec_from_model(
+            policy_model,
+            kind=KIND_POLICY,
+            model_type=args.model_type,
+            observation_level=args.actor_observation_level,
+        )
+    }
+    if critic_model is not None:
+        networks["critic"] = network_spec_from_model(
+            critic_model,
+            kind=KIND_VALUE,
+            observation_level=args.critic_observation_level,
+        )
+    exp_path = save_experiment(
+        experiment_name,
+        args.save_path,
+        algorithm="marl_cc",
+        game=GameConfig(
+            num_players=args.num_players,
+            map_type=args.map_type,
+            vps_to_win=args.vps_to_win,
+            discard_limit=args.discard_limit,
+        ),
+        networks=networks,
+        train_config=config_dict,
+        wandb_info={"project": args.wandb_project, "name": args.wandb_run_name} if args.wandb else {},
+    )
+
     print("\n" + "=" * 60)
     print("Multi-agent central critic training complete!")
     print("=" * 60)
     if args.save_path:
-        print("Policy models saved under the configured directory.")
+        print(f"Policy models saved under: {args.save_path}")
         print("Best policy: policy_best.pt")
         print("Best critic: critic_best.pt")
+    if exp_path:
+        print(f"Experiment:  {exp_path}  (load via load_experiment('{experiment_name}'))")
 
     if args.wandb:
         wandb.finish()

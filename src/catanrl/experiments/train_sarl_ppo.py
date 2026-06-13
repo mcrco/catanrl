@@ -4,6 +4,15 @@ import wandb
 
 from ..envs.puffer.common import compute_single_agent_dims, create_opponents
 from ..algorithms.ppo.sarl_ppo import train
+from ..experiment_store import (
+    GameConfig,
+    KIND_POLICY,
+    KIND_VALUE,
+    default_checkpoints_dir,
+    make_experiment_name,
+    network_spec_from_model,
+    save_experiment,
+)
 from ..utils.catanatron_action_space import get_action_space_size
 
 
@@ -123,12 +132,6 @@ def main():
         help="Critic fusion hidden dim for privileged xdim backbones (default: critic output dim)",
     )
     parser.add_argument(
-        "--save-path",
-        type=str,
-        default=None,
-        help="Directory to save policy snapshots/checkpoints (default: weights/{wandb-run-name} with wandb, else weights/sarl_ppo)",
-    )
-    parser.add_argument(
         "--save-every-updates",
         type=int,
         default=1,
@@ -198,6 +201,13 @@ def main():
         default="shaped",
         choices=["shaped", "win"],
         help="Reward function type (default: shaped)",
+    )
+    parser.add_argument(
+        "--experiment-name",
+        type=str,
+        default=None,
+        help="Experiment name (folder under experiments/ and W&B run name). "
+        "Defaults to --wandb-run-name, else an auto-generated name.",
     )
     parser.add_argument("--wandb", action="store_true", help="Enable Weights & Biases logging")
     parser.add_argument(
@@ -302,20 +312,15 @@ def main():
         print("Please train a model first")
         return
 
-    # Set default save path
-    if args.save_path is None:
-        if args.wandb and args.wandb_run_name:
-            # Use wandb run name as directory
-            args.save_path = f"weights/{args.wandb_run_name}"
-        else:
-            # Default fallback
-            args.save_path = "weights/sarl_ppo"
+    # Resolve the experiment identity. The same name is used for the experiment
+    # folder and (when enabled) the W&B run, so they always cross-reference.
+    experiment_name = make_experiment_name("sarl-ppo", args.wandb_run_name, args.experiment_name)
+    if args.wandb and not args.wandb_run_name:
+        args.wandb_run_name = experiment_name
 
-    # Create save directory
-    save_dir = os.path.dirname(args.save_path)
-    if save_dir and not os.path.exists(save_dir):
-        print(f"Creating directory '{save_dir}'")
-        os.makedirs(save_dir, exist_ok=True)
+    # Checkpoints always live inside the experiment folder.
+    args.save_path = default_checkpoints_dir(experiment_name)
+    os.makedirs(args.save_path, exist_ok=True)
 
     # Create opponents first to determine number of players
     if not args.opponents:
@@ -359,13 +364,8 @@ def main():
         if args.lr_scheduler_total_iters is not None:
             lr_scheduler_kwargs["total_iters"] = args.lr_scheduler_total_iters
 
-    # Prepare wandb config
-    wandb_config = None
-    if args.wandb:
-        wandb_config = {
-            "project": args.wandb_project,
-            "name": args.wandb_run_name,
-            "config": {
+    # Prepare training config (captured into experiment metadata and W&B).
+    train_config = {
                 "algorithm": "PPO",
                 "total_timesteps": args.total_timesteps,
                 "rollout_steps": args.rollout_steps,
@@ -407,11 +407,18 @@ def main():
                 "deterministic_policy": args.deterministic_policy,
                 "max_grad_norm": args.max_grad_norm,
                 "target_kl": args.target_kl,
-            },
+    }
+
+    wandb_config = None
+    if args.wandb:
+        wandb_config = {
+            "project": args.wandb_project,
+            "name": args.wandb_run_name,
+            "config": train_config,
         }
 
     # Train model
-    train(
+    policy_model, critic_model = train(
         input_dim=input_dim,
         num_actions=action_space_size,
         model_type=args.model_type,
@@ -460,10 +467,42 @@ def main():
         target_kl=args.target_kl,
     )
 
+    # Write self-describing experiment metadata directly from the trained models.
+    networks = {
+        "policy": network_spec_from_model(
+            policy_model,
+            kind=KIND_POLICY,
+            model_type=args.model_type,
+            observation_level=args.actor_observation_level,
+        )
+    }
+    if critic_model is not None:
+        networks["critic"] = network_spec_from_model(
+            critic_model,
+            kind=KIND_VALUE,
+            observation_level=args.critic_observation_level,
+        )
+    exp_path = save_experiment(
+        experiment_name,
+        args.save_path,
+        algorithm="sarl_ppo",
+        game=GameConfig(
+            num_players=num_players,
+            map_type=args.map_type,
+            vps_to_win=args.vps_to_win,
+            discard_limit=args.discard_limit,
+        ),
+        networks=networks,
+        train_config=train_config,
+        wandb_info={"project": args.wandb_project, "name": args.wandb_run_name} if args.wandb else {},
+    )
+
     print("\n" + "=" * 60)
     print("Training Complete!")
     print("=" * 60)
     print(f"Model saved: {args.save_path}")
+    if exp_path:
+        print(f"Experiment:  {exp_path}  (load via load_experiment('{experiment_name}'))")
 
     # Finish wandb
     if args.wandb:

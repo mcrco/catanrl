@@ -15,6 +15,11 @@ from catanatron.models.player import Player
 
 from catanrl.envs.puffer.common import compute_single_agent_dims
 from catanrl.eval.eval_nn_vs_catanatron import eval
+from catanrl.experiment_store import (
+    backbone_display_type,
+    backbone_hidden_dims,
+    load_experiment,
+)
 from catanrl.features.catanatron_utils import ActorObservationLevel, COLOR_ORDER
 from catanrl.models.backbones import (
     BackboneConfig,
@@ -177,12 +182,29 @@ def main():
         ),
     )
 
-    # Model weights
+    # Experiment-based loading (preferred): rebuilds the model from metadata.
+    parser.add_argument(
+        "--experiment",
+        type=str,
+        default=None,
+        help=(
+            "Experiment name (under experiments/) or path. When set, the model "
+            "architecture and observation level are read from metadata.json and "
+            "the architecture flags above are ignored."
+        ),
+    )
+    parser.add_argument(
+        "--which",
+        type=str,
+        default="best",
+        help="Checkpoint selector for --experiment: 'best', 'latest', or a step.",
+    )
+    # Model weights (legacy path: requires matching architecture flags).
     parser.add_argument(
         "--policy-weights",
         type=str,
-        required=True,
-        help="Path to policy model weights (.pt file)",
+        default=None,
+        help="Path to policy model weights (.pt file). Alternative to --experiment.",
     )
     # Evaluation settings
     parser.add_argument(
@@ -248,6 +270,9 @@ def main():
 
     args = parser.parse_args()
 
+    if (args.experiment is None) == (args.policy_weights is None):
+        parser.error("Provide exactly one of --experiment or --policy-weights.")
+
     opponents = parse_opponents(args.opponents)
     num_players = len(opponents) + 1
 
@@ -256,6 +281,23 @@ def main():
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     else:
         device = torch.device(args.device)
+
+    # Experiment path: rebuild model from metadata and adopt its architecture.
+    experiment_model = None
+    if args.experiment is not None:
+        exp = load_experiment(args.experiment)
+        args.model_type = exp.model_type or args.model_type
+        args.map_type = exp.map_type
+        args.backbone_type = backbone_display_type(exp.policy_spec.backbone)
+        args.policy_hidden_dims = backbone_hidden_dims(exp.policy_spec.backbone)
+        if exp.policy_spec.observation_level is not None:
+            args.actor_observation_level = exp.policy_spec.observation_level
+        if exp.num_players != num_players:
+            parser.error(
+                f"--opponents implies {num_players} players but experiment "
+                f"'{args.experiment}' was trained for {exp.num_players}."
+            )
+        experiment_model = exp.build_policy(which=args.which, device=device)
 
     print(f"\n{'=' * 60}")
     print("Policy Evaluation vs Catanatron Bot")
@@ -280,22 +322,23 @@ def main():
             config=vars(args) | {"num_players": num_players},
         )
 
-    # Build model
-    model = build_policy_model(
-        backbone_type=args.backbone_type,
-        model_type=args.model_type,
-        hidden_dims=args.policy_hidden_dims,
-        num_players=num_players,
-        map_type=args.map_type,
-        actor_observation_level=args.actor_observation_level,
-        device=device,
-    )
-
-    # Load weights
-    state_dict = torch.load(args.policy_weights, map_location=device)
-    model.load_state_dict(state_dict)
-    model.eval()
-    print(f"Loaded policy weights from {args.policy_weights}")
+    if experiment_model is not None:
+        model = experiment_model
+        print(f"Loaded policy from experiment '{args.experiment}' ({args.which})")
+    else:
+        model = build_policy_model(
+            backbone_type=args.backbone_type,
+            model_type=args.model_type,
+            hidden_dims=args.policy_hidden_dims,
+            num_players=num_players,
+            map_type=args.map_type,
+            actor_observation_level=args.actor_observation_level,
+            device=device,
+        )
+        state_dict = torch.load(args.policy_weights, map_location=device)
+        model.load_state_dict(state_dict)
+        model.eval()
+        print(f"Loaded policy weights from {args.policy_weights}")
 
     # Create NN player
     nn_player = NNPolicyPlayer(
