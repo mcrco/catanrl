@@ -289,6 +289,30 @@ def main():
         help="MCTS simulations per move",
     )
     parser.add_argument(
+        "--num-search-workers",
+        type=int,
+        default=1,
+        help="Threaded MCTS search workers for the NN player. 1 preserves sequential search.",
+    )
+    parser.add_argument(
+        "--inference-batch-size",
+        type=int,
+        default=32,
+        help="Maximum leaf evaluations per batched NN inference step.",
+    )
+    parser.add_argument(
+        "--inference-wait-ms",
+        type=float,
+        default=1.0,
+        help="Maximum milliseconds the inference server waits to fill a batch.",
+    )
+    parser.add_argument(
+        "--virtual-loss",
+        type=float,
+        default=1.0,
+        help="Virtual loss applied during threaded tree traversal.",
+    )
+    parser.add_argument(
         "--c-puct",
         type=float,
         default=1.5,
@@ -438,6 +462,11 @@ def main():
     print(f"Critic weights: {args.critic_weights}")
     print(f"Critic mode: {args.critic_mode}")
     print(f"MCTS simulations: {args.num_simulations} | c_puct: {args.c_puct}")
+    print(
+        "MCTS workers: "
+        f"{args.num_search_workers} | inference batch: {args.inference_batch_size} "
+        f"| wait: {args.inference_wait_ms} ms | virtual loss: {args.virtual_loss}"
+    )
     print(f"Prunning: {args.prunning}")
     print(f"Adversarial policy (inside MCTS): {args.adversarial_policy}")
     print(f"Opponents: {args.opponents}")
@@ -499,6 +528,10 @@ def main():
         critic_mode=args.critic_mode,
         actor_observation_level=args.actor_observation_level,
         critic_observation_level=args.critic_observation_level,
+        num_search_workers=args.num_search_workers,
+        inference_batch_size=args.inference_batch_size,
+        inference_wait_ms=args.inference_wait_ms,
+        virtual_loss=args.virtual_loss,
     )
 
     print(f"\nRunning {args.num_games} games...")

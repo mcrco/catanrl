@@ -55,8 +55,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--num-workers",
         type=int,
-        default=1,
-        help="Number of parallel self-play workers (1 keeps the single-process trainer)",
+        default=min(16, os.cpu_count() or 4),
+        help="Number of across-games self-play worker processes feeding a central batched "
+        "inference server (the default strategy). 1 keeps the single-process trainer. "
+        "Throughput on a single shared GPU saturates near the core count; oversubscribing "
+        "past it trades latency for a little more aggregate throughput.",
     )
     parser.add_argument(
         "--model-type",

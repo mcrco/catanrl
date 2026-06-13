@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import math
+import multiprocessing as mp
+import queue
 import random
+import threading
+import time
 from collections import Counter, defaultdict
-from dataclasses import dataclass
-from typing import Callable, Literal, Tuple
+from concurrent.futures import Future
+from dataclasses import dataclass, field
+from typing import Callable, Literal, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -47,10 +52,16 @@ class _Node:
     prior_action: object | None = None
     visits: int = 0
     value_sum: float = 0.0
+    virtual_visits: int = 0
+    virtual_value_sum: float = 0.0
+    expanding: bool = False
+    lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
+    condition: threading.Condition = field(init=False, repr=False)
 
     def __post_init__(self):
         self.children: dict[object, list[tuple["_Node", float]]] = defaultdict(list)
         self.action_priors: dict[object, float] = {}
+        self.condition = threading.Condition(self.lock)
 
     @property
     def expanded(self) -> bool:
@@ -59,6 +70,360 @@ class _Node:
     @property
     def value(self) -> float:
         return self.value_sum / self.visits if self.visits > 0 else 0.0
+
+    @property
+    def search_visits(self) -> int:
+        return self.visits + self.virtual_visits
+
+    @property
+    def search_value(self) -> float:
+        visits = self.search_visits
+        if visits <= 0:
+            return 0.0
+        return (self.value_sum + self.virtual_value_sum) / visits
+
+
+@dataclass
+class _LeafEvaluation:
+    policy_logits: np.ndarray
+    value: float
+
+
+@dataclass
+class _LeafEvaluationRequest:
+    actor_features: np.ndarray
+    critic_features: np.ndarray
+    future: Future[_LeafEvaluation]
+
+
+@dataclass
+class _RemoteLeafEvaluationRequest:
+    request_id: int
+    worker_id: int
+    actor_features: np.ndarray
+    critic_features: np.ndarray
+
+
+class _NNMCTSInferenceBackend:
+    def evaluate_leaf(
+        self,
+        actor_features: np.ndarray,
+        critic_features: np.ndarray,
+    ) -> _LeafEvaluation:
+        raise NotImplementedError
+
+    def close(self) -> None:
+        return
+
+
+class _LocalNNMCTSInferenceBackend(_NNMCTSInferenceBackend):
+    def __init__(
+        self,
+        policy_model: PolicyNetworkWrapper,
+        critic_model: ValueNetworkWrapper,
+        model_type: str,
+        device: str,
+    ) -> None:
+        self.policy_model = policy_model
+        self.critic_model = critic_model
+        self.model_type = model_type
+        self.device = device
+
+    def evaluate_leaf(
+        self,
+        actor_features: np.ndarray,
+        critic_features: np.ndarray,
+    ) -> _LeafEvaluation:
+        # Single forward for policy + critic, then one fused GPU->CPU transfer.
+        # Avoids the two separate syncs (.cpu() and .item()) that dominate the
+        # per-leaf latency at batch size 1.
+        with torch.inference_mode():
+            actor_tensor = torch.from_numpy(actor_features.reshape(1, -1)).to(self.device)
+            critic_tensor = torch.from_numpy(critic_features.reshape(1, -1)).to(self.device)
+            if self.model_type == "flat":
+                logits = self.policy_model(actor_tensor)
+            elif self.model_type == "hierarchical":
+                action_type_logits, param_logits = self.policy_model(actor_tensor)
+                logits = self.policy_model.get_flat_action_logits(action_type_logits, param_logits)
+            else:
+                raise ValueError(f"Unknown model_type '{self.model_type}'")
+            # Clone before the critic runs: under torch.compile(mode="reduce-overhead")
+            # the policy output lives in a CUDA-graph static buffer that the critic's
+            # graph replay would overwrite. Clone is a no-op-cheap copy when uncompiled.
+            policy_vector = logits.reshape(-1).clone()
+            value_tensor = self.critic_model(critic_tensor).reshape(-1)
+            combined = torch.cat([policy_vector, value_tensor]).to("cpu")
+
+        combined_np = combined.numpy()
+        policy_logits = np.array(combined_np[:-1], dtype=np.float32)
+        value = float(np.clip(float(combined_np[-1]), -1.0, 1.0))
+        return _LeafEvaluation(policy_logits=policy_logits, value=value)
+
+
+class _BatchedNNMCTSInferenceBackend(_NNMCTSInferenceBackend):
+    def __init__(
+        self,
+        policy_model: PolicyNetworkWrapper,
+        critic_model: ValueNetworkWrapper,
+        model_type: str,
+        device: str,
+        max_batch_size: int,
+        max_wait_ms: float,
+    ) -> None:
+        self.policy_model = policy_model
+        self.critic_model = critic_model
+        self.model_type = model_type
+        self.device = device
+        self.max_batch_size = max(1, int(max_batch_size))
+        self.max_wait_ms = max(0.0, float(max_wait_ms))
+        self._queue: queue.Queue[_LeafEvaluationRequest | None] = queue.Queue()
+        self._thread = threading.Thread(target=self._run, name="nn-mcts-inference", daemon=True)
+        self._closed = False
+        self._thread.start()
+
+    def evaluate_leaf(
+        self,
+        actor_features: np.ndarray,
+        critic_features: np.ndarray,
+    ) -> _LeafEvaluation:
+        if self._closed:
+            raise RuntimeError("NN MCTS inference backend is closed.")
+        future: Future[_LeafEvaluation] = Future()
+        self._queue.put(
+            _LeafEvaluationRequest(
+                actor_features=actor_features.astype(np.float32, copy=False),
+                critic_features=critic_features.astype(np.float32, copy=False),
+                future=future,
+            )
+        )
+        return future.result()
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._queue.put(None)
+        self._thread.join(timeout=5.0)
+
+    def _run(self) -> None:
+        while True:
+            first = self._queue.get()
+            if first is None:
+                break
+
+            batch = [first]
+            deadline = time.perf_counter() + (self.max_wait_ms / 1000.0)
+            while len(batch) < self.max_batch_size:
+                remaining = deadline - time.perf_counter()
+                if remaining <= 0:
+                    break
+                try:
+                    item = self._queue.get(timeout=remaining)
+                except queue.Empty:
+                    break
+                if item is None:
+                    self._queue.put(None)
+                    break
+                batch.append(item)
+
+            self._evaluate_batch(batch)
+
+    def _evaluate_batch(self, batch: list[_LeafEvaluationRequest]) -> None:
+        try:
+            actor_features = np.stack([request.actor_features for request in batch], axis=0)
+            critic_features = np.stack([request.critic_features for request in batch], axis=0)
+            with torch.no_grad():
+                actor_tensor = torch.from_numpy(actor_features).to(self.device)
+                if self.model_type == "flat":
+                    logits = self.policy_model(actor_tensor)
+                elif self.model_type == "hierarchical":
+                    action_type_logits, param_logits = self.policy_model(actor_tensor)
+                    logits = self.policy_model.get_flat_action_logits(
+                        action_type_logits, param_logits
+                    )
+                else:
+                    raise ValueError(f"Unknown model_type '{self.model_type}'")
+                policy_logits = logits.detach().cpu().numpy()
+
+                critic_tensor = torch.from_numpy(critic_features).to(self.device)
+                values = self.critic_model(critic_tensor).view(-1).detach().cpu().numpy()
+
+            for request, logits_np, value in zip(batch, policy_logits, values):
+                request.future.set_result(
+                    _LeafEvaluation(
+                        policy_logits=logits_np.astype(np.float32, copy=False),
+                        value=float(np.clip(float(value), -1.0, 1.0)),
+                    )
+                )
+        except Exception as exc:
+            for request in batch:
+                request.future.set_exception(exc)
+
+
+class _RemoteNNMCTSInferenceBackend(_NNMCTSInferenceBackend):
+    def __init__(
+        self,
+        worker_id: int,
+        request_queue: mp.Queue,
+        response_queue: mp.Queue,
+    ) -> None:
+        self.worker_id = worker_id
+        self.request_queue = request_queue
+        self.response_queue = response_queue
+        self._closed = False
+        self._next_request_id = 0
+        self._request_lock = threading.Lock()
+        self._pending: dict[int, Future[_LeafEvaluation]] = {}
+        self._listener = threading.Thread(
+            target=self._listen,
+            name=f"nn-mcts-remote-inference-{worker_id}",
+            daemon=True,
+        )
+        self._listener.start()
+
+    def evaluate_leaf(
+        self,
+        actor_features: np.ndarray,
+        critic_features: np.ndarray,
+    ) -> _LeafEvaluation:
+        if self._closed:
+            raise RuntimeError("Remote NN MCTS inference backend is closed.")
+
+        with self._request_lock:
+            request_id = self._next_request_id
+            self._next_request_id += 1
+            future: Future[_LeafEvaluation] = Future()
+            self._pending[request_id] = future
+
+        self.request_queue.put(
+            _RemoteLeafEvaluationRequest(
+                request_id=request_id,
+                worker_id=self.worker_id,
+                actor_features=actor_features.astype(np.float32, copy=False),
+                critic_features=critic_features.astype(np.float32, copy=False),
+            )
+        )
+        return future.result()
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self.response_queue.put(None)
+        self._listener.join(timeout=5.0)
+
+    def _listen(self) -> None:
+        while True:
+            message = self.response_queue.get()
+            if message is None:
+                break
+
+            request_id = int(message["request_id"])
+            with self._request_lock:
+                future = self._pending.pop(request_id, None)
+            if future is None:
+                continue
+
+            error = message.get("error")
+            if error is not None:
+                future.set_exception(RuntimeError(str(error)))
+            else:
+                future.set_result(
+                    _LeafEvaluation(
+                        policy_logits=message["policy_logits"],
+                        value=float(message["value"]),
+                    )
+                )
+
+
+class _CentralNNMCTSInferenceServer(threading.Thread):
+    def __init__(
+        self,
+        policy_model: PolicyNetworkWrapper,
+        critic_model: ValueNetworkWrapper,
+        model_type: str,
+        device: str | torch.device,
+        request_queue: mp.Queue,
+        response_queues: Sequence[mp.Queue],
+        max_batch_size: int,
+        max_wait_ms: float,
+    ) -> None:
+        super().__init__(name="nn-mcts-central-inference", daemon=True)
+        self.policy_model = policy_model
+        self.critic_model = critic_model
+        self.model_type = model_type
+        self.device = str(device)
+        self.request_queue = request_queue
+        self.response_queues = response_queues
+        self.max_batch_size = max(1, int(max_batch_size))
+        self.max_wait_ms = max(0.0, float(max_wait_ms))
+        self._stop_event = threading.Event()
+
+    def run(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                first = self.request_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+
+            if first is None:
+                break
+
+            batch = [first]
+            deadline = time.perf_counter() + (self.max_wait_ms / 1000.0)
+            while len(batch) < self.max_batch_size:
+                remaining = deadline - time.perf_counter()
+                if remaining <= 0:
+                    break
+                try:
+                    item = self.request_queue.get(timeout=remaining)
+                except queue.Empty:
+                    break
+                if item is None:
+                    self.request_queue.put(None)
+                    break
+                batch.append(item)
+
+            self._evaluate_batch(batch)
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        self.request_queue.put(None)
+        self.join(timeout=5.0)
+
+    def _evaluate_batch(self, batch: list[_RemoteLeafEvaluationRequest]) -> None:
+        try:
+            actor_features = np.stack([request.actor_features for request in batch], axis=0)
+            critic_features = np.stack([request.critic_features for request in batch], axis=0)
+            with torch.no_grad():
+                actor_tensor = torch.from_numpy(actor_features).to(self.device)
+                if self.model_type == "flat":
+                    logits = self.policy_model(actor_tensor)
+                elif self.model_type == "hierarchical":
+                    action_type_logits, param_logits = self.policy_model(actor_tensor)
+                    logits = self.policy_model.get_flat_action_logits(
+                        action_type_logits, param_logits
+                    )
+                else:
+                    raise ValueError(f"Unknown model_type '{self.model_type}'")
+                policy_logits = logits.detach().cpu().numpy()
+
+                critic_tensor = torch.from_numpy(critic_features).to(self.device)
+                values = self.critic_model(critic_tensor).view(-1).detach().cpu().numpy()
+
+            for request, logits_np, value in zip(batch, policy_logits, values):
+                self.response_queues[request.worker_id].put(
+                    {
+                        "request_id": request.request_id,
+                        "policy_logits": logits_np.astype(np.float32, copy=False),
+                        "value": float(np.clip(float(value), -1.0, 1.0)),
+                    }
+                )
+        except Exception as exc:
+            for request in batch:
+                self.response_queues[request.worker_id].put(
+                    {"request_id": request.request_id, "error": repr(exc)}
+                )
 
 
 class NNMCTSPlayer(Player):
@@ -70,8 +435,8 @@ class NNMCTSPlayer(Player):
         self,
         color: Color,
         model_type: str,
-        policy_model: PolicyNetworkWrapper,
-        critic_model: ValueNetworkWrapper,
+        policy_model: PolicyNetworkWrapper | None,
+        critic_model: ValueNetworkWrapper | None,
         map_type: Literal["BASE", "MINI", "TOURNAMENT"] = "BASE",
         num_simulations: int = 64,
         c_puct: float = 1.5,
@@ -81,11 +446,17 @@ class NNMCTSPlayer(Player):
         critic_mode: Literal["full", "guessed_dev_cards"] = "full",
         actor_observation_level: ActorObservationLevel = "private",
         critic_observation_level: CriticObservationLevel = "full",
+        num_search_workers: int = 1,
+        inference_batch_size: int = 32,
+        inference_wait_ms: float = 1.0,
+        virtual_loss: float = 1.0,
+        device: str | torch.device | None = None,
+        inference_backend: _NNMCTSInferenceBackend | None = None,
         **kwargs,
     ):
         super().__init__(color, is_bot=True, **kwargs)
 
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.device = str(device) if device is not None else ("cuda" if torch.cuda.is_available() else "cpu")
         self.model_type = model_type
         self.map_type = map_type
         self.num_simulations = int(num_simulations)
@@ -96,6 +467,10 @@ class NNMCTSPlayer(Player):
         self.critic_mode = self._normalize_critic_mode(critic_mode)
         self.actor_observation_level = actor_observation_level
         self.critic_observation_level = critic_observation_level
+        self.num_search_workers = max(1, int(num_search_workers))
+        self.inference_batch_size = max(1, int(inference_batch_size))
+        self.inference_wait_ms = max(0.0, float(inference_wait_ms))
+        self.virtual_loss = float(virtual_loss)
         self._opponents_by_color: dict[Color, Player] = {}
         self._critic_index_cache: dict[int, dict[str, int]] = {}
         self._observation_index_cache: dict[tuple[int, str], np.ndarray] = {}
@@ -103,23 +478,42 @@ class NNMCTSPlayer(Player):
 
         if self.opponent_factory is None and self.opponent_policy != "self":
             self.opponent_factory = self._build_opponent_factory(self.opponent_policy)
-        self.policy_model = policy_model.to(self.device)
-        self.critic_model = critic_model.to(self.device)
-        self.policy_model.eval()
-        self.critic_model.eval()
+        self.policy_model = None
+        self.critic_model = None
+        self._owns_inference_backend = inference_backend is None
+        if inference_backend is None:
+            if policy_model is None or critic_model is None:
+                raise ValueError(
+                    "policy_model and critic_model are required when inference_backend is not supplied."
+                )
+            self.policy_model = policy_model.to(self.device)
+            self.critic_model = critic_model.to(self.device)
+            self.policy_model.eval()
+            self.critic_model.eval()
+            self._inference_backend = _LocalNNMCTSInferenceBackend(
+                self.policy_model,
+                self.critic_model,
+                self.model_type,
+                self.device,
+            )
+        else:
+            self._inference_backend = inference_backend
 
     def decide(self, game, playable_actions):
         if len(playable_actions) == 1:
             return playable_actions[0]
 
         root = _Node(game=game.copy(), parent=None)
-        self._expand(root)
+        self._expand(root, self._inference_backend)
 
         if not root.children:
             return playable_actions[0]
 
-        for _ in range(self.num_simulations):
-            self._run_simulation(root)
+        if self.num_search_workers <= 1:
+            for _ in range(self.num_simulations):
+                self._run_simulation(root, self._inference_backend)
+        else:
+            self._run_parallel_search(root)
 
         best_action = max(
             root.children.keys(),
@@ -129,7 +523,11 @@ class NNMCTSPlayer(Player):
             best_action, playable_actions, len(game.state.colors), tuple(game.state.colors)
         )
 
-    def _run_simulation(self, root: _Node) -> None:
+    def _run_simulation(
+        self,
+        root: _Node,
+        inference_backend: _NNMCTSInferenceBackend,
+    ) -> None:
         node = root
         path = [node]
 
@@ -141,16 +539,118 @@ class NNMCTSPlayer(Player):
             winner = node.game.winning_color()
             leaf_value = 1.0 if winner == self.color else -1.0
         else:
-            self._expand(node)
-            leaf_value = self._critic_value(node.game)
+            leaf_value = self._expand(node, inference_backend).value
 
         for path_node in reversed(path):
             path_node.visits += 1
             path_node.value_sum += leaf_value
 
-    def _expand(self, node: _Node) -> None:
-        if node.game.winning_color() is not None or node.expanded:
+    def _run_parallel_search(self, root: _Node) -> None:
+        if self._owns_inference_backend:
+            if self.policy_model is None or self.critic_model is None:
+                raise RuntimeError("Local models are not configured for batched inference.")
+            inference_backend: _NNMCTSInferenceBackend = _BatchedNNMCTSInferenceBackend(
+                self.policy_model,
+                self.critic_model,
+                self.model_type,
+                self.device,
+                self.inference_batch_size,
+                self.inference_wait_ms,
+            )
+            close_inference_backend = True
+        else:
+            inference_backend = self._inference_backend
+            close_inference_backend = False
+        completed = 0
+        completed_lock = threading.Lock()
+        first_error: list[BaseException] = []
+
+        def claim_simulation() -> bool:
+            nonlocal completed
+            with completed_lock:
+                if completed >= self.num_simulations or first_error:
+                    return False
+                completed += 1
+                return True
+
+        def worker() -> None:
+            try:
+                while claim_simulation():
+                    self._run_parallel_simulation(root, inference_backend)
+            except BaseException as exc:
+                with completed_lock:
+                    first_error.append(exc)
+
+        threads = [
+            threading.Thread(target=worker, name=f"nn-mcts-search-{idx}", daemon=True)
+            for idx in range(self.num_search_workers)
+        ]
+        try:
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+        finally:
+            if close_inference_backend:
+                inference_backend.close()
+
+        if first_error:
+            raise first_error[0]
+
+    def _run_parallel_simulation(
+        self,
+        root: _Node,
+        inference_backend: _NNMCTSInferenceBackend,
+    ) -> None:
+        node = root
+        path = [node]
+
+        while True:
+            if node.game.winning_color() is not None:
+                winner = node.game.winning_color()
+                leaf_value = 1.0 if winner == self.color else -1.0
+                self._backpropagate_parallel(path, leaf_value)
+                return
+
+            with node.condition:
+                while node.expanding:
+                    node.condition.wait()
+                if node.expanded:
+                    child = self._select_locked(node)
+                    with child.lock:
+                        child.virtual_visits += 1
+                        child.virtual_value_sum -= self.virtual_loss
+                    node = child
+                    path.append(child)
+                    continue
+                node.expanding = True
+
+            try:
+                leaf_value = self._expand(node, inference_backend).value
+            finally:
+                with node.condition:
+                    node.expanding = False
+                    node.condition.notify_all()
+
+            self._backpropagate_parallel(path, leaf_value)
             return
+
+    def _backpropagate_parallel(self, path: list[_Node], leaf_value: float) -> None:
+        for path_node in reversed(path):
+            with path_node.lock:
+                if path_node is not path[0] and path_node.virtual_visits > 0:
+                    path_node.virtual_visits -= 1
+                    path_node.virtual_value_sum += self.virtual_loss
+                path_node.visits += 1
+                path_node.value_sum += leaf_value
+
+    def _expand(
+        self,
+        node: _Node,
+        inference_backend: _NNMCTSInferenceBackend,
+    ) -> _LeafEvaluation:
+        if node.game.winning_color() is not None or node.expanded:
+            return _LeafEvaluation(policy_logits=np.array([], dtype=np.float32), value=0.0)
 
         actions = (
             list_prunned_actions(node.game)
@@ -158,20 +658,26 @@ class NNMCTSPlayer(Player):
             else list(node.game.playable_actions)
         )
         if not actions:
-            return
+            return _LeafEvaluation(policy_logits=np.array([], dtype=np.float32), value=0.0)
 
         current_color = node.game.state.current_color()
+        evaluation = self._evaluate_leaf(node.game, inference_backend)
         if current_color != self.color and self.opponent_factory is not None:
             opponent_action = self._opponent_action(node.game, actions)
             node.action_priors = {opponent_action: 1.0}
             actions = [opponent_action]
         else:
-            node.action_priors = self._policy_priors(node.game, current_color, actions)
+            node.action_priors = self._policy_priors_from_logits(
+                node.game,
+                actions,
+                evaluation.policy_logits,
+            )
 
         for action in actions:
             outcomes = execute_spectrum(node.game, action)
             for next_game, probability in outcomes:
                 node.children[action].append((_Node(game=next_game, parent=node), probability))
+        return evaluation
 
     def _opponent_action(self, game, actions):
         if self.opponent_factory is None:
@@ -217,17 +723,23 @@ class NNMCTSPlayer(Player):
         return normalized
 
     def _select(self, node: _Node) -> _Node:
-        total_visits = sum(child.visits for kids in node.children.values() for child, _ in kids)
+        with node.lock:
+            return self._select_locked(node)
+
+    def _select_locked(self, node: _Node) -> _Node:
+        total_visits = sum(
+            child.search_visits for kids in node.children.values() for child, _ in kids
+        )
         maximizing = node.game.state.current_color() == self.color
         best_score = -float("inf")
         best_action = None
 
         for action, children in node.children.items():
-            action_visits = sum(child.visits for child, _ in children)
+            action_visits = sum(child.search_visits for child, _ in children)
             if action_visits > 0:
-                q_value = sum(probability * child.value for child, probability in children) / sum(
-                    probability for _, probability in children
-                )
+                q_value = sum(
+                    probability * child.search_value for child, probability in children
+                ) / sum(probability for _, probability in children)
             else:
                 q_value = 0.0
 
@@ -247,51 +759,46 @@ class NNMCTSPlayer(Player):
         probs = [probability for _, probability in children]
         return random.choices(outcomes, weights=probs, k=1)[0]
 
-    def _policy_priors(self, game, color: Color, actions) -> dict[object, float]:
-        with torch.no_grad():
-            actor_features = self._observation_features(
-                game,
-                color,
-                self.actor_observation_level,
-            ).reshape(1, -1)
-            actor_tensor = torch.from_numpy(actor_features).to(self.device)
-            if self.model_type == "flat":
-                logits = self.policy_model(actor_tensor)
-            elif self.model_type == "hierarchical":
-                action_type_logits, param_logits = self.policy_model(actor_tensor)
-                logits = self.policy_model.get_flat_action_logits(action_type_logits, param_logits)
-            else:
-                raise ValueError(f"Unknown model_type '{self.model_type}'")
-            logits_np = logits.squeeze(0).detach().cpu().numpy()
-
+    def _policy_priors_from_logits(
+        self,
+        game,
+        actions,
+        logits: np.ndarray,
+    ) -> dict[object, float]:
         num_players = len(game.state.colors)
         game_colors = tuple(game.state.colors)
         indices = [to_action_space(action, num_players, self.map_type, game_colors) for action in actions]
-        action_logits = np.array([logits_np[idx] for idx in indices], dtype=np.float32)
+        action_logits = np.array([logits[idx] for idx in indices], dtype=np.float32)
         action_logits = action_logits - float(np.max(action_logits))
         exp_logits = np.exp(action_logits)
         probs = exp_logits / max(float(exp_logits.sum()), EPSILON)
         return {action: float(prob) for action, prob in zip(actions, probs)}
 
-    def _critic_value(self, game) -> float:
-        with torch.no_grad():
-            if self.critic_mode == "full":
-                critic_features = self._observation_features(
-                    game,
-                    self.color,
-                    self.critic_observation_level,
-                )
-            else:
-                full_guess = self._guessed_dev_cards_features(game)
-                critic_features = self._select_observation_features(
-                    full_guess,
-                    len(game.state.colors),
-                    self.critic_observation_level,
-                )
-            critic_features = critic_features.reshape(1, -1)
-            critic_tensor = torch.from_numpy(critic_features).to(self.device)
-            value = float(self.critic_model(critic_tensor).squeeze(0).item())
-        return float(np.clip(value, -1.0, 1.0))
+    def _evaluate_leaf(
+        self,
+        game,
+        inference_backend: _NNMCTSInferenceBackend,
+    ) -> _LeafEvaluation:
+        current_color = game.state.current_color()
+        actor_features = self._observation_features(
+            game,
+            current_color,
+            self.actor_observation_level,
+        )
+        if self.critic_mode == "full":
+            critic_features = self._observation_features(
+                game,
+                self.color,
+                self.critic_observation_level,
+            )
+        else:
+            full_guess = self._guessed_dev_cards_features(game)
+            critic_features = self._select_observation_features(
+                full_guess,
+                len(game.state.colors),
+                self.critic_observation_level,
+            )
+        return inference_backend.evaluate_leaf(actor_features, critic_features)
 
     def _observation_features(
         self,
