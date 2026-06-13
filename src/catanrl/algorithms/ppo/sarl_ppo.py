@@ -722,4 +722,4 @@ def train(
             f"\nTraining complete. {global_step:,} steps, {total_episodes} episodes. "
             f"Best avg training reward: {best_avg_reward:.3f}"
         )
-    return policy_model
+    return policy_model, critic_model

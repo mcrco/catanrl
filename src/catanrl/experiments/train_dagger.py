@@ -6,6 +6,15 @@ import wandb
 from ..envs.puffer.common import create_opponents
 from ..algorithms.imitation_learning.dagger import train as dagger_train
 from ..algorithms.imitation_learning.dataset import EvictionStrategy
+from ..experiment_store import (
+    GameConfig,
+    KIND_POLICY,
+    KIND_VALUE,
+    default_checkpoints_dir,
+    make_experiment_name,
+    network_spec_from_model,
+    save_experiment,
+)
 from ..utils.catanatron_action_space import get_action_space_size
 
 
@@ -91,14 +100,6 @@ def main():
         type=str,
         default=None,
         help="Optional critic initialization checkpoint",
-    )
-
-    # Saving
-    parser.add_argument(
-        "--save-path",
-        type=str,
-        default=None,
-        help="Directory to store checkpoints (default: weights/dagger)",
     )
 
     # Training loop
@@ -294,6 +295,13 @@ def main():
 
     # Weights & Biases    
     parser.add_argument(
+        "--experiment-name",
+        type=str,
+        default=None,
+        help="Experiment name (folder under experiments/ and W&B run name). "
+        "Defaults to --wandb-run-name, else an auto-generated name.",
+    )
+    parser.add_argument(
         "--wandb",
         action="store_true",
         help="Enable Weights & Biases logging",
@@ -321,13 +329,12 @@ def main():
         print(f"Error: critic weights file '{args.load_critic_weights}' not found")
         return
 
-    # Set save path
-    if args.save_path is None:
-        if args.wandb and args.wandb_run_name:
-            args.save_path = f"weights/{args.wandb_run_name}"
-        else:
-            args.save_path = "weights/dagger"
+    # Resolve experiment identity (shared by the folder and the W&B run).
+    experiment_name = make_experiment_name("dagger", args.wandb_run_name, args.experiment_name)
+    if args.wandb and not args.wandb_run_name:
+        args.wandb_run_name = experiment_name
 
+    args.save_path = default_checkpoints_dir(experiment_name)
     os.makedirs(args.save_path, exist_ok=True)
 
     # Parse hidden dims
@@ -354,13 +361,8 @@ def main():
         )
     xdim_cnn_kernel_size = (xdim_kernel_parts[0], xdim_kernel_parts[1])
 
-    # Setup W&B
-    wandb_config = None
-    if args.wandb:
-        wandb_config = {
-            "project": args.wandb_project,
-            "name": args.wandb_run_name,
-            "config": {
+    # Training config captured into experiment metadata and W&B.
+    train_config = {
                 "algorithm": "DAgger",
                 "model_type": args.model_type,
                 "backbone_type": args.backbone_type,
@@ -395,7 +397,14 @@ def main():
                 "eval_every_iterations": args.eval_every_iterations,
                 "save_every_iterations": args.save_every_iterations,
                 "seed": args.seed,
-            },
+    }
+
+    wandb_config = None
+    if args.wandb:
+        wandb_config = {
+            "project": args.wandb_project,
+            "name": args.wandb_run_name,
+            "config": train_config,
         }
 
     # Run training
@@ -442,12 +451,43 @@ def main():
         max_grad_norm=args.max_grad_norm,
     )
 
+    networks = {
+        "policy": network_spec_from_model(
+            policy_model,
+            kind=KIND_POLICY,
+            model_type=args.model_type,
+            observation_level=args.actor_observation_level,
+        )
+    }
+    if critic_model is not None:
+        networks["critic"] = network_spec_from_model(
+            critic_model,
+            kind=KIND_VALUE,
+            observation_level=args.critic_observation_level,
+        )
+    exp_path = save_experiment(
+        experiment_name,
+        args.save_path,
+        algorithm="dagger",
+        game=GameConfig(
+            num_players=num_players,
+            map_type=args.map_type,
+            vps_to_win=args.vps_to_win,
+            discard_limit=args.discard_limit,
+        ),
+        networks=networks,
+        train_config=train_config,
+        wandb_info={"project": args.wandb_project, "name": args.wandb_run_name} if args.wandb else {},
+    )
+
     print("\n" + "=" * 60)
     print("DAgger training finished")
     print("=" * 60)
     print(f"Checkpoints saved to: {args.save_path}")
     print(f"  - Policy: {args.save_path}/policy_best.pt")
     print(f"  - Critic: {args.save_path}/critic_best.pt")
+    if exp_path:
+        print(f"Experiment:  {exp_path}  (load via load_experiment('{experiment_name}'))")
 
     if args.wandb:
         wandb.finish()

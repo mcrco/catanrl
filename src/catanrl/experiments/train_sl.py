@@ -2,6 +2,10 @@ import argparse
 import os
 import wandb
 from catanrl.algorithms.supervised.sl import train
+from catanrl.experiment_store import (
+    default_checkpoints_dir,
+    make_experiment_name,
+)
 from catanrl.utils.catanatron_action_space import get_action_space_size
 
 
@@ -46,12 +50,6 @@ def main():
         type=str,
         default="512,512",
         help="Hidden dimensions for the shared backbone (default: 512,512)",
-    )
-    parser.add_argument(
-        "--save-path",
-        type=str,
-        default="weights/policy_value_network_best.pt",
-        help="Path to save model (default: weights/policy_value_network_best.pt)",
     )
     parser.add_argument(
         "--load-weights",
@@ -106,6 +104,13 @@ def main():
         default=1.0,
         help="Fraction of data to sample for class weight computation (1.0=all, 0.1=10%% for 10x speedup, default: 1.0)",
     )
+    parser.add_argument(
+        "--experiment-name",
+        type=str,
+        default=None,
+        help="Experiment name (folder under experiments/ and W&B run name). "
+        "Defaults to --wandb-run-name, else an auto-generated name.",
+    )
     parser.add_argument("--wandb", action="store_true", help="Enable Weights & Biases logging")
     parser.add_argument(
         "--wandb-project", type=str, default="catan", help="Wandb project name (default: catan)"
@@ -127,51 +132,48 @@ def main():
         print("Please ensure the directory exists and contains .parquet files")
         return
 
-    # Create save directory if needed
-    save_dir = os.path.dirname(args.save_path)
-    if save_dir and not os.path.exists(save_dir):
-        print(f"Creating directory '{save_dir}'")
-        os.makedirs(save_dir, exist_ok=True)
+    # Resolve experiment identity (shared by the folder and the W&B run).
+    experiment_name = make_experiment_name("sl", args.wandb_run_name, args.experiment_name)
+    if args.wandb and not args.wandb_run_name:
+        args.wandb_run_name = experiment_name
 
-    # Auto-set save path based on run name
-    if (
-        args.wandb
-        and args.wandb_run_name
-        and args.save_path == "weights/policy_value_network_best.pt"
-    ):
-        args.save_path = f"weights/{args.wandb_run_name}_policy_value.pt"
+    args.save_path = os.path.join(
+        default_checkpoints_dir(experiment_name), "policy_value.pt"
+    )
+    os.makedirs(os.path.dirname(args.save_path), exist_ok=True)
 
     # Parse hidden dimensions
     hidden_dims = [int(dim) for dim in args.hidden_dims.split(",")]
 
-    # Prepare wandb config (will be initialized inside train function)
+    # Training config captured into experiment metadata and W&B.
+    action_space_size = get_action_space_size(args.num_players, args.map_type)
+    config_dict = {
+        "algorithm": "SL",
+        "model_type": args.model_type,
+        "epochs": args.epochs,
+        "batch_size": args.batch_size,
+        "hidden_dims": hidden_dims,
+        "learning_rate": args.lr,
+        "num_workers": args.num_workers,
+        "buffer_size": args.buffer_size,
+        "action_space_size": action_space_size,
+        "log_batch_freq": args.log_batch_freq,
+        "policy_loss_weight": args.policy_loss_weight,
+        "value_loss_weight": args.value_loss_weight,
+        "use_class_weights": args.use_class_weights,
+        "test_size": args.test_size,
+        "num_players": args.num_players,
+        "map_type": args.map_type,
+    }
+    if args.model_type == "hierarchical":
+        config_dict["action_type_weight"] = args.action_type_weight
+        config_dict["param_weight"] = args.param_weight
+    if args.use_class_weights:
+        config_dict["weight_power"] = args.weight_power
+        config_dict["weight_sample_fraction"] = args.weight_sample_fraction
+
     wandb_config = None
     if args.wandb:
-        action_space_size = get_action_space_size(args.num_players, args.map_type)
-        config_dict = {
-            "model_type": args.model_type,
-            "epochs": args.epochs,
-            "batch_size": args.batch_size,
-            "hidden_dims": hidden_dims,
-            "learning_rate": args.lr,
-            "num_workers": args.num_workers,
-            "buffer_size": args.buffer_size,
-            "action_space_size": action_space_size,
-            "log_batch_freq": args.log_batch_freq,
-            "policy_loss_weight": args.policy_loss_weight,
-            "value_loss_weight": args.value_loss_weight,
-            "use_class_weights": args.use_class_weights,
-            "test_size": args.test_size,
-            "num_players": args.num_players,
-            "map_type": args.map_type,
-        }
-        if args.model_type == "hierarchical":
-            config_dict["action_type_weight"] = args.action_type_weight
-            config_dict["param_weight"] = args.param_weight
-        if args.use_class_weights:
-            config_dict["weight_power"] = args.weight_power
-            config_dict["weight_sample_fraction"] = args.weight_sample_fraction
-
         wandb_config = {
             "project": args.wandb_project,
             "name": args.wandb_run_name,

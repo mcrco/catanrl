@@ -22,6 +22,10 @@ from catanatron.players.value import ValueFunctionPlayer
 
 from catanrl.algorithms.alphazero.trainer import AlphaZeroConfig, AlphaZeroTrainer
 from catanrl.algorithms.alphazero.parallel_trainer import ParallelAlphaZeroTrainer
+from catanrl.experiment_store import (
+    default_checkpoints_dir,
+    make_experiment_name,
+)
 from catanrl.features.catanatron_utils import compute_feature_vector_dim
 from catanrl.models import (
     BackboneConfig,
@@ -125,12 +129,6 @@ def parse_args() -> argparse.Namespace:
 
     # I/O
     parser.add_argument(
-        "--save-path",
-        type=str,
-        default="weights/alphazero/best.pt",
-        help="Path to save the best model",
-    )
-    parser.add_argument(
         "--checkpoint-every",
         type=int,
         default=0,
@@ -147,6 +145,13 @@ def parse_args() -> argparse.Namespace:
     )
 
     # Logging
+    parser.add_argument(
+        "--experiment-name",
+        type=str,
+        default=None,
+        help="Experiment name (folder under experiments/ and W&B run name). "
+        "Defaults to --wandb-run-name, else an auto-generated name.",
+    )
     parser.add_argument("--wandb", action="store_true", help="Enable Weights & Biases logging")
     parser.add_argument(
         "--wandb-project", type=str, default="catan-rl", help="Weights & Biases project name"
@@ -389,6 +394,12 @@ def run_training(args: argparse.Namespace, trainer: AlphaZeroTrainer, wandb_enab
 def main() -> None:
     args = parse_args()
     hidden_dims = parse_hidden_dims(args.hidden_dims)
+
+    # Resolve experiment identity (shared by the folder and the W&B run).
+    experiment_name = make_experiment_name("alphazero", args.wandb_run_name, args.experiment_name)
+    if args.wandb and not args.wandb_run_name:
+        args.wandb_run_name = experiment_name
+    args.save_path = os.path.join(default_checkpoints_dir(experiment_name), "best.pt")
 
     config = AlphaZeroConfig(
         num_players=args.num_players,
