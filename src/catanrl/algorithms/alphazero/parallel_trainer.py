@@ -21,7 +21,10 @@ from catanatron.game import Game
 from catanatron.models.enums import Action
 from catanatron.models.player import Color
 
-from ...features.catanatron_utils import game_to_features
+from ...features.catanatron_utils import (
+    full_game_to_features,
+    get_observation_indices_from_full,
+)
 from ...utils.catanatron_action_space import get_action_space_size, to_action_space
 from ...utils.catanatron_map import build_catan_map
 from .mcts import NeuralMCTS
@@ -266,6 +269,9 @@ class _SelfPlayWorkerController:
         self._inference_client = _RemoteInferenceClient(worker_id, inference_queue, response_queue)
         self._current_game_samples: List[tuple[Color, np.ndarray, np.ndarray]] = []
         self.action_space_size = get_action_space_size(config.num_players, config.map_type)
+        self._observation_indices = get_observation_indices_from_full(
+            config.num_players, config.map_type, config.observation_level
+        )
         self.mcts = NeuralMCTS(self)
         self._set_seed(self.config.seed)
 
@@ -290,7 +296,7 @@ class _SelfPlayWorkerController:
     def select_action(self, game: Game, collect_data: bool = True) -> Action:
         color = game.state.current_color()
         state_vec = self._extract_features(game, color)
-        move_number = len(game.state.actions)
+        move_number = len(game.state.action_records)
         temperature = (
             self.config.temperature
             if move_number < self.config.temperature_drop_move
@@ -355,7 +361,10 @@ class _SelfPlayWorkerController:
             self._current_game_samples.clear()
 
     def _extract_features(self, game: Game, color: Color) -> np.ndarray:
-        return game_to_features(game, color, len(self.colors), self.config.map_type)
+        full_features = full_game_to_features(
+            game, len(self.colors), self.config.map_type, base_color=color
+        )
+        return full_features[self._observation_indices].astype(np.float32, copy=False)
 
     def _record_sample(self, color: Color, state: np.ndarray, policy: np.ndarray) -> None:
         self._current_game_samples.append((color, state.copy(), policy.copy()))

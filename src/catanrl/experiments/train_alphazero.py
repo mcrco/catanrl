@@ -22,7 +22,7 @@ from catanatron.players.value import ValueFunctionPlayer
 
 from catanrl.algorithms.alphazero.trainer import AlphaZeroConfig, AlphaZeroTrainer
 from catanrl.algorithms.alphazero.parallel_trainer import ParallelAlphaZeroTrainer
-from catanrl.features.catanatron_utils import compute_feature_vector_dim
+from catanrl.features.catanatron_utils import compute_observation_feature_vector_dim
 from catanrl.models import (
     BackboneConfig,
     MLPBackboneConfig,
@@ -76,6 +76,13 @@ def parse_args() -> argparse.Namespace:
         default="BASE",
         choices=["BASE", "MINI", "TOURNAMENT"],
         help="Map layout",
+    )
+    parser.add_argument(
+        "--observation-level",
+        type=str,
+        default="private",
+        choices=["private", "public", "full"],
+        help="Information level the shared policy/value network observes during self-play",
     )
     parser.add_argument("--vps-to-win", type=int, default=10, help="Victory points to win the game")
     parser.add_argument("--simulations", type=int, default=64, help="MCTS simulations per move")
@@ -393,6 +400,7 @@ def main() -> None:
     config = AlphaZeroConfig(
         num_players=args.num_players,
         map_type=args.map_type,
+        observation_level=args.observation_level,
         vps_to_win=args.vps_to_win,
         simulations=args.simulations,
         c_puct=args.c_puct,
@@ -413,7 +421,9 @@ def main() -> None:
         seed=None if args.seed < 0 else args.seed,
     )
 
-    input_dim = compute_feature_vector_dim(config.num_players, config.map_type)
+    input_dim = compute_observation_feature_vector_dim(
+        config.num_players, config.map_type, config.observation_level
+    )
     action_space_size = get_action_space_size(config.num_players, config.map_type)
     backbone_config = BackboneConfig(
         architecture="mlp",

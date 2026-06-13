@@ -26,9 +26,10 @@ from catanatron.models.enums import Action
 from catanatron.models.player import Color, Player
 
 from ...features.catanatron_utils import (
-    compute_feature_vector_dim,
-    game_to_features,
-    get_numeric_feature_names,
+    ObservationLevel,
+    compute_observation_feature_vector_dim,
+    full_game_to_features,
+    get_observation_indices_from_full,
 )
 from ...models import BackboneConfig, MLPBackboneConfig, build_flat_policy_value_network
 from ...utils.catanatron_action_space import get_action_space_size, to_action_space
@@ -42,6 +43,7 @@ class AlphaZeroConfig:
 
     num_players: int = 2
     map_type: str = "BASE"
+    observation_level: ObservationLevel = "private"
     vps_to_win: int = 10
     simulations: int = 128
     c_puct: float = 1.5
@@ -94,7 +96,12 @@ class AlphaZeroTrainer:
         self.device = self.config.device or ("cuda" if torch.cuda.is_available() else "cpu")
         self._set_seed(self.config.seed)
 
-        input_dim = compute_feature_vector_dim(self.config.num_players, self.config.map_type)
+        self._observation_indices = get_observation_indices_from_full(
+            self.config.num_players, self.config.map_type, self.config.observation_level
+        )
+        input_dim = compute_observation_feature_vector_dim(
+            self.config.num_players, self.config.map_type, self.config.observation_level
+        )
         backbone_config = BackboneConfig(
             architecture="mlp",
             args=MLPBackboneConfig(input_dim=input_dim, hidden_dims=[512, 512]),
@@ -105,9 +112,7 @@ class AlphaZeroTrainer:
             backbone_config=backbone_config, num_actions=self.action_space_size
         )
         self.model.to(self.device)
-        self._hierarchical_model = hasattr(self.model, "flat_to_hierarchical") or hasattr(
-            self.model, "get_flat_action_logits"
-        )
+        self._hierarchical_model = hasattr(self.model, "flat_to_hierarchical")
         self.optimizer = torch.optim.Adam(
             self.model.parameters(), lr=self.config.lr, weight_decay=self.config.weight_decay
         )
@@ -248,7 +253,7 @@ class AlphaZeroTrainer:
         """Called by AlphaZeroSelfPlayPlayer to pick the next move."""
         color = game.state.current_color()
         state_vec = self._extract_features(game, color)
-        move_number = len(game.state.actions)
+        move_number = len(game.state.action_records)
         temperature = (
             self.config.temperature
             if move_number < self.config.temperature_drop_move
@@ -267,7 +272,10 @@ class AlphaZeroTrainer:
         return action
 
     def _extract_features(self, game: Game, color: Color) -> np.ndarray:
-        return game_to_features(game, color, len(self.colors), self.config.map_type)
+        full_features = full_game_to_features(
+            game, len(self.colors), self.config.map_type, base_color=color
+        )
+        return full_features[self._observation_indices].astype(np.float32, copy=False)
 
     def _policy_value(
         self,

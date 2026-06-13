@@ -271,6 +271,7 @@ class NeuralMCTS:
                 to_play=next_player,
                 parent=node,
                 prior=probability,
+                map_type=node.map_type,
             )
             node.chance_children[total] = child
             node.chance_priors[total] = probability
