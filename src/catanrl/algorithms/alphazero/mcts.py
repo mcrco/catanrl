@@ -114,7 +114,12 @@ class MCTSNode:
         for action_idx, prior in self.priors.items():
             child = self.children.get(action_idx)
             child_visits = child.visit_count if child else 0
-            child_value = child.value() if child else 0.0
+            if child:
+                # child.value() is from child.to_play's perspective; re-orient it
+                # to this node's perspective so PUCT compares Q values consistently.
+                child_value = child.value() if child.to_play == self.to_play else -child.value()
+            else:
+                child_value = 0.0
             ucb = child_value + c_puct * prior * exploration / (1 + child_visits)
             if ucb > best_score:
                 best_score = ucb
