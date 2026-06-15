@@ -11,20 +11,23 @@ from scripts.eval_mcts_self_play import (
     _merge_serialized_result,
 )
 from catanrl.players.nn_mcts_player import (
-    _BatchedNNMCTSInferenceBackend,
     _CentralNNMCTSInferenceServer,
+    _RemoteNNMCTSInferenceBackend,
     _LocalNNMCTSInferenceBackend,
     _RemoteLeafEvaluationRequest,
-    _RemoteNNMCTSInferenceBackend,
 )
 
 
 class _PolicyModel(torch.nn.Module):
+    """Deterministic 3-logit head for exact numeric assertions."""
+
     def forward(self, x):
         return torch.stack((x.sum(dim=1), x[:, 0] - x[:, 1], x[:, -1]), dim=1)
 
 
 class _CriticModel(torch.nn.Module):
+    """Deterministic scalar value for exact numeric assertions."""
+
     def forward(self, x):
         return x.sum(dim=1, keepdim=True) / 10.0
 
@@ -44,44 +47,6 @@ def test_local_inference_backend_runs_separate_policy_and_critic_models():
 
     np.testing.assert_allclose(result.policy_logits, np.array([6.0, -1.0, 3.0], dtype=np.float32))
     assert result.value == 0.5
-
-
-def test_batched_inference_backend_correlates_parallel_leaf_requests():
-    backend = _BatchedNNMCTSInferenceBackend(
-        policy_model=_PolicyModel(),
-        critic_model=_CriticModel(),
-        model_type="flat",
-        device="cpu",
-        max_batch_size=8,
-        max_wait_ms=10.0,
-    )
-
-    actor_inputs = [
-        np.array([float(i), float(i + 1), float(i + 2)], dtype=np.float32)
-        for i in range(4)
-    ]
-    critic_inputs = [
-        np.array([float(i), float(i * 2)], dtype=np.float32)
-        for i in range(4)
-    ]
-
-    try:
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            results = list(
-                executor.map(
-                    lambda pair: backend.evaluate_leaf(*pair),
-                    zip(actor_inputs, critic_inputs),
-                )
-            )
-    finally:
-        backend.close()
-
-    for i, result in enumerate(results):
-        np.testing.assert_allclose(
-            result.policy_logits,
-            np.array([3 * i + 3, -1.0, i + 2], dtype=np.float32),
-        )
-        np.testing.assert_allclose(result.value, (3 * i) / 10.0)
 
 
 def test_remote_inference_backend_correlates_parallel_leaf_requests():

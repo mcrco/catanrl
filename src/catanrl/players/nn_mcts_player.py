@@ -34,7 +34,7 @@ from catanrl.features.catanatron_utils import (
     get_observation_indices_from_full,
 )
 from catanrl.models import PolicyNetworkWrapper, ValueNetworkWrapper
-from catanrl.utils.catanatron_action_space import to_action_space
+from catanrl.utils.catanatron_action_space import get_action_space_size, to_action_space
 
 EPSILON = 1e-8
 CRITIC_MODE_ALIASES = {
@@ -43,6 +43,36 @@ CRITIC_MODE_ALIASES = {
     "guessed": "guessed_dev_cards",
     "guessed_dev_cards": "guessed_dev_cards",
 }
+
+# Populated in the parent immediately before fork-based within-tree workers start.
+_FORK_SEARCH_CTX: dict[str, object] = {}
+
+
+def _fork_search_worker_main(worker_idx: int) -> None:
+    """Run claim-and-simulate loop in a fork child (shared address space + tree)."""
+    ctx = _FORK_SEARCH_CTX
+    player: "NNMCTSPlayer" = ctx["player"]  # type: ignore[assignment]
+    root: _Node = ctx["root"]  # type: ignore[assignment]
+    child_backends: list[_NNMCTSInferenceBackend] = ctx["child_backends"]  # type: ignore[assignment]
+    inference_backend = child_backends[worker_idx]
+    completed: mp.sharedctypes.Synchronized = ctx["completed"]  # type: ignore[assignment]
+    completed_lock: mp.synchronize.Lock = ctx["completed_lock"]  # type: ignore[assignment]
+    num_simulations = int(ctx["num_simulations"])
+    first_error: list[BaseException] = ctx.setdefault("first_error", [])  # type: ignore[assignment]
+
+    def claim_simulation() -> bool:
+        with completed_lock:
+            if int(completed.value) >= num_simulations or first_error:
+                return False
+            completed.value += 1
+            return True
+
+    try:
+        while claim_simulation():
+            player._run_parallel_simulation(root, inference_backend)
+    except BaseException as exc:
+        with completed_lock:
+            first_error.append(exc)
 
 
 @dataclass
@@ -56,12 +86,14 @@ class _Node:
     virtual_value_sum: float = 0.0
     expanding: bool = False
     lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
-    condition: threading.Condition = field(init=False, repr=False)
 
     def __post_init__(self):
         self.children: dict[object, list[tuple["_Node", float]]] = defaultdict(list)
         self.action_priors: dict[object, float] = {}
-        self.condition = threading.Condition(self.lock)
+        # Perspective of the player to move at this node. Values stored in this
+        # node's value_sum are from this player's point of view; backprop and
+        # selection re-orient across perspective changes (N-player correct).
+        self.to_play: Color = self.game.state.current_color()
 
     @property
     def expanded(self) -> bool:
@@ -87,13 +119,6 @@ class _Node:
 class _LeafEvaluation:
     policy_logits: np.ndarray
     value: float
-
-
-@dataclass
-class _LeafEvaluationRequest:
-    actor_features: np.ndarray
-    critic_features: np.ndarray
-    future: Future[_LeafEvaluation]
 
 
 @dataclass
@@ -158,106 +183,6 @@ class _LocalNNMCTSInferenceBackend(_NNMCTSInferenceBackend):
         policy_logits = np.array(combined_np[:-1], dtype=np.float32)
         value = float(np.clip(float(combined_np[-1]), -1.0, 1.0))
         return _LeafEvaluation(policy_logits=policy_logits, value=value)
-
-
-class _BatchedNNMCTSInferenceBackend(_NNMCTSInferenceBackend):
-    def __init__(
-        self,
-        policy_model: PolicyNetworkWrapper,
-        critic_model: ValueNetworkWrapper,
-        model_type: str,
-        device: str,
-        max_batch_size: int,
-        max_wait_ms: float,
-    ) -> None:
-        self.policy_model = policy_model
-        self.critic_model = critic_model
-        self.model_type = model_type
-        self.device = device
-        self.max_batch_size = max(1, int(max_batch_size))
-        self.max_wait_ms = max(0.0, float(max_wait_ms))
-        self._queue: queue.Queue[_LeafEvaluationRequest | None] = queue.Queue()
-        self._thread = threading.Thread(target=self._run, name="nn-mcts-inference", daemon=True)
-        self._closed = False
-        self._thread.start()
-
-    def evaluate_leaf(
-        self,
-        actor_features: np.ndarray,
-        critic_features: np.ndarray,
-    ) -> _LeafEvaluation:
-        if self._closed:
-            raise RuntimeError("NN MCTS inference backend is closed.")
-        future: Future[_LeafEvaluation] = Future()
-        self._queue.put(
-            _LeafEvaluationRequest(
-                actor_features=actor_features.astype(np.float32, copy=False),
-                critic_features=critic_features.astype(np.float32, copy=False),
-                future=future,
-            )
-        )
-        return future.result()
-
-    def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        self._queue.put(None)
-        self._thread.join(timeout=5.0)
-
-    def _run(self) -> None:
-        while True:
-            first = self._queue.get()
-            if first is None:
-                break
-
-            batch = [first]
-            deadline = time.perf_counter() + (self.max_wait_ms / 1000.0)
-            while len(batch) < self.max_batch_size:
-                remaining = deadline - time.perf_counter()
-                if remaining <= 0:
-                    break
-                try:
-                    item = self._queue.get(timeout=remaining)
-                except queue.Empty:
-                    break
-                if item is None:
-                    self._queue.put(None)
-                    break
-                batch.append(item)
-
-            self._evaluate_batch(batch)
-
-    def _evaluate_batch(self, batch: list[_LeafEvaluationRequest]) -> None:
-        try:
-            actor_features = np.stack([request.actor_features for request in batch], axis=0)
-            critic_features = np.stack([request.critic_features for request in batch], axis=0)
-            with torch.no_grad():
-                actor_tensor = torch.from_numpy(actor_features).to(self.device)
-                if self.model_type == "flat":
-                    logits = self.policy_model(actor_tensor)
-                elif self.model_type == "hierarchical":
-                    action_type_logits, param_logits = self.policy_model(actor_tensor)
-                    logits = self.policy_model.get_flat_action_logits(
-                        action_type_logits, param_logits
-                    )
-                else:
-                    raise ValueError(f"Unknown model_type '{self.model_type}'")
-                policy_logits = logits.detach().cpu().numpy()
-
-                critic_tensor = torch.from_numpy(critic_features).to(self.device)
-                values = self.critic_model(critic_tensor).view(-1).detach().cpu().numpy()
-
-            for request, logits_np, value in zip(batch, policy_logits, values):
-                request.future.set_result(
-                    _LeafEvaluation(
-                        policy_logits=logits_np.astype(np.float32, copy=False),
-                        value=float(np.clip(float(value), -1.0, 1.0)),
-                    )
-                )
-        except Exception as exc:
-            for request in batch:
-                request.future.set_exception(exc)
 
 
 class _RemoteNNMCTSInferenceBackend(_NNMCTSInferenceBackend):
@@ -334,6 +259,82 @@ class _RemoteNNMCTSInferenceBackend(_NNMCTSInferenceBackend):
                         value=float(message["value"]),
                     )
                 )
+
+
+class _SyncRemoteNNMCTSInferenceBackend(_NNMCTSInferenceBackend):
+    """Blocking remote backend safe for fork children (no listener thread)."""
+
+    def __init__(
+        self,
+        worker_id: int,
+        request_queue: mp.Queue,
+        response_queue: mp.Queue,
+        response_read_lock: mp.synchronize.Lock | None = None,
+        shared_request_id: mp.sharedctypes.Synchronized | None = None,
+        shared_request_id_lock: mp.synchronize.Lock | None = None,
+        response_queues: Sequence[mp.Queue] | None = None,
+    ) -> None:
+        self.worker_id = worker_id
+        self.request_queue = request_queue
+        self.response_queue = response_queue
+        self.response_queues = list(response_queues) if response_queues is not None else [response_queue]
+        self.response_read_lock = response_read_lock
+        self.shared_request_id = shared_request_id
+        self.shared_request_id_lock = shared_request_id_lock
+        self._closed = False
+        self._next_request_id = 0
+        self._request_lock = threading.Lock()
+
+    def _allocate_request_id(self) -> int:
+        if self.shared_request_id is not None and self.shared_request_id_lock is not None:
+            with self.shared_request_id_lock:
+                self.shared_request_id.value += 1
+                return int(self.shared_request_id.value)
+        with self._request_lock:
+            request_id = self._next_request_id
+            self._next_request_id += 1
+            return request_id
+
+    def evaluate_leaf(
+        self,
+        actor_features: np.ndarray,
+        critic_features: np.ndarray,
+    ) -> _LeafEvaluation:
+        if self._closed:
+            raise RuntimeError("Sync remote NN MCTS inference backend is closed.")
+
+        request_id = self._allocate_request_id()
+
+        request = _RemoteLeafEvaluationRequest(
+            request_id=request_id,
+            worker_id=self.worker_id,
+            actor_features=actor_features.astype(np.float32, copy=False),
+            critic_features=critic_features.astype(np.float32, copy=False),
+        )
+
+        def _await_response() -> _LeafEvaluation:
+            while True:
+                message = self.response_queue.get()
+                if message is None:
+                    raise RuntimeError("Sync remote NN MCTS inference backend is closed.")
+                if int(message["request_id"]) != request_id:
+                    continue
+                error = message.get("error")
+                if error is not None:
+                    raise RuntimeError(str(error))
+                return _LeafEvaluation(
+                    policy_logits=message["policy_logits"],
+                    value=float(message["value"]),
+                )
+
+        self.request_queue.put(request)
+        if self.response_read_lock is not None:
+            with self.response_read_lock:
+                return _await_response()
+        return _await_response()
+
+    def close(self) -> None:
+        self._closed = True
 
 
 class _CentralNNMCTSInferenceServer(threading.Thread):
@@ -450,6 +451,8 @@ class NNMCTSPlayer(Player):
         inference_batch_size: int = 32,
         inference_wait_ms: float = 1.0,
         virtual_loss: float = 1.0,
+        dirichlet_alpha: float = 0.3,
+        dirichlet_frac: float = 0.25,
         device: str | torch.device | None = None,
         inference_backend: _NNMCTSInferenceBackend | None = None,
         **kwargs,
@@ -471,6 +474,11 @@ class NNMCTSPlayer(Player):
         self.inference_batch_size = max(1, int(inference_batch_size))
         self.inference_wait_ms = max(0.0, float(inference_wait_ms))
         self.virtual_loss = float(virtual_loss)
+        self._tree_process_lock: mp.synchronize.Lock | None = None
+        # Training-only exploration knobs (consumed by run_search_policy; eval's
+        # decide() ignores them).
+        self.dirichlet_alpha = float(dirichlet_alpha)
+        self.dirichlet_frac = float(dirichlet_frac)
         self._opponents_by_color: dict[Color, Player] = {}
         self._critic_index_cache: dict[int, dict[str, int]] = {}
         self._observation_index_cache: dict[tuple[int, str], np.ndarray] = {}
@@ -503,17 +511,9 @@ class NNMCTSPlayer(Player):
         if len(playable_actions) == 1:
             return playable_actions[0]
 
-        root = _Node(game=game.copy(), parent=None)
-        self._expand(root, self._inference_backend)
-
+        root = self._search_root(game, add_noise=False)
         if not root.children:
             return playable_actions[0]
-
-        if self.num_search_workers <= 1:
-            for _ in range(self.num_simulations):
-                self._run_simulation(root, self._inference_backend)
-        else:
-            self._run_parallel_search(root)
 
         best_action = max(
             root.children.keys(),
@@ -522,6 +522,84 @@ class NNMCTSPlayer(Player):
         return self._resolve_root_action(
             best_action, playable_actions, len(game.state.colors), tuple(game.state.colors)
         )
+
+    def _search_root(self, game, add_noise: bool = False) -> _Node:
+        """Build the root, expand it, optionally add Dirichlet noise, and run
+        the configured number of simulations. Shared by decide() (eval) and
+        run_search_policy() (training data collection)."""
+        root = _Node(game=game.copy(), parent=None)
+        self._expand(root, self._inference_backend)
+        if not root.children:
+            return root
+        if add_noise and self.dirichlet_frac > 0.0:
+            self._add_root_dirichlet_noise(root)
+        if self.num_search_workers <= 1:
+            for _ in range(self.num_simulations):
+                self._run_simulation(root, self._inference_backend)
+        else:
+            self._run_parallel_search(root)
+        return root
+
+    def _add_root_dirichlet_noise(self, root: _Node) -> None:
+        priors = root.action_priors
+        if not priors:
+            return
+        actions = list(priors.keys())
+        noise = np.random.dirichlet([self.dirichlet_alpha] * len(actions))
+        frac = self.dirichlet_frac
+        for action, noise_val in zip(actions, noise):
+            priors[action] = priors[action] * (1.0 - frac) + float(noise_val) * frac
+
+    def run_search_policy(
+        self,
+        game,
+        temperature: float,
+        add_noise: bool = True,
+    ) -> Tuple[np.ndarray, object]:
+        """Run MCTS and return (visit-count policy target over the flat action
+        space, sampled action). Used to collect AlphaZero training targets."""
+        num_players = len(game.state.colors)
+        game_colors = tuple(game.state.colors)
+        action_space_size = get_action_space_size(num_players, self.map_type)
+        policy = np.zeros(action_space_size, dtype=np.float32)
+
+        playable_actions = list(game.playable_actions)
+        if len(playable_actions) == 1:
+            only = playable_actions[0]
+            policy[to_action_space(only, num_players, self.map_type, game_colors)] = 1.0
+            return policy, only
+
+        root = self._search_root(game, add_noise=add_noise)
+        if not root.children:
+            uniform = 1.0 / len(playable_actions)
+            for action in playable_actions:
+                policy[to_action_space(action, num_players, self.map_type, game_colors)] = uniform
+            return policy, random.choice(playable_actions)
+
+        actions = list(root.children.keys())
+        visits = np.array(
+            [sum(child.visits for child, _ in root.children[action]) for action in actions],
+            dtype=np.float64,
+        )
+        indices = [to_action_space(action, num_players, self.map_type, game_colors) for action in actions]
+
+        if temperature <= 1e-3:
+            best = int(visits.argmax())
+            policy[indices[best]] = 1.0
+            chosen_action = actions[best]
+        else:
+            adjusted = visits ** (1.0 / temperature)
+            total = adjusted.sum()
+            if total <= 0:
+                adjusted = np.ones_like(adjusted) / len(adjusted)
+            else:
+                adjusted = adjusted / total
+            for idx, prob in zip(indices, adjusted):
+                policy[idx] = prob
+            chosen_action = actions[int(np.random.choice(len(actions), p=adjusted))]
+
+        resolved = self._resolve_root_action(chosen_action, playable_actions, num_players, game_colors)
+        return policy, resolved
 
     def _run_simulation(
         self,
@@ -537,63 +615,116 @@ class NNMCTSPlayer(Player):
 
         if node.game.winning_color() is not None:
             winner = node.game.winning_color()
-            leaf_value = 1.0 if winner == self.color else -1.0
+            leaf_value = 1.0 if winner == node.to_play else -1.0
         else:
             leaf_value = self._expand(node, inference_backend).value
 
-        for path_node in reversed(path):
+        # leaf_value is from the leaf's to_play perspective; flip on every
+        # perspective change as we walk back to the root.
+        value = leaf_value
+        for idx in range(len(path) - 1, -1, -1):
+            path_node = path[idx]
             path_node.visits += 1
-            path_node.value_sum += leaf_value
+            path_node.value_sum += value
+            if idx > 0 and path[idx - 1].to_play != path_node.to_play:
+                value = -value
 
     def _run_parallel_search(self, root: _Node) -> None:
+        """Within-tree parallel search via forked processes sharing one tree.
+
+        Fork children cannot use threaded inference backends (async remote
+        listeners). Local models must be on CPU; remote backends use the
+        synchronous request/response path.
+        """
+        try:
+            fork_ctx = mp.get_context("fork")
+        except ValueError as exc:
+            raise RuntimeError(
+                "num_search_workers > 1 requires fork start method support."
+            ) from exc
+
         if self._owns_inference_backend:
+            if self.device != "cpu":
+                raise RuntimeError(
+                    "num_search_workers > 1 with local models requires CPU device "
+                    "(fork is unsafe after CUDA init)."
+                )
             if self.policy_model is None or self.critic_model is None:
-                raise RuntimeError("Local models are not configured for batched inference.")
-            inference_backend: _NNMCTSInferenceBackend = _BatchedNNMCTSInferenceBackend(
+                raise RuntimeError("Local models are not configured for inference.")
+            inference_backend: _NNMCTSInferenceBackend = _LocalNNMCTSInferenceBackend(
                 self.policy_model,
                 self.critic_model,
                 self.model_type,
                 self.device,
-                self.inference_batch_size,
-                self.inference_wait_ms,
             )
-            close_inference_backend = True
-        else:
-            inference_backend = self._inference_backend
             close_inference_backend = False
-        completed = 0
-        completed_lock = threading.Lock()
-        first_error: list[BaseException] = []
+        else:
+            backend = self._inference_backend
+            if isinstance(backend, _RemoteNNMCTSInferenceBackend):
+                inference_backend = _SyncRemoteNNMCTSInferenceBackend(
+                    backend.worker_id,
+                    backend.request_queue,
+                    backend.response_queue,
+                )
+            elif isinstance(backend, _SyncRemoteNNMCTSInferenceBackend):
+                inference_backend = backend
+            else:
+                inference_backend = backend
+            close_inference_backend = False
 
-        def claim_simulation() -> bool:
-            nonlocal completed
-            with completed_lock:
-                if completed >= self.num_simulations or first_error:
-                    return False
-                completed += 1
-                return True
+        child_backends: list[_NNMCTSInferenceBackend]
+        if isinstance(inference_backend, _SyncRemoteNNMCTSInferenceBackend):
+            if len(inference_backend.response_queues) < self.num_search_workers:
+                raise RuntimeError(
+                    "Process parallel search requires one response queue per search worker "
+                    f"({self.num_search_workers} workers, "
+                    f"{len(inference_backend.response_queues)} response queues)."
+                )
+            child_backends = [
+                _SyncRemoteNNMCTSInferenceBackend(
+                    worker_id=idx,
+                    request_queue=inference_backend.request_queue,
+                    response_queue=inference_backend.response_queues[idx],
+                )
+                for idx in range(self.num_search_workers)
+            ]
+        else:
+            child_backends = [inference_backend] * self.num_search_workers
 
-        def worker() -> None:
-            try:
-                while claim_simulation():
-                    self._run_parallel_simulation(root, inference_backend)
-            except BaseException as exc:
-                with completed_lock:
-                    first_error.append(exc)
+        completed = fork_ctx.Value("i", 0)
+        completed_lock = fork_ctx.Lock()
+        self._tree_process_lock = fork_ctx.Lock()
+        global _FORK_SEARCH_CTX
+        _FORK_SEARCH_CTX = {
+            "player": self,
+            "root": root,
+            "child_backends": child_backends,
+            "completed": completed,
+            "completed_lock": completed_lock,
+            "num_simulations": self.num_simulations,
+            "first_error": [],
+        }
 
-        threads = [
-            threading.Thread(target=worker, name=f"nn-mcts-search-{idx}", daemon=True)
+        processes = [
+            fork_ctx.Process(
+                target=_fork_search_worker_main,
+                args=(idx,),
+                name=f"nn-mcts-search-proc-{idx}",
+                daemon=False,
+            )
             for idx in range(self.num_search_workers)
         ]
         try:
-            for thread in threads:
-                thread.start()
-            for thread in threads:
-                thread.join()
+            for process in processes:
+                process.start()
+            for process in processes:
+                process.join()
         finally:
+            self._tree_process_lock = None
             if close_inference_backend:
                 inference_backend.close()
 
+        first_error = _FORK_SEARCH_CTX.get("first_error", [])
         if first_error:
             raise first_error[0]
 
@@ -608,18 +739,18 @@ class NNMCTSPlayer(Player):
         while True:
             if node.game.winning_color() is not None:
                 winner = node.game.winning_color()
-                leaf_value = 1.0 if winner == self.color else -1.0
+                leaf_value = 1.0 if winner == node.to_play else -1.0
                 self._backpropagate_parallel(path, leaf_value)
                 return
 
-            with node.condition:
-                while node.expanding:
-                    node.condition.wait()
+            while node.expanding:
+                time.sleep(0)
+            with self._node_lock(node):
                 if node.expanded:
                     child = self._select_locked(node)
-                    with child.lock:
-                        child.virtual_visits += 1
-                        child.virtual_value_sum -= self.virtual_loss
+                    child.virtual_visits += 1
+                    vl_sign = 1.0 if child.to_play == node.to_play else -1.0
+                    child.virtual_value_sum -= vl_sign * self.virtual_loss
                     node = child
                     path.append(child)
                     continue
@@ -628,21 +759,25 @@ class NNMCTSPlayer(Player):
             try:
                 leaf_value = self._expand(node, inference_backend).value
             finally:
-                with node.condition:
-                    node.expanding = False
-                    node.condition.notify_all()
+                node.expanding = False
 
             self._backpropagate_parallel(path, leaf_value)
             return
 
     def _backpropagate_parallel(self, path: list[_Node], leaf_value: float) -> None:
-        for path_node in reversed(path):
-            with path_node.lock:
-                if path_node is not path[0] and path_node.virtual_visits > 0:
+        value = leaf_value
+        for idx in range(len(path) - 1, -1, -1):
+            path_node = path[idx]
+            with self._node_lock(path_node):
+                if idx > 0 and path_node.virtual_visits > 0:
+                    parent = path[idx - 1]
+                    vl_sign = 1.0 if path_node.to_play == parent.to_play else -1.0
                     path_node.virtual_visits -= 1
-                    path_node.virtual_value_sum += self.virtual_loss
+                    path_node.virtual_value_sum += vl_sign * self.virtual_loss
                 path_node.visits += 1
-                path_node.value_sum += leaf_value
+                path_node.value_sum += value
+            if idx > 0 and path[idx - 1].to_play != path_node.to_play:
+                value = -value
 
     def _expand(
         self,
@@ -723,28 +858,39 @@ class NNMCTSPlayer(Player):
         return normalized
 
     def _select(self, node: _Node) -> _Node:
+        lock = self._tree_process_lock
+        if lock is not None:
+            with lock:
+                return self._select_locked(node)
         with node.lock:
             return self._select_locked(node)
+
+    def _node_lock(self, node: _Node):
+        lock = self._tree_process_lock
+        if lock is not None:
+            return lock
+        return node.lock
 
     def _select_locked(self, node: _Node) -> _Node:
         total_visits = sum(
             child.search_visits for kids in node.children.values() for child, _ in kids
         )
-        maximizing = node.game.state.current_color() == self.color
         best_score = -float("inf")
         best_action = None
 
         for action, children in node.children.items():
             action_visits = sum(child.search_visits for child, _ in children)
             if action_visits > 0:
+                # Each outcome child's search_value is from that child's to_play
+                # perspective; re-orient it to this node's perspective before
+                # averaging (negate when the player to move differs).
                 q_value = sum(
-                    probability * child.search_value for child, probability in children
+                    probability
+                    * (child.search_value if child.to_play == node.to_play else -child.search_value)
+                    for child, probability in children
                 ) / sum(probability for _, probability in children)
             else:
                 q_value = 0.0
-
-            if not maximizing:
-                q_value = -q_value
 
             prior = node.action_priors.get(action, 0.0)
             u_value = self.c_puct * prior * math.sqrt(total_visits + 1.0) / (1.0 + action_visits)
@@ -785,14 +931,16 @@ class NNMCTSPlayer(Player):
             current_color,
             self.actor_observation_level,
         )
+        # Evaluate the position from the mover's (to_play) perspective so the
+        # returned value is correctly oriented for N-player backprop.
         if self.critic_mode == "full":
             critic_features = self._observation_features(
                 game,
-                self.color,
+                current_color,
                 self.critic_observation_level,
             )
         else:
-            full_guess = self._guessed_dev_cards_features(game)
+            full_guess = self._guessed_dev_cards_features(game, current_color)
             critic_features = self._select_observation_features(
                 full_guess,
                 len(game.state.colors),
@@ -824,15 +972,16 @@ class NNMCTSPlayer(Player):
         indices = self._get_observation_indices(num_players, level)
         return full_features[indices].astype(np.float32, copy=False)
 
-    def _guessed_dev_cards_features(self, game) -> np.ndarray:
+    def _guessed_dev_cards_features(self, game, base_color: Color | None = None) -> np.ndarray:
+        base_color = base_color if base_color is not None else self.color
         num_players = len(game.state.colors)
         features = full_game_to_features(
             game,
             num_players,
             self.map_type,
-            base_color=self.color,
+            base_color=base_color,
         ).astype(np.float32, copy=True)
-        sample = create_sample(game, self.color)
+        sample = create_sample(game, base_color)
         dev_guess = self._sample_opponent_dev_cards(sample, num_players)
         numeric_name_to_index = self._get_full_numeric_index(num_players)
 
@@ -933,3 +1082,4 @@ class NNMCTSGuessedDevCardsPlayer(NNMCTSPlayer):
     def __init__(self, *args, **kwargs):
         kwargs.setdefault("critic_mode", "guessed_dev_cards")
         super().__init__(*args, **kwargs)
+

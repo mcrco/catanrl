@@ -21,19 +21,11 @@ from catanatron.players.minimax import AlphaBetaPlayer
 from catanatron.players.value import ValueFunctionPlayer
 
 from catanrl.algorithms.alphazero.trainer import AlphaZeroConfig, AlphaZeroTrainer
-from catanrl.algorithms.alphazero.parallel_trainer import ParallelAlphaZeroTrainer
 from catanrl.experiment_store import (
     default_checkpoints_dir,
     make_experiment_name,
 )
-from catanrl.features.catanatron_utils import compute_observation_feature_vector_dim
-from catanrl.models import (
-    BackboneConfig,
-    MLPBackboneConfig,
-    build_flat_policy_value_network,
-    build_hierarchical_policy_value_network,
-)
-from catanrl.utils.catanatron_action_space import get_action_space_size
+from catanrl.models.mcts_builders import build_critic_model, build_policy_model
 
 
 def parse_args() -> argparse.Namespace:
@@ -64,9 +56,36 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model-type",
         type=str,
-        default="hierarchical",
-        choices=["standard", "hierarchical"],
-        help="Which policy/value network architecture to use.",
+        default="flat",
+        choices=["flat", "hierarchical"],
+        help="Policy head type: 'flat' or 'hierarchical'.",
+    )
+    parser.add_argument(
+        "--backbone-type",
+        type=str,
+        default="mlp",
+        choices=["mlp", "xdim"],
+        help="Shared backbone architecture for the policy and critic networks.",
+    )
+    parser.add_argument(
+        "--inference-batch-size",
+        type=int,
+        default=64,
+        help="Max batch size for the central self-play inference server.",
+    )
+    parser.add_argument(
+        "--inference-wait-ms",
+        type=float,
+        default=2.0,
+        help="Max time the inference server waits to fill a batch.",
+    )
+    parser.add_argument(
+        "--prunning",
+        action="store_true",
+        help="Prune clearly dominated actions before MCTS expansion.",
+    )
+    parser.add_argument(
+        "--discard-limit", type=int, default=7, help="Hand size that triggers discards on a 7."
     )
 
     # Model + config knobs (mirrors AlphaZeroConfig)
@@ -85,11 +104,25 @@ def parse_args() -> argparse.Namespace:
         help="Map layout",
     )
     parser.add_argument(
-        "--observation-level",
+        "--actor-observation-level",
         type=str,
         default="private",
         choices=["private", "public", "full"],
-        help="Information level the shared policy/value network observes during self-play",
+        help="Information level the policy (actor) network observes during self-play",
+    )
+    parser.add_argument(
+        "--critic-observation-level",
+        type=str,
+        default="full",
+        choices=["private", "public", "full"],
+        help="Information level the critic (value) network observes during self-play",
+    )
+    parser.add_argument(
+        "--critic-mode",
+        type=str,
+        default="full",
+        choices=["full", "guessed_dev_cards"],
+        help="How the critic observes hidden information.",
     )
     parser.add_argument("--vps-to-win", type=int, default=10, help="Victory points to win the game")
     parser.add_argument("--simulations", type=int, default=64, help="MCTS simulations per move")
@@ -213,13 +246,9 @@ def maybe_load_weights(trainer: AlphaZeroTrainer, path: Optional[str]) -> None:
         return
     if not os.path.exists(path):
         raise FileNotFoundError(f"Could not find weights file: {path}")
-    map_location = trainer.device
-    if map_location is None:
-        map_location = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Loading weights from {path} (map_location={map_location})")
-    state_dict = torch.load(path, map_location=map_location)
-    trainer.model.load_state_dict(state_dict)
-    print("  ✓ Weights loaded successfully")
+    print(f"Loading weights from {path}")
+    trainer.load(path)
+    print("  Weights loaded successfully")
 
 
 def init_wandb(args: argparse.Namespace, config: AlphaZeroConfig) -> bool:
@@ -414,16 +443,24 @@ def main() -> None:
     config = AlphaZeroConfig(
         num_players=args.num_players,
         map_type=args.map_type,
-        observation_level=args.observation_level,
+        actor_observation_level=args.actor_observation_level,
+        critic_observation_level=args.critic_observation_level,
+        critic_mode=args.critic_mode,
+        model_type=args.model_type,
         vps_to_win=args.vps_to_win,
+        discard_limit=args.discard_limit,
         simulations=args.simulations,
         c_puct=args.c_puct,
+        prunning=args.prunning,
         temperature=args.temperature,
         final_temperature=args.final_temperature,
         temperature_drop_move=args.temperature_drop_move,
         noise_turns=args.noise_turns,
         dirichlet_alpha=args.dirichlet_alpha,
         dirichlet_frac=args.dirichlet_frac,
+        num_game_workers=args.num_workers,
+        inference_batch_size=args.inference_batch_size,
+        inference_wait_ms=args.inference_wait_ms,
         buffer_size=args.buffer_size,
         batch_size=args.batch_size,
         lr=args.lr,
@@ -435,40 +472,35 @@ def main() -> None:
         seed=None if args.seed < 0 else args.seed,
     )
 
-    input_dim = compute_observation_feature_vector_dim(
-        config.num_players, config.map_type, config.observation_level
+    device = config.device or ("cuda" if torch.cuda.is_available() else "cpu")
+    policy_model = build_policy_model(
+        backbone_type=args.backbone_type,
+        model_type=config.model_type,
+        hidden_dims=hidden_dims,
+        num_players=config.num_players,
+        map_type=config.map_type,
+        actor_observation_level=config.actor_observation_level,
+        device=device,
     )
-    action_space_size = get_action_space_size(config.num_players, config.map_type)
-    backbone_config = BackboneConfig(
-        architecture="mlp",
-        args=MLPBackboneConfig(input_dim=input_dim, hidden_dims=hidden_dims),
+    critic_model = build_critic_model(
+        backbone_type=args.backbone_type,
+        hidden_dims=hidden_dims,
+        num_players=config.num_players,
+        map_type=config.map_type,
+        critic_observation_level=config.critic_observation_level,
+        device=device,
     )
-    if args.model_type == "hierarchical":
-        model = build_hierarchical_policy_value_network(
-            backbone_config=backbone_config,
-            num_players=config.num_players,
-            map_type=config.map_type,
-        )
-    else:
-        model = build_flat_policy_value_network(
-            backbone_config=backbone_config,
-            num_actions=action_space_size,
-        )
 
-    if args.num_workers <= 1:
-        trainer = AlphaZeroTrainer(config=config, model=model)
-    else:
-        trainer = ParallelAlphaZeroTrainer(config=config, model=model, num_workers=args.num_workers)
+    trainer = AlphaZeroTrainer(config=config, policy_model=policy_model, critic_model=critic_model)
     maybe_load_weights(trainer, args.load_weights)
 
     wandb_enabled = init_wandb(args, config)
     print("\nStarting AlphaZero training...")
     print(f"  Device: {trainer.device}")
-    print(f"  Input dim: {input_dim}")
+    print(f"  Backbone: {args.backbone_type} | model: {config.model_type}")
     print(f"  Hidden dims: {hidden_dims}")
     print(f"  Save path: {args.save_path}")
-    print(f"  Num workers: {args.num_workers}")
-    print(f"  Model type: {args.model_type}")
+    print(f"  Game workers: {args.num_workers}")
 
     run_training(args, trainer, wandb_enabled)
 

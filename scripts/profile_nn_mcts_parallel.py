@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-Benchmark sequential NN MCTS against threaded batched NN MCTS.
+Benchmark NN MCTS parallelization strategies:
 
-The baseline is ``NNMCTSPlayer`` with ``num_search_workers=1`` (one forward per
-leaf). Parallel configs use ``num_search_workers>1`` (shared tree + virtual
-loss + ``_BatchedNNMCTSInferenceBackend``).
+1. within-tree: one tree, ``num_search_workers`` fork processes (shared tree),
+   central batched inference via a CUDA-safe coordinator subprocess
+2. across-games: ``num_game_workers`` independent games, central batched inference
 
 Example (from repo root, with PyTorch available):
 
     uv run --extra cu130 python scripts/profile_nn_mcts_parallel.py \\
-        --num-simulations 128 --decisions 40 --parallel-workers 2,4,8 \\
-        --inference-batch-size 32 --trials 3
+        --num-simulations 128 --decisions 20 --parallel-workers 2,4,8 \\
+        --inference-batch-size 32 --mode both
 
 Use ``--policy-weights`` / ``--critic-weights`` to match your eval checkpoint.
 MINI map and MLP keep startup light for quick A/B tests.
@@ -24,7 +24,9 @@ import gc
 import io
 import multiprocessing as mp
 import pstats
+import queue
 import random
+import threading
 import time
 import traceback
 from contextlib import contextmanager
@@ -58,6 +60,7 @@ from catanrl.players import NNMCTSPlayer
 from catanrl.players.nn_mcts_player import (
     _CentralNNMCTSInferenceServer,
     _RemoteNNMCTSInferenceBackend,
+    _SyncRemoteNNMCTSInferenceBackend,
 )
 from catanrl.utils.catanatron_action_space import get_action_space_size
 from catanrl.utils.catanatron_map import build_catan_map
@@ -244,17 +247,16 @@ def make_root_game(
 
 
 def make_player(
-    policy_model: PolicyNetworkWrapper,
-    critic_model: ValueNetworkWrapper,
     args: argparse.Namespace,
-    device: torch.device,
-    workers: int,
+    inference_backend,
+    *,
+    num_search_workers: int,
 ) -> NNMCTSPlayer:
     return NNMCTSPlayer(
         color=COLOR_ORDER[0],
         model_type=args.model_type,
-        policy_model=policy_model,
-        critic_model=critic_model,
+        policy_model=None,
+        critic_model=None,
         map_type=args.map_type,
         num_simulations=args.num_simulations,
         c_puct=args.c_puct,
@@ -263,79 +265,252 @@ def make_player(
         critic_mode=args.critic_mode,
         actor_observation_level=args.actor_observation_level,
         critic_observation_level=args.critic_observation_level,
-        num_search_workers=workers,
+        num_search_workers=num_search_workers,
         inference_batch_size=args.inference_batch_size,
         inference_wait_ms=args.inference_wait_ms,
         virtual_loss=args.virtual_loss,
-        device=device,
+        device="cpu",
+        inference_backend=inference_backend,
     )
 
 
-def run_benchmark(
-    label: str,
-    workers: int,
+def _args_dict(args: argparse.Namespace) -> dict:
+    return {
+        "model_type": args.model_type,
+        "map_type": args.map_type,
+        "num_players": args.num_players,
+        "num_simulations": args.num_simulations,
+        "c_puct": args.c_puct,
+        "prunning": args.prunning,
+        "adversarial_policy": args.adversarial_policy,
+        "critic_mode": args.critic_mode,
+        "actor_observation_level": args.actor_observation_level,
+        "critic_observation_level": args.critic_observation_level,
+        "inference_batch_size": args.inference_batch_size,
+        "inference_wait_ms": args.inference_wait_ms,
+        "virtual_loss": args.virtual_loss,
+        "vps_to_win": args.vps_to_win,
+        "discard_limit": args.discard_limit,
+        "warmup_decisions": args.warmup_decisions,
+        "decisions": args.decisions,
+        "trials": args.trials,
+        "seed": args.seed,
+    }
+
+
+def _bridge_queue_forward(
+    source: mp.Queue,
+    dest: mp.Queue,
+    stop_event: threading.Event,
+) -> None:
+    while not stop_event.is_set():
+        try:
+            item = source.get(timeout=0.05)
+        except queue.Empty:
+            continue
+        if item is None:
+            dest.put(None)
+            return
+        dest.put(item)
+
+
+def _setup_fork_safe_remote_bridge(
+    server_request_queue: mp.Queue,
+    server_response_queues: list[mp.Queue],
+    num_search_workers: int,
+) -> tuple[mp.Queue, list[mp.Queue], list[threading.Thread], threading.Event]:
+    """Fork children cannot safely use spawn-created queues; bridge via fork queues."""
+    fork_ctx = mp.get_context("fork")
+    local_request = fork_ctx.Queue(maxsize=max(1024, num_search_workers * 64))
+    local_responses = [fork_ctx.Queue(maxsize=512) for _ in range(num_search_workers)]
+    stop_event = threading.Event()
+    threads = [
+        threading.Thread(
+            target=_bridge_queue_forward,
+            args=(local_request, server_request_queue, stop_event),
+            name="nn-mcts-fork-req-bridge",
+            daemon=True,
+        )
+    ]
+    for idx, server_response_queue in enumerate(server_response_queues):
+        threads.append(
+            threading.Thread(
+                target=_bridge_queue_forward,
+                args=(server_response_queue, local_responses[idx], stop_event),
+                name=f"nn-mcts-fork-resp-bridge-{idx}",
+                daemon=True,
+            )
+        )
+    for thread in threads:
+        thread.start()
+    return local_request, local_responses, threads, stop_event
+
+
+def _within_tree_coordinator_main(
+    worker_id: int,
+    args_dict: dict,
+    request_queue: mp.Queue,
+    response_queues: list[mp.Queue],
+    result_queue: mp.Queue,
+    *,
+    num_search_workers: int,
+    barrier,
+) -> None:
+    """One decision stream sharing a single tree; leaf evals go to the central server."""
+    backend = None
+    bridge_stop: threading.Event | None = None
+    try:
+        if num_search_workers > 1:
+            local_request, local_responses, _, bridge_stop = _setup_fork_safe_remote_bridge(
+                request_queue,
+                response_queues,
+                num_search_workers,
+            )
+            backend = _SyncRemoteNNMCTSInferenceBackend(
+                worker_id=worker_id,
+                request_queue=local_request,
+                response_queue=local_responses[0],
+                response_queues=local_responses,
+            )
+        else:
+            backend = _RemoteNNMCTSInferenceBackend(
+                worker_id=worker_id,
+                request_queue=request_queue,
+                response_queue=response_queues[0],
+            )
+        player = NNMCTSPlayer(
+            color=COLOR_ORDER[0],
+            model_type=str(args_dict["model_type"]),
+            policy_model=None,
+            critic_model=None,
+            map_type=args_dict["map_type"],
+            num_simulations=int(args_dict["num_simulations"]),
+            c_puct=float(args_dict["c_puct"]),
+            prunning=bool(args_dict["prunning"]),
+            opponent_policy=str(args_dict["adversarial_policy"]),
+            critic_mode=str(args_dict["critic_mode"]),
+            actor_observation_level=args_dict["actor_observation_level"],
+            critic_observation_level=args_dict["critic_observation_level"],
+            num_search_workers=num_search_workers,
+            inference_batch_size=int(args_dict["inference_batch_size"]),
+            inference_wait_ms=float(args_dict["inference_wait_ms"]),
+            virtual_loss=float(args_dict["virtual_loss"]),
+            device="cpu",
+            inference_backend=backend,
+        )
+        num_players = int(args_dict["num_players"])
+        map_type = args_dict["map_type"]
+        vps = int(args_dict["vps_to_win"])
+        discard = int(args_dict["discard_limit"])
+        warmup = int(args_dict["warmup_decisions"])
+        decisions = int(args_dict["decisions"])
+        trials = int(args_dict["trials"])
+        num_simulations = int(args_dict["num_simulations"])
+        seed = int(args_dict["seed"]) + worker_id * 100_003
+
+        for idx in range(warmup):
+            game = make_root_game(player, num_players, map_type, seed + idx, vps, discard)
+            player.decide(game, game.playable_actions)
+
+        barrier.wait()
+        start = time.perf_counter()
+        for _trial in range(trials):
+            for idx in range(decisions):
+                game = make_root_game(
+                    player, num_players, map_type, seed + warmup + idx, vps, discard
+                )
+                player.decide(game, game.playable_actions)
+        elapsed = time.perf_counter() - start
+
+        result_queue.put(
+            {
+                "worker_id": worker_id,
+                "sims": trials * decisions * num_simulations,
+                "elapsed": elapsed,
+            }
+        )
+    except BaseException:
+        result_queue.put({"worker_id": worker_id, "error": traceback.format_exc()})
+    finally:
+        if bridge_stop is not None:
+            bridge_stop.set()
+        if backend is not None:
+            try:
+                backend.close()
+            except Exception:
+                pass
+
+
+def run_within_tree_remote(
     policy_model: PolicyNetworkWrapper,
     critic_model: ValueNetworkWrapper,
     args: argparse.Namespace,
     device: torch.device,
-) -> BenchResult:
-    """Time `decide()` repeated `args.trials` times (same seeds each trial; sums wall time)."""
-    player = make_player(policy_model, critic_model, args, device, workers)
-    decision_seconds: list[float] = []
-    trial_wall_seconds: list[float] = []
+) -> list[BenchResult]:
+    label = "within-tree"
+    worker_counts = unique_worker_counts([1, *parse_int_list(args.parallel_workers)])
+    results: list[BenchResult] = []
+    args_dict = _args_dict(args)
 
-    for idx in range(args.warmup_decisions):
-        seed = args.seed + idx
-        game = make_root_game(
-            player,
-            args.num_players,
-            args.map_type,
-            seed,
-            args.vps_to_win,
-            args.discard_limit,
+    for idx, workers in enumerate(worker_counts):
+        gc.collect()
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+
+        mp_ctx = mp.get_context("spawn")
+        request_queue = mp_ctx.Queue(maxsize=max(1024, args.inference_batch_size * 4))
+        if workers > 1:
+            response_queues = [mp_ctx.Queue(maxsize=512) for _ in range(workers)]
+        else:
+            response_queues = [mp_ctx.Queue(maxsize=512)]
+        result_queue = mp_ctx.Queue()
+        barrier = mp_ctx.Barrier(1)
+        server = _CentralNNMCTSInferenceServer(
+            policy_model=policy_model,
+            critic_model=critic_model,
+            model_type=args.model_type,
+            device=device,
+            request_queue=request_queue,
+            response_queues=response_queues,
+            max_batch_size=args.inference_batch_size,
+            max_wait_ms=args.inference_wait_ms,
         )
-        player.decide(game, game.playable_actions)
+        server.start()
+        proc = mp_ctx.Process(
+            target=_within_tree_coordinator_main,
+            args=(0, args_dict, request_queue, response_queues, result_queue),
+            kwargs={"num_search_workers": workers, "barrier": barrier},
+            daemon=False,
+        )
+        proc.start()
+        message = result_queue.get()
+        proc.join(timeout=120)
+        server.stop()
 
-    maybe_sync(device)
-    total_start_all_trials = time.perf_counter()
+        if "error" in message:
+            raise RuntimeError(f"{label} workers={workers} failed:\n{message['error']}")
 
-    for _trial in range(args.trials):
-        maybe_sync(device)
-        trial_start = time.perf_counter()
-        for idx in range(args.decisions):
-            seed = args.seed + args.warmup_decisions + idx
-            game = make_root_game(
-                player,
-                args.num_players,
-                args.map_type,
-                seed,
-                args.vps_to_win,
-                args.discard_limit,
-            )
-            maybe_sync(device)
-            start = time.perf_counter()
-            player.decide(game, game.playable_actions)
-            maybe_sync(device)
-            elapsed = time.perf_counter() - start
-            decision_seconds.append(elapsed)
-        maybe_sync(device)
-        trial_wall_seconds.append(time.perf_counter() - trial_start)
+        elapsed = float(message["elapsed"])
+        total_sims = int(message["sims"])
+        total_decisions = args.decisions * args.trials
+        result = BenchResult(
+            label=label,
+            workers=workers,
+            decisions=total_decisions,
+            simulations=total_sims,
+            total_seconds=elapsed,
+            decision_seconds=[elapsed / max(1, total_decisions)] * total_decisions,
+            trial_totals=(elapsed,),
+        )
+        results.append(result)
+        print(
+            f"Finished {label} workers={workers}: "
+            f"{result.simulations_per_second:.1f} sims/s"
+        )
+        if idx == 0:
+            print("Baseline captured; speedups below are relative to this row.")
 
-    maybe_sync(device)
-    total_seconds = time.perf_counter() - total_start_all_trials
-
-    total_decisions = args.decisions * args.trials
-    total_sims = total_decisions * args.num_simulations
-
-    return BenchResult(
-        label=label,
-        workers=workers,
-        decisions=total_decisions,
-        simulations=total_sims,
-        total_seconds=total_seconds,
-        decision_seconds=decision_seconds,
-        trial_totals=tuple(trial_wall_seconds),
-    )
+    return results
 
 
 def print_results(results: list[BenchResult], trials: int) -> None:
@@ -343,10 +518,10 @@ def print_results(results: list[BenchResult], trials: int) -> None:
     print()
     hdr_trial = f" {'Trial σ s':>10}" if trials > 1 else ""
     print(
-        f"{'Mode':<18} {'Workers':>7} {'Dec/s':>11} {'Sims/s':>12} "
+        f"{'Mode':<22} {'Workers':>7} {'Dec/s':>11} {'Sims/s':>12} "
         f"{'Mean ms':>10} {'Std ms':>9} {'Speedup':>9}{hdr_trial}"
     )
-    print("-" * (82 + (11 if trials > 1 else 0)))
+    print("-" * (86 + (11 if trials > 1 else 0)))
     for result in results:
         speedup = (
             result.simulations_per_second / baseline.simulations_per_second
@@ -355,7 +530,7 @@ def print_results(results: list[BenchResult], trials: int) -> None:
         )
         trial_col = f" {result.trial_time_std:>10.4f}" if trials > 1 else ""
         print(
-            f"{result.label:<18} "
+            f"{result.label:<22} "
             f"{result.workers:>7} "
             f"{result.decisions_per_second:>11.3f} "
             f"{result.simulations_per_second:>12.1f} "
@@ -366,18 +541,10 @@ def print_results(results: list[BenchResult], trials: int) -> None:
         )
 
     print()
-    print("Speedup is throughput (simulations / second) vs the first row (workers=1, sequential inference).")
-    best = max(results[1:], key=lambda r: r.simulations_per_second, default=None)
-    if best is not None and baseline.simulations_per_second > 0:
-        print(
-            f"Best parallel config here: workers={best.workers} → "
-            f"{best.simulations_per_second / baseline.simulations_per_second:.2f}x vs sequential."
-        )
+    print("Speedup is throughput (simulations / second) vs the first row (workers=1).")
 
 
 class _PhaseTimer:
-    """Accumulates wall time and call counts for non-overlapping search phases."""
-
     def __init__(self) -> None:
         self.totals: dict[str, float] = {}
         self.counts: dict[str, int] = {}
@@ -389,12 +556,6 @@ class _PhaseTimer:
 
 @contextmanager
 def instrument_sequential_player(player, timer: _PhaseTimer) -> Iterator[None]:
-    """Monkeypatch the hot leaf-level callables to time them, without editing the player.
-
-    The four buckets are non-overlapping (none calls another), so their sum is a lower
-    bound on decide() time; the remainder is reported as 'other (terminal checks, priors,
-    action mapping, node alloc, backprop, ...)'.
-    """
     import catanrl.players.nn_mcts_player as nnp
 
     orig_features = nnp.full_game_to_features
@@ -403,17 +564,17 @@ def instrument_sequential_player(player, timer: _PhaseTimer) -> Iterator[None]:
     backend = player._inference_backend
     orig_eval = backend.evaluate_leaf
 
-    def timed_features(*args, **kwargs):
+    def timed_features(*a, **kw):
         start = time.perf_counter()
         try:
-            return orig_features(*args, **kwargs)
+            return orig_features(*a, **kw)
         finally:
             timer.add("feature_extraction (full_game_to_features)", time.perf_counter() - start)
 
-    def timed_spectrum(*args, **kwargs):
+    def timed_spectrum(*a, **kw):
         start = time.perf_counter()
         try:
-            return orig_spectrum(*args, **kwargs)
+            return orig_spectrum(*a, **kw)
         finally:
             timer.add("child_expansion (execute_spectrum / game.copy)", time.perf_counter() - start)
 
@@ -450,87 +611,98 @@ def run_breakdown(
     args: argparse.Namespace,
     device: torch.device,
 ) -> None:
-    player = make_player(policy_model, critic_model, args, device, workers=1)
-
-    for idx in range(args.warmup_decisions):
-        seed = args.seed + idx
-        game = make_root_game(
-            player, args.num_players, args.map_type, seed, args.vps_to_win, args.discard_limit
-        )
-        player.decide(game, game.playable_actions)
-
-    timer = _PhaseTimer()
-    total_decide = 0.0
-    maybe_sync(device)
-    with instrument_sequential_player(player, timer):
-        for idx in range(args.decisions):
-            seed = args.seed + args.warmup_decisions + idx
-            game = make_root_game(
-                player, args.num_players, args.map_type, seed, args.vps_to_win, args.discard_limit
-            )
-            maybe_sync(device)
-            start = time.perf_counter()
-            player.decide(game, game.playable_actions)
-            maybe_sync(device)
-            total_decide += time.perf_counter() - start
-
-    accounted = sum(timer.totals.values())
-    other = max(0.0, total_decide - accounted)
-    total_sims = args.decisions * args.num_simulations
-
-    print("\n=== Per-decision phase breakdown (sequential, workers=1) ===")
-    print(
-        f"Decisions: {args.decisions} | sims/decision: {args.num_simulations} "
-        f"| total decide wall: {total_decide:.3f}s | {total_decide / max(1, args.decisions) * 1000:.1f} ms/decision"
+    mp_ctx = mp.get_context("spawn")
+    request_queue = mp_ctx.Queue(maxsize=64)
+    response_queue = mp_ctx.Queue(maxsize=64)
+    server = _CentralNNMCTSInferenceServer(
+        policy_model=policy_model,
+        critic_model=critic_model,
+        model_type=args.model_type,
+        device=device,
+        request_queue=request_queue,
+        response_queues=[response_queue],
+        max_batch_size=args.inference_batch_size,
+        max_wait_ms=args.inference_wait_ms,
     )
-    print(
-        f"{'Phase':<48} {'Total s':>9} {'% decide':>9} {'ms/dec':>9} "
-        f"{'calls':>9} {'µs/call':>9}"
-    )
-    print("-" * 96)
-    rows = sorted(timer.totals.items(), key=lambda kv: kv[1], reverse=True)
-    rows.append(("other (winning_color, priors, action map, alloc, backprop)", other))
-    for name, total in rows:
-        count = timer.counts.get(name, 0)
-        pct = 100.0 * total / total_decide if total_decide > 0 else 0.0
-        ms_dec = total / max(1, args.decisions) * 1000.0
-        us_call = (total / count * 1e6) if count else 0.0
-        calls = str(count) if count else "-"
-        print(f"{name:<48} {total:>9.3f} {pct:>8.1f}% {ms_dec:>9.2f} {calls:>9} {us_call:>9.1f}")
-    print("-" * 96)
-    if total_sims:
-        print(f"Mean time per simulation: {total_decide / total_sims * 1000.0:.3f} ms")
-
-    if args.cprofile:
-        print("\n=== cProfile (full function-level detail, higher overhead) ===")
-        profiler = cProfile.Profile()
-        cprofile_decisions = max(1, args.decisions // 2)
-        profiler.enable()
-        for idx in range(cprofile_decisions):
-            seed = args.seed + 10_000 + idx
+    server.start()
+    backend = _RemoteNNMCTSInferenceBackend(0, request_queue, response_queue)
+    player = make_player(args, backend, num_search_workers=1)
+    try:
+        for idx in range(args.warmup_decisions):
+            seed = args.seed + idx
             game = make_root_game(
                 player, args.num_players, args.map_type, seed, args.vps_to_win, args.discard_limit
             )
             player.decide(game, game.playable_actions)
+
+        timer = _PhaseTimer()
+        total_decide = 0.0
         maybe_sync(device)
-        profiler.disable()
-        stream = io.StringIO()
-        stats = pstats.Stats(profiler, stream=stream).sort_stats("tottime")
-        stats.print_stats(25)
-        print(stream.getvalue())
+        with instrument_sequential_player(player, timer):
+            for idx in range(args.decisions):
+                seed = args.seed + args.warmup_decisions + idx
+                game = make_root_game(
+                    player,
+                    args.num_players,
+                    args.map_type,
+                    seed,
+                    args.vps_to_win,
+                    args.discard_limit,
+                )
+                maybe_sync(device)
+                start = time.perf_counter()
+                player.decide(game, game.playable_actions)
+                maybe_sync(device)
+                total_decide += time.perf_counter() - start
+
+        accounted = sum(timer.totals.values())
+        other = max(0.0, total_decide - accounted)
+        total_sims = args.decisions * args.num_simulations
+
+        print("\n=== Per-decision phase breakdown (sequential, workers=1) ===")
+        print(
+            f"Decisions: {args.decisions} | sims/decision: {args.num_simulations} "
+            f"| total decide wall: {total_decide:.3f}s"
+        )
+        rows = sorted(timer.totals.items(), key=lambda kv: kv[1], reverse=True)
+        rows.append(("other", other))
+        for name, total in rows:
+            pct = 100.0 * total / total_decide if total_decide > 0 else 0.0
+            print(f"{name:<48} {total:>9.3f}s {pct:>8.1f}%")
+        if total_sims:
+            print(f"Mean time per simulation: {total_decide / total_sims * 1000.0:.3f} ms")
+
+        if args.cprofile:
+            profiler = cProfile.Profile()
+            profiler.enable()
+            for idx in range(max(1, args.decisions // 2)):
+                seed = args.seed + 10_000 + idx
+                game = make_root_game(
+                    player,
+                    args.num_players,
+                    args.map_type,
+                    seed,
+                    args.vps_to_win,
+                    args.discard_limit,
+                )
+                player.decide(game, game.playable_actions)
+            profiler.disable()
+            stream = io.StringIO()
+            pstats.Stats(profiler, stream=stream).sort_stats("tottime").print_stats(25)
+            print(stream.getvalue())
+    finally:
+        backend.close()
+        server.stop()
 
 
 def _across_games_worker_main(
     worker_id: int,
     args_dict: dict,
-    request_queue: "mp.Queue",
-    response_queue: "mp.Queue",
-    result_queue: "mp.Queue",
+    request_queue: mp.Queue,
+    response_queue: mp.Queue,
+    result_queue: mp.Queue,
     barrier,
 ) -> None:
-    """One self-play game process: a workers=1 player whose leaf evals go to the
-    central batched inference server. Times a fixed number of decisions so the
-    aggregate sims/s is directly comparable to the within-tree benchmark."""
     backend = None
     try:
         backend = _RemoteNNMCTSInferenceBackend(
@@ -552,7 +724,7 @@ def _across_games_worker_main(
             actor_observation_level=args_dict["actor_observation_level"],
             critic_observation_level=args_dict["critic_observation_level"],
             num_search_workers=1,
-            device="cpu",  # worker does no GPU work; the central server owns the models
+            device="cpu",
             inference_backend=backend,
         )
         num_players = int(args_dict["num_players"])
@@ -568,7 +740,7 @@ def _across_games_worker_main(
             game = make_root_game(player, num_players, map_type, seed + idx, vps, discard)
             player.decide(game, game.playable_actions)
 
-        barrier.wait()  # align timed start across all game workers
+        barrier.wait()
         start = time.perf_counter()
         for idx in range(decisions):
             game = make_root_game(player, num_players, map_type, seed + warmup + idx, vps, discard)
@@ -597,30 +769,13 @@ def run_across_games(
     worker_counts = unique_worker_counts(parse_int_list(args.across_game_workers))
     print("\n=== Across-games parallelism (independent games -> central batched server) ===")
     print(
-        f"Each game worker runs num_search_workers=1; {args.decisions} decisions x "
+        f"Each game worker runs sequential search; {args.decisions} decisions x "
         f"{args.num_simulations} sims after {args.warmup_decisions} warmup."
     )
     print(f"{'GameWorkers':>11} {'Agg sims/s':>12} {'Per-worker sims/s':>18} {'ms/sim':>9} {'Speedup':>9}")
     print("-" * 64)
 
-    args_dict = {
-        "model_type": args.model_type,
-        "map_type": args.map_type,
-        "num_players": args.num_players,
-        "num_simulations": args.num_simulations,
-        "c_puct": args.c_puct,
-        "prunning": args.prunning,
-        "adversarial_policy": args.adversarial_policy,
-        "critic_mode": args.critic_mode,
-        "actor_observation_level": args.actor_observation_level,
-        "critic_observation_level": args.critic_observation_level,
-        "vps_to_win": args.vps_to_win,
-        "discard_limit": args.discard_limit,
-        "warmup_decisions": args.warmup_decisions,
-        "decisions": args.decisions,
-        "seed": args.seed,
-    }
-
+    args_dict = _args_dict(args)
     baseline_sps = None
     for workers in worker_counts:
         mp_ctx = mp.get_context("spawn")
@@ -651,7 +806,7 @@ def run_across_games(
 
         results = [result_queue.get() for _ in range(workers)]
         for proc in procs:
-            proc.join(timeout=15)
+            proc.join(timeout=30)
         server.stop()
 
         errors = [r for r in results if "error" in r]
@@ -670,15 +825,24 @@ def run_across_games(
         print(
             f"{workers:>11} {agg_sps:>12.1f} {per_worker_sps:>18.1f} {ms_per_sim:>9.3f} {speedup:>8.2f}x"
         )
+
+
+def _run_within_tree(
+    policy_model: PolicyNetworkWrapper,
+    critic_model: ValueNetworkWrapper,
+    args: argparse.Namespace,
+    device: torch.device,
+) -> None:
     print(
-        "\nAgg sims/s = total simulations across all game workers / wall time "
-        "(aligned via barrier). Speedup is vs a single game worker."
+        "\n=== within-tree (shared tree + fork workers + virtual loss, central batched inference) ==="
     )
+    results = run_within_tree_remote(policy_model, critic_model, args, device)
+    print_results(results, trials=args.trials)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Compare sequential NN MCTS throughput against threaded batched NN MCTS.",
+        description="Compare within-tree (fork) vs across-games NN MCTS throughput.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--model-type", choices=["flat", "hierarchical"], default="flat")
@@ -701,18 +865,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--critic-weights", type=str, default=None)
     parser.add_argument("--num-simulations", type=int, default=64)
     parser.add_argument("--decisions", type=int, default=20)
-    parser.add_argument(
-        "--trials",
-        type=int,
-        default=1,
-        help="Repeat the timed decision loop this many times (same positions each trial).",
-    )
+    parser.add_argument("--trials", type=int, default=1)
     parser.add_argument("--warmup-decisions", type=int, default=2)
     parser.add_argument(
         "--parallel-workers",
         type=str,
         default="2,4,8",
-        help="Comma-separated worker counts to compare against the old one-worker path.",
+        help="Comma-separated within-tree fork worker counts.",
     )
     parser.add_argument("--inference-batch-size", type=int, default=32)
     parser.add_argument("--inference-wait-ms", type=float, default=1.0)
@@ -720,40 +879,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--mode",
         type=str,
-        default="within-tree",
+        default="both",
         choices=["within-tree", "across-games", "both"],
-        help="Which parallelization strategy to benchmark. 'within-tree' = shared tree + "
-        "virtual loss (threads); 'across-games' = independent game processes + central batched "
-        "inference server; 'both' runs and compares the two.",
+        help="Which strategies to benchmark. 'both' runs within-tree and across-games.",
     )
     parser.add_argument(
         "--across-game-workers",
         type=str,
         default="1,2,4,8",
-        help="Comma-separated game-process counts for the across-games mode.",
+        help="Comma-separated game-process counts for across-games mode.",
     )
-    parser.add_argument(
-        "--breakdown",
-        action="store_true",
-        help="Profile a single sequential player and report where per-decision time goes "
-        "(feature extraction vs game copy vs NN forward vs selection). Skips the worker sweep.",
-    )
-    parser.add_argument(
-        "--cprofile",
-        action="store_true",
-        help="With --breakdown, also print a cProfile function-level table.",
-    )
-    parser.add_argument(
-        "--compile",
-        action="store_true",
-        help="Wrap policy/critic models with torch.compile to cut batch-1 kernel-launch overhead.",
-    )
+    parser.add_argument("--breakdown", action="store_true")
+    parser.add_argument("--cprofile", action="store_true")
+    parser.add_argument("--compile", action="store_true")
     parser.add_argument(
         "--compile-mode",
         type=str,
         default="reduce-overhead",
         choices=["default", "reduce-overhead", "max-autotune"],
-        help="torch.compile mode. 'reduce-overhead' uses CUDA graphs (best for batch-1 latency).",
     )
     parser.add_argument("--c-puct", type=float, default=1.5)
     parser.add_argument("--prunning", action="store_true")
@@ -771,18 +914,12 @@ def parse_args() -> argparse.Namespace:
             "playouts",
         ],
         default="self",
-        help="Opponent policy used inside MCTS expansion for non-agent turns.",
     )
     parser.add_argument("--critic-mode", choices=["full", "guess"], default="full")
     parser.add_argument("--vps-to-win", type=int, default=10)
     parser.add_argument("--discard-limit", type=int, default=9)
     parser.add_argument("--seed", type=int, default=1234)
-    parser.add_argument(
-        "--device",
-        type=str,
-        default=None,
-        help="cpu, cuda, or cuda:0. Defaults to cuda if available.",
-    )
+    parser.add_argument("--device", type=str, default=None)
     return parser.parse_args()
 
 
@@ -824,7 +961,6 @@ def main() -> None:
     print("NN MCTS throughput profile")
     print(f"Device: {device}")
     print(f"Map: {args.map_type} | players: {args.num_players}")
-    print(f"Backbone: {args.backbone_type} | model: {args.model_type}")
     print(
         f"Simulations/decision: {args.num_simulations} | decisions/trial: {args.decisions} "
         f"| trials: {args.trials}"
@@ -833,43 +969,16 @@ def main() -> None:
         f"Batch size: {args.inference_batch_size} | wait: {args.inference_wait_ms} ms "
         f"| virtual loss: {args.virtual_loss}"
     )
-    print(f"Adversarial policy: {args.adversarial_policy} | critic mode: {args.critic_mode}")
 
     if args.breakdown:
         run_breakdown(policy_model, critic_model, args, device)
         return
 
-    if args.mode in ("within-tree", "both"):
+    run_all = args.mode == "both"
+    if run_all or args.mode == "within-tree":
         _run_within_tree(policy_model, critic_model, args, device)
-
-    if args.mode in ("across-games", "both"):
+    if run_all or args.mode == "across-games":
         run_across_games(policy_model, critic_model, args, device)
-
-
-def _run_within_tree(
-    policy_model: PolicyNetworkWrapper,
-    critic_model: ValueNetworkWrapper,
-    args: argparse.Namespace,
-    device: torch.device,
-) -> None:
-    print("\n=== Within-tree parallelism (shared tree + virtual loss, threads) ===")
-    worker_counts = unique_worker_counts([1, *parse_int_list(args.parallel_workers)])
-    results: list[BenchResult] = []
-    for idx, workers in enumerate(worker_counts):
-        gc.collect()
-        if device.type == "cuda":
-            torch.cuda.empty_cache()
-        label = "old-sequential" if workers == 1 else "new-batched"
-        result = run_benchmark(label, workers, policy_model, critic_model, args, device)
-        results.append(result)
-        print(
-            f"Finished {label} workers={workers}: "
-            f"{result.simulations_per_second:.1f} sims/s"
-        )
-        if idx == 0:
-            print("Baseline captured; speedups below are relative to this row.")
-
-    print_results(results, trials=args.trials)
 
 
 if __name__ == "__main__":
