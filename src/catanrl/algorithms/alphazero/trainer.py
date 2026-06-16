@@ -9,6 +9,7 @@ to the MCTS visit distribution) and a critic net (MSE to the game outcome).
 
 from __future__ import annotations
 
+import os
 import random
 from collections import Counter, deque
 from dataclasses import dataclass
@@ -261,19 +262,26 @@ class AlphaZeroTrainer:
     # Persistence
     # ------------------------------------------------------------------
 
-    def save(self, path: str) -> None:
+    def save(self, save_dir: str, stem: str = "best") -> None:
+        """Save separate policy/critic state_dict files for the experiment store."""
+        os.makedirs(save_dir, exist_ok=True)
         torch.save(
-            {
-                "policy": self.policy_model.state_dict(),
-                "critic": self.critic_model.state_dict(),
-            },
-            path,
+            self.policy_model.state_dict(),
+            os.path.join(save_dir, f"policy_{stem}.pt"),
+        )
+        torch.save(
+            self.critic_model.state_dict(),
+            os.path.join(save_dir, f"critic_{stem}.pt"),
         )
 
-    def load(self, path: str) -> None:
-        checkpoint = torch.load(path, map_location=self.device)
-        self.policy_model.load_state_dict(checkpoint["policy"])
-        self.critic_model.load_state_dict(checkpoint["critic"])
+    def load(self, policy_path: str, critic_path: str) -> None:
+        """Load separate policy/critic state_dict files."""
+        self.policy_model.load_state_dict(
+            torch.load(policy_path, map_location=self.device)
+        )
+        self.critic_model.load_state_dict(
+            torch.load(critic_path, map_location=self.device)
+        )
 
     def close(self) -> None:
         return

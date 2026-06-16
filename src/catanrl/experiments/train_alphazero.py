@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import argparse
 import os
-from dataclasses import asdict
 from typing import Dict, List, Optional
 
 import torch
@@ -22,8 +21,13 @@ from catanatron.players.value import ValueFunctionPlayer
 
 from catanrl.algorithms.alphazero.trainer import AlphaZeroConfig, AlphaZeroTrainer
 from catanrl.experiment_store import (
+    GameConfig,
+    KIND_POLICY,
+    KIND_VALUE,
     default_checkpoints_dir,
     make_experiment_name,
+    network_spec_from_model,
+    save_experiment,
 )
 from catanrl.models.mcts_builders import build_critic_model, build_policy_model
 
@@ -184,7 +188,10 @@ def parse_args() -> argparse.Namespace:
         help="Directory for periodic checkpoints (defaults to save-path directory)",
     )
     parser.add_argument(
-        "--load-weights", type=str, default=None, help="Optional path to initialize model weights"
+        "--load-weights",
+        type=str,
+        default=None,
+        help="Checkpoint directory containing policy_best.pt and critic_best.pt",
     )
 
     # Logging
@@ -224,11 +231,6 @@ def parse_hidden_dims(value: str) -> List[int]:
     return dims
 
 
-def ensure_parent_dir(path: str) -> None:
-    directory = os.path.dirname(path)
-    if directory:
-        os.makedirs(directory, exist_ok=True)
-
 
 def aggregate_metrics(metrics: List[Dict[str, float]]) -> Dict[str, float]:
     if not metrics:
@@ -244,29 +246,77 @@ def aggregate_metrics(metrics: List[Dict[str, float]]) -> Dict[str, float]:
 def maybe_load_weights(trainer: AlphaZeroTrainer, path: Optional[str]) -> None:
     if not path:
         return
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"Could not find weights file: {path}")
+    if not os.path.isdir(path):
+        raise FileNotFoundError(
+            f"--load-weights must be a checkpoint directory with "
+            f"policy_best.pt and critic_best.pt: {path}"
+        )
+    policy_path = os.path.join(path, "policy_best.pt")
+    critic_path = os.path.join(path, "critic_best.pt")
+    if not os.path.exists(policy_path) or not os.path.exists(critic_path):
+        raise FileNotFoundError(
+            f"Checkpoint directory must contain policy_best.pt and critic_best.pt: {path}"
+        )
     print(f"Loading weights from {path}")
-    trainer.load(path)
+    trainer.load(policy_path, critic_path)
     print("  Weights loaded successfully")
 
 
-def init_wandb(args: argparse.Namespace, config: AlphaZeroConfig) -> bool:
-    config_dict = {
-        **asdict(config),
+def build_train_config(
+    args: argparse.Namespace,
+    config: AlphaZeroConfig,
+    hidden_dims: List[int],
+    device: str,
+) -> Dict[str, object]:
+    return {
+        "algorithm": "AlphaZero",
+        "model_type": config.model_type,
+        "backbone_type": args.backbone_type,
+        "hidden_dims": hidden_dims,
         "iterations": args.iterations,
         "games_per_iteration": args.games_per_iteration,
         "optimizer_steps": args.optimizer_steps,
-        "hidden_dims": args.hidden_dims,
-        "save_path": args.save_path,
+        "num_workers": args.num_workers,
+        "inference_batch_size": args.inference_batch_size,
+        "inference_wait_ms": args.inference_wait_ms,
+        "map_type": config.map_type,
+        "num_players": config.num_players,
+        "actor_observation_level": config.actor_observation_level,
+        "critic_observation_level": config.critic_observation_level,
+        "critic_mode": config.critic_mode,
+        "vps_to_win": config.vps_to_win,
+        "discard_limit": config.discard_limit,
+        "simulations": config.simulations,
+        "c_puct": config.c_puct,
+        "prunning": config.prunning,
+        "temperature": config.temperature,
+        "final_temperature": config.final_temperature,
+        "temperature_drop_move": config.temperature_drop_move,
+        "noise_turns": config.noise_turns,
+        "dirichlet_alpha": config.dirichlet_alpha,
+        "dirichlet_frac": config.dirichlet_frac,
+        "buffer_size": config.buffer_size,
+        "batch_size": config.batch_size,
+        "lr": config.lr,
+        "weight_decay": config.weight_decay,
+        "policy_loss_weight": config.policy_loss_weight,
+        "value_loss_weight": config.value_loss_weight,
+        "max_grad_norm": config.max_grad_norm,
         "checkpoint_every": args.checkpoint_every,
+        "load_weights": args.load_weights,
+        "seed": args.seed,
+        "device": device,
+        "save_path": args.save_path,
     }
+
+
+def init_wandb(args: argparse.Namespace, train_config: Dict[str, object]) -> bool:
     if args.wandb:
         wandb.init(
             project=args.wandb_project,
             name=args.wandb_run_name,
             entity=args.wandb_entity,
-            config=config_dict,
+            config=train_config,
         )
         return True
     wandb.init(mode="disabled")
@@ -308,8 +358,7 @@ def _close_trainer_if_needed(trainer: AlphaZeroTrainer) -> None:
 
 
 def run_training(args: argparse.Namespace, trainer: AlphaZeroTrainer, wandb_enabled: bool) -> None:
-    ensure_parent_dir(args.save_path)
-    checkpoint_dir = args.checkpoint_dir or os.path.dirname(args.save_path) or "."
+    checkpoint_dir = args.checkpoint_dir or args.save_path
     best_loss = float("inf")
     global_step = 0
 
@@ -383,18 +432,22 @@ def run_training(args: argparse.Namespace, trainer: AlphaZeroTrainer, wandb_enab
                 )
                 if summary["loss"] < best_loss:
                     best_loss = summary["loss"]
-                    trainer.save(args.save_path)
-                    print(f"  → Saved new best model to {args.save_path} (loss={best_loss:.4f})")
+                    trainer.save(args.save_path, stem="best")
+                    print(
+                        f"  → Saved new best model to {args.save_path} "
+                        f"(policy_best.pt, critic_best.pt; loss={best_loss:.4f})"
+                    )
                     if wandb_enabled:
                         wandb.run.summary["best_loss"] = best_loss
             else:
                 print("  No optimizer metrics collected this iteration.")
 
             if args.checkpoint_every and iteration % args.checkpoint_every == 0:
-                os.makedirs(checkpoint_dir, exist_ok=True)
-                checkpoint_path = os.path.join(checkpoint_dir, f"alphazero_iter{iteration:04d}.pt")
-                trainer.save(checkpoint_path)
-                print(f"  → Saved checkpoint to {checkpoint_path}")
+                trainer.save(checkpoint_dir, stem=f"iter_{iteration}")
+                print(
+                    f"  → Saved checkpoint to {checkpoint_dir} "
+                    f"(policy_iter_{iteration}.pt, critic_iter_{iteration}.pt)"
+                )
 
             value_eval_stats = trainer.evaluate_against(
                 opponent_factory=lambda color: ValueFunctionPlayer(color),
@@ -422,8 +475,11 @@ def run_training(args: argparse.Namespace, trainer: AlphaZeroTrainer, wandb_enab
             )
 
         if best_loss == float("inf"):
-            trainer.save(args.save_path)
-            print(f"\nTraining finished without SGD metrics; saved model to {args.save_path}")
+            trainer.save(args.save_path, stem="best")
+            print(
+                f"\nTraining finished without SGD metrics; saved model to {args.save_path} "
+                "(policy_best.pt, critic_best.pt)"
+            )
         else:
             print(f"\nBest loss achieved: {best_loss:.4f}")
     finally:
@@ -438,7 +494,8 @@ def main() -> None:
     experiment_name = make_experiment_name("alphazero", args.wandb_run_name, args.experiment_name)
     if args.wandb and not args.wandb_run_name:
         args.wandb_run_name = experiment_name
-    args.save_path = os.path.join(default_checkpoints_dir(experiment_name), "best.pt")
+    args.save_path = default_checkpoints_dir(experiment_name)
+    os.makedirs(args.save_path, exist_ok=True)
 
     config = AlphaZeroConfig(
         num_players=args.num_players,
@@ -494,19 +551,53 @@ def main() -> None:
     trainer = AlphaZeroTrainer(config=config, policy_model=policy_model, critic_model=critic_model)
     maybe_load_weights(trainer, args.load_weights)
 
-    wandb_enabled = init_wandb(args, config)
+    train_config = build_train_config(args, config, hidden_dims, device)
+    wandb_enabled = init_wandb(args, train_config)
     print("\nStarting AlphaZero training...")
     print(f"  Device: {trainer.device}")
     print(f"  Backbone: {args.backbone_type} | model: {config.model_type}")
     print(f"  Hidden dims: {hidden_dims}")
-    print(f"  Save path: {args.save_path}")
+    print(f"  Checkpoints: {args.save_path}")
     print(f"  Game workers: {args.num_workers}")
 
     run_training(args, trainer, wandb_enabled)
 
+    networks = {
+        "policy": network_spec_from_model(
+            policy_model,
+            kind=KIND_POLICY,
+            model_type=config.model_type,
+            observation_level=config.actor_observation_level,
+        ),
+        "critic": network_spec_from_model(
+            critic_model,
+            kind=KIND_VALUE,
+            observation_level=config.critic_observation_level,
+        ),
+    }
+    exp_path = save_experiment(
+        experiment_name,
+        args.save_path,
+        algorithm="alphazero",
+        game=GameConfig(
+            num_players=config.num_players,
+            map_type=config.map_type,
+            vps_to_win=config.vps_to_win,
+            discard_limit=config.discard_limit,
+        ),
+        networks=networks,
+        train_config=train_config,
+        wandb_info={"project": args.wandb_project, "name": args.wandb_run_name} if args.wandb else {},
+    )
+
     print("\n" + "=" * 80)
     print("AlphaZero training complete!")
     print("=" * 80)
+    print(f"Checkpoints saved to: {args.save_path}")
+    print(f"  - Policy: {args.save_path}/policy_best.pt")
+    print(f"  - Critic: {args.save_path}/critic_best.pt")
+    if exp_path:
+        print(f"Experiment:  {exp_path}  (load via load_experiment('{experiment_name}'))")
 
     if args.wandb:
         wandb.finish()
