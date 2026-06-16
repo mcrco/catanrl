@@ -10,9 +10,11 @@ from ..experiment_store import (
     GameConfig,
     KIND_POLICY,
     KIND_VALUE,
+    add_load_from_experiment_arguments,
     default_checkpoints_dir,
     make_experiment_name,
     network_spec_from_model,
+    prepare_training_warm_start,
     save_experiment,
 )
 from ..utils.catanatron_action_space import get_action_space_size
@@ -89,18 +91,7 @@ def main():
     )
 
     # Weight loading
-    parser.add_argument(
-        "--load-policy-weights",
-        type=str,
-        default=None,
-        help="Optional policy initialization checkpoint",
-    )
-    parser.add_argument(
-        "--load-critic-weights",
-        type=str,
-        default=None,
-        help="Optional critic initialization checkpoint",
-    )
+    add_load_from_experiment_arguments(parser)
 
     # Training loop
     parser.add_argument(
@@ -321,12 +312,10 @@ def main():
 
     args = parser.parse_args()
 
-    # Validate weight paths if provided
-    if args.load_policy_weights and not os.path.exists(args.load_policy_weights):
-        print(f"Error: policy weights file '{args.load_policy_weights}' not found")
-        return
-    if args.load_critic_weights and not os.path.exists(args.load_critic_weights):
-        print(f"Error: critic weights file '{args.load_critic_weights}' not found")
+    try:
+        warm_start = prepare_training_warm_start(args)
+    except FileNotFoundError as exc:
+        print(f"Error: {exc}")
         return
 
     # Resolve experiment identity (shared by the folder and the W&B run).
@@ -342,6 +331,12 @@ def main():
         args.opponents = ["random"]
     opponents = create_opponents(args.opponents)
     num_players = len(opponents) + 1
+    if warm_start is not None and warm_start.experiment.num_players != num_players:
+        print(
+            f"Warning: source experiment was trained for "
+            f"{warm_start.experiment.num_players} players but --opponents implies "
+            f"{num_players}."
+        )
     action_space_size = get_action_space_size(num_players, args.map_type)
     print(f"Number of players: {num_players}")
 
@@ -397,6 +392,8 @@ def main():
                 "eval_every_iterations": args.eval_every_iterations,
                 "save_every_iterations": args.save_every_iterations,
                 "seed": args.seed,
+                "load_from_experiment": args.load_from_experiment,
+                "load_from_which": args.load_from_which,
     }
 
     wandb_config = None
@@ -418,8 +415,8 @@ def main():
         xdim_cnn_kernel_size=xdim_cnn_kernel_size,
         xdim_policy_fusion_hidden_dim=args.xdim_policy_fusion_hidden_dim,
         xdim_critic_fusion_hidden_dim=args.xdim_critic_fusion_hidden_dim,
-        load_policy_weights=args.load_policy_weights,
-        load_critic_weights=args.load_critic_weights,
+        load_policy_weights=warm_start.checkpoints.policy if warm_start else None,
+        load_critic_weights=warm_start.checkpoints.critic if warm_start else None,
         n_iterations=args.iterations,
         steps_per_iteration=args.steps_per_iter,
         train_epochs=args.train_epochs,

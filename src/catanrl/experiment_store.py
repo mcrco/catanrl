@@ -24,6 +24,7 @@ and ``experiments/<name>/checkpoints.json`` directly.
 
 from __future__ import annotations
 
+import argparse
 import datetime as _datetime
 import json
 import os
@@ -250,10 +251,13 @@ class CheckpointRegistry:
             return self.selectors[key][role]
         # Allow selecting an explicit training step.
         for entry in self.checkpoints:
-            if str(entry.get("step")) == key:
-                files = entry.get("files", {})
-                if role in files:
-                    return files[role]
+            if str(entry.get("step")) != key:
+                continue
+            files = entry.get("files")
+            if isinstance(files, dict) and role in files:
+                return files[role]
+            if entry.get("role") == role and entry.get("file"):
+                return entry["file"]
         # Fall back to treating ``which`` as a literal relative path.
         if any(ch in key for ch in ("/", ".")):
             return key
@@ -428,6 +432,218 @@ def load_experiment(name_or_path: str) -> Experiment:
     else:
         registry = CheckpointRegistry()
     return Experiment(path, metadata, registry)
+
+
+# --------------------------------------------------------------------------- #
+# Training warm-start helpers
+# --------------------------------------------------------------------------- #
+@dataclass
+class TrainingCheckpoints:
+    """Resolved checkpoint paths for warm-starting a training run."""
+
+    experiment_name: str
+    which: Union[str, int]
+    policy: str
+    critic: Optional[str] = None
+
+
+@dataclass
+class TrainingWarmStart:
+    """A source experiment plus resolved checkpoint paths for warm-start."""
+
+    experiment: Experiment
+    checkpoints: TrainingCheckpoints
+
+
+def _set_arg(args: argparse.Namespace, name: str, value: Any) -> None:
+    if value is not None and hasattr(args, name):
+        setattr(args, name, value)
+
+
+def _hidden_dims_csv(backbone: BackboneConfig) -> str:
+    return ",".join(str(dim) for dim in backbone_hidden_dims(backbone))
+
+
+def _apply_xdim_backbone_args(args: argparse.Namespace, backbone: BackboneConfig) -> None:
+    if backbone.architecture not in ("cross_dimensional", "residual_cross_dimensional"):
+        return
+    bb_args = backbone.args
+    if not isinstance(bb_args, CrossDimensionalBackboneConfig):
+        return
+    channels = ",".join(str(ch) for ch in bb_args.cnn_channels)
+    kernel = f"{bb_args.cnn_kernel_size[0]},{bb_args.cnn_kernel_size[1]}"
+    _set_arg(args, "xdim_cnn_channels", channels)
+    _set_arg(args, "xdim_cnn_kernel_size", kernel)
+    _set_arg(args, "xdim_fusion_hidden_dim", bb_args.fusion_hidden_dim)
+    _set_arg(args, "xdim_policy_fusion_hidden_dim", bb_args.fusion_hidden_dim)
+
+
+def apply_experiment_architecture_to_args(args: argparse.Namespace, exp: Experiment) -> None:
+    """Override architecture-related CLI args from experiment metadata.
+
+    Mirrors the eval scripts' ``--experiment`` path: when warm-starting training,
+    backbone/head settings are taken from ``metadata.json`` (with ``train_config``
+    as a fallback for a few run-specific knobs).
+    """
+    meta = exp.metadata
+    tc = meta.train_config
+    policy = exp.policy_spec
+    critic = meta.networks.get("critic")
+
+    _set_arg(args, "model_type", policy.model_type or tc.get("model_type"))
+    _set_arg(args, "map_type", meta.game.map_type)
+    _set_arg(args, "num_players", meta.game.num_players)
+    _set_arg(args, "vps_to_win", meta.game.vps_to_win)
+    _set_arg(args, "discard_limit", meta.game.discard_limit)
+
+    _set_arg(args, "backbone_type", backbone_display_type(policy.backbone))
+    policy_dims = _hidden_dims_csv(policy.backbone)
+    _set_arg(args, "hidden_dims", policy_dims)
+    _set_arg(args, "policy_hidden_dims", policy_dims)
+    _apply_xdim_backbone_args(args, policy.backbone)
+
+    if policy.observation_level is not None:
+        _set_arg(args, "actor_observation_level", policy.observation_level)
+    elif "actor_observation_level" in tc:
+        _set_arg(args, "actor_observation_level", tc["actor_observation_level"])
+
+    if critic is not None:
+        critic_dims = _hidden_dims_csv(critic.backbone)
+        _set_arg(args, "critic_hidden_dims", critic_dims)
+        if critic.observation_level is not None:
+            _set_arg(args, "critic_observation_level", critic.observation_level)
+        if isinstance(critic.backbone.args, CrossDimensionalBackboneConfig):
+            _set_arg(
+                args,
+                "xdim_critic_fusion_hidden_dim",
+                critic.backbone.args.fusion_hidden_dim,
+            )
+    elif isinstance(tc.get("critic_hidden_dims"), list):
+        _set_arg(
+            args,
+            "critic_hidden_dims",
+            ",".join(str(dim) for dim in tc["critic_hidden_dims"]),
+        )
+
+    if "critic_observation_level" in tc:
+        _set_arg(args, "critic_observation_level", tc["critic_observation_level"])
+    if "critic_mode" in tc:
+        _set_arg(args, "critic_mode", tc["critic_mode"])
+
+    if "xdim_cnn_channels" in tc and hasattr(args, "xdim_cnn_channels"):
+        channels = tc["xdim_cnn_channels"]
+        if isinstance(channels, list):
+            _set_arg(args, "xdim_cnn_channels", ",".join(str(ch) for ch in channels))
+    if "xdim_cnn_kernel_size" in tc and hasattr(args, "xdim_cnn_kernel_size"):
+        kernel = tc["xdim_cnn_kernel_size"]
+        if isinstance(kernel, list):
+            _set_arg(args, "xdim_cnn_kernel_size", ",".join(str(k) for k in kernel))
+    for key in (
+        "xdim_fusion_hidden_dim",
+        "xdim_policy_fusion_hidden_dim",
+        "xdim_critic_fusion_hidden_dim",
+    ):
+        if key in tc:
+            _set_arg(args, key, tc[key])
+
+    print(
+        f"Architecture inherited from experiment '{meta.name}': "
+        f"backbone={getattr(args, 'backbone_type', backbone_display_type(policy.backbone))}, "
+        f"model={getattr(args, 'model_type', policy.model_type)}, "
+        f"map={meta.game.map_type}, players={meta.game.num_players}"
+    )
+
+
+def resolve_training_checkpoints_from_experiment(
+    exp: Experiment,
+    which: Union[str, int] = "best",
+    *,
+    require_critic: bool = False,
+) -> TrainingCheckpoints:
+    """Resolve on-disk checkpoint paths from a loaded experiment."""
+    policy = exp.resolve_checkpoint(which, "policy")
+    critic: Optional[str] = None
+    if "critic" in exp.metadata.networks:
+        try:
+            critic = exp.resolve_checkpoint(which, "critic")
+        except FileNotFoundError:
+            if require_critic:
+                raise
+    if require_critic and critic is None:
+        raise FileNotFoundError(
+            f"Experiment '{exp.metadata.name}' has no critic checkpoint for "
+            f"selector '{which}', but one is required."
+        )
+    return TrainingCheckpoints(
+        experiment_name=exp.metadata.name,
+        which=which,
+        policy=policy,
+        critic=critic,
+    )
+
+
+def resolve_training_checkpoints(
+    name_or_path: str,
+    which: Union[str, int] = "best",
+    *,
+    require_critic: bool = False,
+) -> TrainingCheckpoints:
+    """Resolve on-disk checkpoint paths from a saved experiment."""
+    exp = load_experiment(name_or_path)
+    return resolve_training_checkpoints_from_experiment(
+        exp, which, require_critic=require_critic
+    )
+
+
+def add_load_from_experiment_arguments(parser: argparse.ArgumentParser) -> None:
+    """Register ``--load-from-experiment`` and ``--load-from-which`` on a parser."""
+    parser.add_argument(
+        "--load-from-experiment",
+        type=str,
+        default=None,
+        dest="load_from_experiment",
+        help=(
+            "Warm-start from a saved experiment (name under experiments/ or path). "
+            "Checkpoint paths and architecture flags (backbone, hidden dims, map, "
+            "model type, observation levels, etc.) are read from metadata.json; "
+            "matching CLI flags are ignored."
+        ),
+    )
+    parser.add_argument(
+        "--load-from-which",
+        type=str,
+        default="best",
+        dest="load_from_which",
+        help=(
+            "Checkpoint selector for --load-from-experiment: "
+            "'best', 'latest', or a training step."
+        ),
+    )
+
+
+def prepare_training_warm_start(
+    args: argparse.Namespace,
+    *,
+    require_critic: bool = False,
+) -> Optional[TrainingWarmStart]:
+    """Load a source experiment, inherit architecture args, and resolve checkpoints."""
+    name_or_path = getattr(args, "load_from_experiment", None)
+    if not name_or_path:
+        return None
+    which = getattr(args, "load_from_which", "best")
+    exp = load_experiment(name_or_path)
+    apply_experiment_architecture_to_args(args, exp)
+    checkpoints = resolve_training_checkpoints_from_experiment(
+        exp, which, require_critic=require_critic
+    )
+    print(
+        f"Warm-start checkpoints from '{checkpoints.experiment_name}' "
+        f"(which={checkpoints.which})"
+    )
+    print(f"  policy: {checkpoints.policy}")
+    if checkpoints.critic:
+        print(f"  critic: {checkpoints.critic}")
+    return TrainingWarmStart(experiment=exp, checkpoints=checkpoints)
 
 
 # --------------------------------------------------------------------------- #
@@ -641,7 +857,14 @@ __all__ = [
     "ExperimentMetadata",
     "CheckpointRegistry",
     "Experiment",
+    "TrainingCheckpoints",
+    "TrainingWarmStart",
     "load_experiment",
+    "apply_experiment_architecture_to_args",
+    "resolve_training_checkpoints",
+    "resolve_training_checkpoints_from_experiment",
+    "add_load_from_experiment_arguments",
+    "prepare_training_warm_start",
     "build_network",
     "experiments_root",
     "experiment_dir",

@@ -3,8 +3,10 @@ import os
 import wandb
 from catanrl.algorithms.supervised.sl import train
 from catanrl.experiment_store import (
+    add_load_from_experiment_arguments,
     default_checkpoints_dir,
     make_experiment_name,
+    prepare_training_warm_start,
 )
 from catanrl.utils.catanatron_action_space import get_action_space_size
 
@@ -51,12 +53,7 @@ def main():
         default="512,512",
         help="Hidden dimensions for the shared backbone (default: 512,512)",
     )
-    parser.add_argument(
-        "--load-weights",
-        type=str,
-        default=None,
-        help="Path to pre-trained weights to continue training from (default: None)",
-    )
+    add_load_from_experiment_arguments(parser)
     parser.add_argument(
         "--policy-loss-weight",
         type=float,
@@ -126,6 +123,12 @@ def main():
     )
     args = parser.parse_args()
 
+    try:
+        warm_start = prepare_training_warm_start(args)
+    except FileNotFoundError as exc:
+        print(f"Error: {exc}")
+        return
+
     # Check if data directory exists
     if not os.path.exists(args.data_dir):
         print(f"Error: Data directory '{args.data_dir}' not found!")
@@ -192,7 +195,7 @@ def main():
         num_workers=args.num_workers,
         buffer_size=args.buffer_size,
         wandb_config=wandb_config,
-        load_weights=args.load_weights,
+        load_weights=warm_start.checkpoints.policy if warm_start else None,
         policy_loss_weight=args.policy_loss_weight,
         value_loss_weight=args.value_loss_weight,
         model_type=args.model_type,

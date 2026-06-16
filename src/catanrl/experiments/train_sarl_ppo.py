@@ -8,9 +8,11 @@ from ..experiment_store import (
     GameConfig,
     KIND_POLICY,
     KIND_VALUE,
+    add_load_from_experiment_arguments,
     default_checkpoints_dir,
     make_experiment_name,
     network_spec_from_model,
+    prepare_training_warm_start,
     save_experiment,
 )
 from ..utils.catanatron_action_space import get_action_space_size
@@ -28,18 +30,7 @@ def main():
         default="hierarchical",
         help="Model architecture type: flat or hierarchical (default: flat)",
     )
-    parser.add_argument(
-        "--load-weights",
-        type=str,
-        default=None,
-        help="Path to pre-trained weights from supervised learning",
-    )
-    parser.add_argument(
-        "--load-critic-weights",
-        type=str,
-        default=None,
-        help="Path to critic weights (used when --critic-mode privileged)",
-    )
+    add_load_from_experiment_arguments(parser)
     parser.add_argument(
         "--total-timesteps",
         type=int,
@@ -298,18 +289,13 @@ def main():
 
     args = parser.parse_args()
 
-    # Check if weights file exists
-    if args.load_weights and not os.path.exists(args.load_weights):
-        print(f"Error: Weights file '{args.load_weights}' not found!")
-        print("Please train a model first")
-        return
-    if (
-        args.critic_mode == "privileged"
-        and args.load_critic_weights
-        and not os.path.exists(args.load_critic_weights)
-    ):
-        print(f"Error: Critic weights file '{args.load_critic_weights}' not found!")
-        print("Please train a model first")
+    try:
+        warm_start = prepare_training_warm_start(
+            args,
+            require_critic=(args.critic_mode == "privileged"),
+        )
+    except FileNotFoundError as exc:
+        print(f"Error: {exc}")
         return
 
     # Resolve the experiment identity. The same name is used for the experiment
@@ -327,6 +313,12 @@ def main():
         args.opponents = ["random"]
     temp_opponents = create_opponents(args.opponents)
     num_players = len(temp_opponents) + 1  # +1 for the RL agent (BLUE)
+    if warm_start is not None and warm_start.experiment.num_players != num_players:
+        print(
+            f"Warning: source experiment was trained for "
+            f"{warm_start.experiment.num_players} players but --opponents implies "
+            f"{num_players}."
+        )
     action_space_size = get_action_space_size(num_players, args.map_type)
 
     # Compute feature dimensions for this player/map setup.
@@ -392,8 +384,8 @@ def main():
                 "critic_observation_level": args.critic_observation_level,
                 "vps_to_win": args.vps_to_win,
                 "discard_limit": args.discard_limit,
-                "load_weights": args.load_weights,
-                "load_critic_weights": args.load_critic_weights,
+                "load_from_experiment": args.load_from_experiment,
+                "load_from_which": args.load_from_which,
                 "opponents": args.opponents,
                 "num_envs": args.num_envs,
                 "critic_lr": args.critic_lr,
@@ -430,8 +422,8 @@ def main():
         hidden_dims=hidden_dims,
         critic_hidden_dims=critic_hidden_dims,
         critic_mode=args.critic_mode,
-        load_weights=args.load_weights,
-        load_critic_weights=args.load_critic_weights,
+        load_weights=warm_start.checkpoints.policy if warm_start else None,
+        load_critic_weights=warm_start.checkpoints.critic if warm_start else None,
         total_timesteps=args.total_timesteps,
         rollout_steps=args.rollout_steps,
         lr=args.lr,

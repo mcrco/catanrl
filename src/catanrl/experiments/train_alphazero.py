@@ -24,9 +24,12 @@ from catanrl.experiment_store import (
     GameConfig,
     KIND_POLICY,
     KIND_VALUE,
+    TrainingWarmStart,
+    add_load_from_experiment_arguments,
     default_checkpoints_dir,
     make_experiment_name,
     network_spec_from_model,
+    prepare_training_warm_start,
     save_experiment,
 )
 from catanrl.models.mcts_builders import build_critic_model, build_policy_model
@@ -187,12 +190,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Directory for periodic checkpoints (defaults to save-path directory)",
     )
-    parser.add_argument(
-        "--load-weights",
-        type=str,
-        default=None,
-        help="Checkpoint directory containing policy_best.pt and critic_best.pt",
-    )
+    add_load_from_experiment_arguments(parser)
 
     # Logging
     parser.add_argument(
@@ -243,22 +241,18 @@ def aggregate_metrics(metrics: List[Dict[str, float]]) -> Dict[str, float]:
     return {key: totals[key] / count for key in totals.keys()}
 
 
-def maybe_load_weights(trainer: AlphaZeroTrainer, path: Optional[str]) -> None:
-    if not path:
+def maybe_load_from_experiment(
+    trainer: AlphaZeroTrainer, warm_start: Optional[TrainingWarmStart]
+) -> None:
+    if warm_start is None:
         return
-    if not os.path.isdir(path):
+    ckpts = warm_start.checkpoints
+    if ckpts.critic is None:
         raise FileNotFoundError(
-            f"--load-weights must be a checkpoint directory with "
-            f"policy_best.pt and critic_best.pt: {path}"
+            f"Experiment '{ckpts.experiment_name}' has no critic checkpoint "
+            f"for selector '{ckpts.which}'."
         )
-    policy_path = os.path.join(path, "policy_best.pt")
-    critic_path = os.path.join(path, "critic_best.pt")
-    if not os.path.exists(policy_path) or not os.path.exists(critic_path):
-        raise FileNotFoundError(
-            f"Checkpoint directory must contain policy_best.pt and critic_best.pt: {path}"
-        )
-    print(f"Loading weights from {path}")
-    trainer.load(policy_path, critic_path)
+    trainer.load(ckpts.policy, ckpts.critic)
     print("  Weights loaded successfully")
 
 
@@ -303,7 +297,8 @@ def build_train_config(
         "value_loss_weight": config.value_loss_weight,
         "max_grad_norm": config.max_grad_norm,
         "checkpoint_every": args.checkpoint_every,
-        "load_weights": args.load_weights,
+        "load_from_experiment": args.load_from_experiment,
+        "load_from_which": args.load_from_which,
         "seed": args.seed,
         "device": device,
         "save_path": args.save_path,
@@ -488,6 +483,13 @@ def run_training(args: argparse.Namespace, trainer: AlphaZeroTrainer, wandb_enab
 
 def main() -> None:
     args = parse_args()
+
+    try:
+        warm_start = prepare_training_warm_start(args, require_critic=True)
+    except FileNotFoundError as exc:
+        print(f"Error: {exc}")
+        return
+
     hidden_dims = parse_hidden_dims(args.hidden_dims)
 
     # Resolve experiment identity (shared by the folder and the W&B run).
@@ -549,7 +551,7 @@ def main() -> None:
     )
 
     trainer = AlphaZeroTrainer(config=config, policy_model=policy_model, critic_model=critic_model)
-    maybe_load_weights(trainer, args.load_weights)
+    maybe_load_from_experiment(trainer, warm_start)
 
     train_config = build_train_config(args, config, hidden_dims, device)
     wandb_enabled = init_wandb(args, train_config)

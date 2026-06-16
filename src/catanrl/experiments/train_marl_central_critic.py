@@ -6,9 +6,11 @@ from catanrl.experiment_store import (
     GameConfig,
     KIND_POLICY,
     KIND_VALUE,
+    add_load_from_experiment_arguments,
     default_checkpoints_dir,
     make_experiment_name,
     network_spec_from_model,
+    prepare_training_warm_start,
     save_experiment,
 )
 
@@ -156,18 +158,7 @@ def main():
         default=1,
         help="Save snapshots every N PPO updates (default: 1 = save every update).",
     )
-    parser.add_argument(
-        "--load-policy-weights",
-        type=str,
-        default=None,
-        help="Path to pre-trained policy weights to continue training from",
-    )
-    parser.add_argument(
-        "--load-critic-weights",
-        type=str,
-        default=None,
-        help="Path to pre-trained critic weights to continue training from",
-    )
+    add_load_from_experiment_arguments(parser)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max-grad-norm", type=float, default=0.5)
     parser.add_argument(
@@ -209,12 +200,10 @@ def main():
 
     args = parser.parse_args()
 
-    # Check if weight files exist
-    if args.load_policy_weights and not os.path.exists(args.load_policy_weights):
-        print(f"Error: Policy weights file '{args.load_policy_weights}' not found!")
-        return
-    if args.load_critic_weights and not os.path.exists(args.load_critic_weights):
-        print(f"Error: Critic weights file '{args.load_critic_weights}' not found!")
+    try:
+        warm_start = prepare_training_warm_start(args)
+    except FileNotFoundError as exc:
+        print(f"Error: {exc}")
         return
 
     # Resolve experiment identity (shared by the folder and the W&B run).
@@ -274,6 +263,8 @@ def main():
         "save_every_updates": args.save_every_updates,
         "vps_to_win": args.vps_to_win,
         "discard_limit": args.discard_limit,
+        "load_from_experiment": args.load_from_experiment,
+        "load_from_which": args.load_from_which,
     }
     if args.wandb:
         wandb_config = {
@@ -311,8 +302,8 @@ def main():
         policy_hidden_dims=policy_hidden_dims,
         critic_hidden_dims=critic_hidden_dims,
         save_path=args.save_path,
-        load_policy_weights=args.load_policy_weights,
-        load_critic_weights=args.load_critic_weights,
+        load_policy_weights=warm_start.checkpoints.policy if warm_start else None,
+        load_critic_weights=warm_start.checkpoints.critic if warm_start else None,
         wandb_config=wandb_config,
         seed=args.seed,
         max_grad_norm=args.max_grad_norm,
