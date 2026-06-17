@@ -43,22 +43,11 @@ def _build_dummy_game(
     return colors, dummy_game
 
 
-def is_non_graph_feature_parquet(col: str) -> bool:
-    if not col.startswith("F_"):
-        return False
-    return not (
-        col.startswith("F_NODE")
-        or col.startswith("F_EDGE")
-        or col.startswith("F_TILE")
-        or col.startswith("F_PORT")
-    )
-
-
 @lru_cache(maxsize=None)
 def get_numeric_feature_names(
     num_players: int, map_type: Literal["BASE", "MINI", "TOURNAMENT"]
 ) -> Tuple[str, ...]:
-    """Return the non-graph supervised feature names for the given setup."""
+    """Return the non-graph numeric feature names for the given setup."""
     ordering = get_feature_ordering(num_players, map_type)
     return tuple(name for name in ordering if not is_graph_feature(name))
 

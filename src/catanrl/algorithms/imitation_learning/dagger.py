@@ -374,7 +374,7 @@ def _train_on_dataset(
     model_type: str = "flat",
     uses_shared_network: bool = False,
 ) -> Dict[str, Any]:
-    """Run supervised updates on the aggregated dataset."""
+    """Run behavioral-cloning updates on the aggregated dataset."""
     if len(dataset) == 0 or epochs <= 0:
         return {
             "total_loss": 0.0,
