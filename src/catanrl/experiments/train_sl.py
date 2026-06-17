@@ -1,12 +1,20 @@
 import argparse
 import os
 import wandb
+from catanrl.algorithms.common.network_config import (
+    add_observation_network_arguments,
+    resolve_observation_network_args,
+)
 from catanrl.algorithms.supervised.sl import train
 from catanrl.experiment_store import (
+    GameConfig,
+    KIND_POLICY_VALUE,
     add_load_from_experiment_arguments,
     default_checkpoints_dir,
     make_experiment_name,
+    network_spec_from_model,
     prepare_training_warm_start,
+    save_experiment,
 )
 from catanrl.utils.catanatron_action_space import get_action_space_size
 
@@ -52,6 +60,12 @@ def main():
         type=str,
         default="512,512",
         help="Hidden dimensions for the shared backbone (default: 512,512)",
+    )
+    add_observation_network_arguments(
+        parser,
+        policy_mode_default="private",
+        critic_mode_default="private",
+        network_mode_default="shared",
     )
     add_load_from_experiment_arguments(parser)
     parser.add_argument(
@@ -123,6 +137,12 @@ def main():
     )
     args = parser.parse_args()
 
+    resolve_observation_network_args(
+        args,
+        policy_mode_default="private",
+        critic_mode_default="private",
+    )
+
     try:
         warm_start = prepare_training_warm_start(args)
     except FileNotFoundError as exc:
@@ -167,6 +187,9 @@ def main():
         "test_size": args.test_size,
         "num_players": args.num_players,
         "map_type": args.map_type,
+        "policy_mode": args.policy_mode,
+        "critic_mode": args.critic_mode,
+        "network_mode": args.network_mode,
     }
     if args.model_type == "hierarchical":
         config_dict["action_type_weight"] = args.action_type_weight
@@ -184,7 +207,7 @@ def main():
         }
 
     # Train model
-    train(
+    model = train(
         data_dir=args.data_dir,
         epochs=args.epochs,
         batch_size=args.batch_size,
@@ -209,10 +232,33 @@ def main():
         map_type=args.map_type,
     )
 
+    ckpt_dir = os.path.dirname(args.save_path)
+    networks = {
+        "policy": network_spec_from_model(
+            model,
+            kind=KIND_POLICY_VALUE,
+            model_type=args.model_type,
+        ),
+    }
+    exp_path = save_experiment(
+        experiment_name,
+        ckpt_dir,
+        algorithm="sl",
+        game=GameConfig(
+            num_players=args.num_players,
+            map_type=args.map_type,
+        ),
+        networks=networks,
+        train_config=config_dict,
+        wandb_info={"project": args.wandb_project, "name": args.wandb_run_name} if args.wandb else {},
+    )
+
     print("\n" + "=" * 60)
     print("Training Complete!")
     print("=" * 60)
     print(f"Model saved: {args.save_path}")
+    if exp_path:
+        print(f"Experiment:  {exp_path}  (load via load_experiment('{experiment_name}'))")
 
     # Finish wandb
     if args.wandb:

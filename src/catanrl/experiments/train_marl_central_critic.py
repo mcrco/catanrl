@@ -1,6 +1,10 @@
 import argparse
 import os
 import wandb
+from catanrl.algorithms.common.network_config import (
+    add_observation_network_arguments,
+    resolve_observation_network_args,
+)
 from catanrl.algorithms.ppo.marl_ppo_central_critic import train
 from catanrl.experiment_store import (
     GameConfig,
@@ -22,25 +26,11 @@ def main():
     )
     parser.add_argument("--num-players", type=int, default=2, choices=[2, 3, 4])
     parser.add_argument("--map-type", type=str, default="BASE", choices=["BASE", "MINI"])
-    parser.add_argument(
-        "--actor-observation-level",
-        type=str,
-        choices=["private", "public", "full"],
-        default="private",
-        help=(
-            "Actor information level: private (current behavior), public "
-            "(1v1 opponent resources), or full/privileged (default: private)"
-        ),
-    )
-    parser.add_argument(
-        "--critic-observation-level",
-        type=str,
-        choices=["private", "public", "full"],
-        default="full",
-        help=(
-            "Central critic information level: private, public (1v1 opponent resources), "
-            "or full/privileged (default: full)"
-        ),
+    add_observation_network_arguments(
+        parser,
+        policy_mode_default="private",
+        critic_mode_default="full",
+        network_mode_default="separate",
     )
     parser.add_argument(
         "--model-type",
@@ -200,6 +190,13 @@ def main():
 
     args = parser.parse_args()
 
+    resolve_observation_network_args(args)
+    if args.network_mode == "shared":
+        raise ValueError(
+            "MARL central critic training does not yet support network_mode='shared'. "
+            "Use network_mode='separate'."
+        )
+
     try:
         warm_start = prepare_training_warm_start(args)
     except FileNotFoundError as exc:
@@ -243,8 +240,9 @@ def main():
         "critic_hidden_dims": critic_hidden_dims,
         "num_players": args.num_players,
         "map_type": args.map_type,
-        "actor_observation_level": args.actor_observation_level,
-        "critic_observation_level": args.critic_observation_level,
+        "policy_mode": args.policy_mode,
+        "critic_mode": args.critic_mode,
+        "network_mode": args.network_mode,
         "model_type": args.model_type,
         "backbone_type": args.backbone_type,
         "xdim_cnn_channels": xdim_cnn_channels,

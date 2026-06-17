@@ -16,6 +16,7 @@ from catanatron.models.player import Player
 from catanrl.envs.puffer.common import compute_single_agent_dims
 from catanrl.eval.eval_nn_vs_catanatron import eval
 from catanrl.experiment_store import (
+    KIND_POLICY_VALUE,
     backbone_display_type,
     backbone_hidden_dims,
     load_experiment,
@@ -443,8 +444,14 @@ def main():
                 f"--opponents implies {num_players} players but experiment "
                 f"'{args.experiment}' was trained for {exp.num_players}."
             )
-        experiment_policy = exp.build_policy(which=args.which, device=device)
-        experiment_critic = exp.build_critic(which=args.which, device=device)
+        if exp.policy_spec.kind == KIND_POLICY_VALUE:
+            experiment_policy = exp.build_policy(
+                which=args.which, device=device, as_policy_only=False
+            )
+            experiment_critic = None
+        else:
+            experiment_policy = exp.build_policy(which=args.which, device=device)
+            experiment_critic = exp.build_critic(which=args.which, device=device)
 
     print(f"\n{'=' * 60}")
     print("Neural MCTS Evaluation vs Catanatron Bot")

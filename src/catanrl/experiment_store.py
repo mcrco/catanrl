@@ -503,14 +503,18 @@ def apply_experiment_architecture_to_args(args: argparse.Namespace, exp: Experim
     _apply_xdim_backbone_args(args, policy.backbone)
 
     if policy.observation_level is not None:
+        _set_arg(args, "policy_mode", policy.observation_level)
         _set_arg(args, "actor_observation_level", policy.observation_level)
     elif "actor_observation_level" in tc:
         _set_arg(args, "actor_observation_level", tc["actor_observation_level"])
+    if "policy_mode" in tc:
+        _set_arg(args, "policy_mode", tc["policy_mode"])
 
     if critic is not None:
         critic_dims = _hidden_dims_csv(critic.backbone)
         _set_arg(args, "critic_hidden_dims", critic_dims)
         if critic.observation_level is not None:
+            _set_arg(args, "critic_mode", critic.observation_level)
             _set_arg(args, "critic_observation_level", critic.observation_level)
         if isinstance(critic.backbone.args, CrossDimensionalBackboneConfig):
             _set_arg(
@@ -527,8 +531,30 @@ def apply_experiment_architecture_to_args(args: argparse.Namespace, exp: Experim
 
     if "critic_observation_level" in tc:
         _set_arg(args, "critic_observation_level", tc["critic_observation_level"])
-    if "critic_mode" in tc:
+    if "critic_mode" in tc and tc["critic_mode"] in ("private", "public", "full"):
         _set_arg(args, "critic_mode", tc["critic_mode"])
+    if "critic_hidden_mode" in tc:
+        _set_arg(args, "critic_hidden_mode", tc["critic_hidden_mode"])
+    elif "critic_mode" in tc and tc["critic_mode"] in ("full", "guessed_dev_cards"):
+        _set_arg(args, "critic_hidden_mode", tc["critic_mode"])
+    if "network_mode" in tc:
+        _set_arg(args, "network_mode", tc["network_mode"])
+    elif "critic_mode" in tc and tc["critic_mode"] in ("shared", "privileged"):
+        _set_arg(
+            args,
+            "network_mode",
+            "shared" if tc["critic_mode"] == "shared" else "separate",
+        )
+    elif policy.kind == KIND_POLICY_VALUE:
+        _set_arg(args, "network_mode", "shared")
+    elif critic is None and policy.kind != KIND_POLICY_VALUE:
+        _set_arg(args, "network_mode", "separate")
+
+    if policy.kind == KIND_POLICY_VALUE and critic is None:
+        actor_level = policy.observation_level or tc.get("actor_observation_level")
+        if actor_level is not None:
+            _set_arg(args, "critic_mode", actor_level)
+            _set_arg(args, "critic_observation_level", actor_level)
 
     if "xdim_cnn_channels" in tc and hasattr(args, "xdim_cnn_channels"):
         channels = tc["xdim_cnn_channels"]
@@ -561,6 +587,11 @@ def resolve_training_checkpoints_from_experiment(
     require_critic: bool = False,
 ) -> TrainingCheckpoints:
     """Resolve on-disk checkpoint paths from a loaded experiment."""
+    policy_spec = exp.policy_spec
+    uses_joint_network = policy_spec.kind == KIND_POLICY_VALUE
+    if uses_joint_network:
+        require_critic = False
+
     policy = exp.resolve_checkpoint(which, "policy")
     critic: Optional[str] = None
     if "critic" in exp.metadata.networks:
@@ -733,7 +764,20 @@ def discover_checkpoints(ckpt_dir: str) -> Dict[str, Dict]:
         role_files = [f for f in files if _role_of(f) == role]
         if not role_files:
             continue
-        best = next((f for f in role_files if f in (f"{role}_best.pt", "best.pt")), None)
+        best = next(
+            (
+                f
+                for f in role_files
+                if f
+                in (
+                    f"{role}_best.pt",
+                    "best.pt",
+                    "policy_value_best.pt",
+                    "policy_value.pt",
+                )
+            ),
+            None,
+        )
         if best is None:
             best = next((f for f in role_files if "best" in f.lower()), None)
         stepped = [(f, _step_of(f)) for f in role_files if _step_of(f) is not None]

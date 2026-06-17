@@ -3,6 +3,10 @@ import os
 import wandb
 
 from ..envs.puffer.common import compute_single_agent_dims, create_opponents
+from ..algorithms.common.network_config import (
+    add_observation_network_arguments,
+    resolve_observation_network_args,
+)
 from ..algorithms.ppo.sarl_ppo import train
 from ..experiment_store import (
     GameConfig,
@@ -84,12 +88,11 @@ def main():
         default=None,
         help="Critic hidden dimensions in privileged mode (default: use --hidden-dims)",
     )
-    parser.add_argument(
-        "--critic-mode",
-        type=str,
-        choices=["shared", "privileged"],
-        default="shared",
-        help="Critic architecture mode: shared (joint policy-value) or privileged (separate critic)",
+    add_observation_network_arguments(
+        parser,
+        policy_mode_default="private",
+        critic_mode_default="full",
+        network_mode_default="shared",
     )
     parser.add_argument(
         "--backbone-type",
@@ -134,26 +137,6 @@ def main():
         default="BASE",
         choices=["BASE", "MINI", "TOURNAMENT"],
         help="Map type to use (default: BASE)",
-    )
-    parser.add_argument(
-        "--actor-observation-level",
-        type=str,
-        choices=["private", "public", "full"],
-        default="private",
-        help=(
-            "Actor information level: private (current behavior), public "
-            "(1v1 opponent resources), or full/privileged (default: private)"
-        ),
-    )
-    parser.add_argument(
-        "--critic-observation-level",
-        type=str,
-        choices=["private", "public", "full"],
-        default="full",
-        help=(
-            "Separate critic information level when --critic-mode privileged: private, "
-            "public (1v1 opponent resources), or full/privileged (default: full)"
-        ),
     )
     parser.add_argument(
         "--vps-to-win",
@@ -289,10 +272,12 @@ def main():
 
     args = parser.parse_args()
 
+    resolve_observation_network_args(args)
+
     try:
         warm_start = prepare_training_warm_start(
             args,
-            require_critic=(args.critic_mode == "privileged"),
+            require_critic=(args.network_mode == "separate"),
         )
     except FileNotFoundError as exc:
         print(f"Error: {exc}")
@@ -373,7 +358,9 @@ def main():
                 "batch_size": args.batch_size,
                 "hidden_dims": hidden_dims,
                 "critic_hidden_dims": critic_hidden_dims,
+                "policy_mode": args.policy_mode,
                 "critic_mode": args.critic_mode,
+                "network_mode": args.network_mode,
                 "backbone_type": args.backbone_type,
                 "xdim_cnn_channels": xdim_cnn_channels,
                 "xdim_cnn_kernel_size": xdim_cnn_kernel_size,
@@ -421,7 +408,7 @@ def main():
         xdim_critic_fusion_hidden_dim=args.xdim_critic_fusion_hidden_dim,
         hidden_dims=hidden_dims,
         critic_hidden_dims=critic_hidden_dims,
-        critic_mode=args.critic_mode,
+        critic_mode="privileged" if args.network_mode == "separate" else "shared",
         load_weights=warm_start.checkpoints.policy if warm_start else None,
         load_critic_weights=warm_start.checkpoints.critic if warm_start else None,
         total_timesteps=args.total_timesteps,

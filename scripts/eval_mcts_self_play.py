@@ -27,6 +27,7 @@ from tqdm import tqdm
 
 from catanrl.envs.puffer.common import compute_single_agent_dims
 from catanrl.experiment_store import (
+    KIND_POLICY_VALUE,
     backbone_display_type,
     backbone_hidden_dims,
     load_experiment,
@@ -805,8 +806,14 @@ def main():
             args.critic_hidden_dims = backbone_hidden_dims(critic_spec.backbone)
             if critic_spec.observation_level is not None:
                 args.critic_observation_level = critic_spec.observation_level
-        experiment_policy = exp.build_policy(which=args.which, device=device)
-        experiment_critic = exp.build_critic(which=args.which, device=device)
+        if exp.policy_spec.kind == KIND_POLICY_VALUE:
+            experiment_policy = exp.build_policy(
+                which=args.which, device=device, as_policy_only=False
+            )
+            experiment_critic = None
+        else:
+            experiment_policy = exp.build_policy(which=args.which, device=device)
+            experiment_critic = exp.build_critic(which=args.which, device=device)
 
     print(f"\n{'=' * 60}")
     print("Neural MCTS Self-Play Evaluation")
@@ -845,7 +852,13 @@ def main():
     if use_experiment:
         policy_model = experiment_policy
         critic_model = experiment_critic
-        print(f"Loaded policy + critic from experiment '{args.experiment}' ({args.which})")
+        if critic_model is None:
+            print(
+                f"Loaded shared policy-value model from experiment "
+                f"'{args.experiment}' ({args.which})"
+            )
+        else:
+            print(f"Loaded policy + critic from experiment '{args.experiment}' ({args.which})")
     else:
         policy_model = build_policy_model(
             backbone_type=args.backbone_type,

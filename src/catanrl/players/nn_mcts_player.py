@@ -33,7 +33,8 @@ from catanrl.features.catanatron_utils import (
     get_full_numeric_feature_names,
     get_observation_indices_from_full,
 )
-from catanrl.models import PolicyNetworkWrapper, ValueNetworkWrapper
+from catanrl.models import PolicyNetworkWrapper, PolicyValueNetworkWrapper, ValueNetworkWrapper
+from catanrl.models.inference_utils import forward_policy_value
 from catanrl.utils.catanatron_action_space import get_action_space_size, to_action_space
 
 EPSILON = 1e-8
@@ -144,8 +145,8 @@ class _NNMCTSInferenceBackend:
 class _LocalNNMCTSInferenceBackend(_NNMCTSInferenceBackend):
     def __init__(
         self,
-        policy_model: PolicyNetworkWrapper,
-        critic_model: ValueNetworkWrapper,
+        policy_model: PolicyNetworkWrapper | PolicyValueNetworkWrapper,
+        critic_model: ValueNetworkWrapper | None,
         model_type: str,
         device: str,
     ) -> None:
@@ -159,25 +160,17 @@ class _LocalNNMCTSInferenceBackend(_NNMCTSInferenceBackend):
         actor_features: np.ndarray,
         critic_features: np.ndarray,
     ) -> _LeafEvaluation:
-        # Single forward for policy + critic, then one fused GPU->CPU transfer.
-        # Avoids the two separate syncs (.cpu() and .item()) that dominate the
-        # per-leaf latency at batch size 1.
         with torch.inference_mode():
             actor_tensor = torch.from_numpy(actor_features.reshape(1, -1)).to(self.device)
             critic_tensor = torch.from_numpy(critic_features.reshape(1, -1)).to(self.device)
-            if self.model_type == "flat":
-                logits = self.policy_model(actor_tensor)
-            elif self.model_type == "hierarchical":
-                action_type_logits, param_logits = self.policy_model(actor_tensor)
-                logits = self.policy_model.get_flat_action_logits(action_type_logits, param_logits)
-            else:
-                raise ValueError(f"Unknown model_type '{self.model_type}'")
-            # Clone before the critic runs: under torch.compile(mode="reduce-overhead")
-            # the policy output lives in a CUDA-graph static buffer that the critic's
-            # graph replay would overwrite. Clone is a no-op-cheap copy when uncompiled.
-            policy_vector = logits.reshape(-1).clone()
-            value_tensor = self.critic_model(critic_tensor).reshape(-1)
-            combined = torch.cat([policy_vector, value_tensor]).to("cpu")
+            logits, value_tensor = forward_policy_value(
+                self.policy_model,
+                self.critic_model,
+                actor_tensor,
+                self.model_type,
+                critic_states=critic_tensor,
+            )
+            combined = torch.cat([logits.reshape(-1), value_tensor.reshape(-1)]).to("cpu")
 
         combined_np = combined.numpy()
         policy_logits = np.array(combined_np[:-1], dtype=np.float32)
@@ -340,8 +333,8 @@ class _SyncRemoteNNMCTSInferenceBackend(_NNMCTSInferenceBackend):
 class _CentralNNMCTSInferenceServer(threading.Thread):
     def __init__(
         self,
-        policy_model: PolicyNetworkWrapper,
-        critic_model: ValueNetworkWrapper,
+        policy_model: PolicyNetworkWrapper | PolicyValueNetworkWrapper,
+        critic_model: ValueNetworkWrapper | None,
         model_type: str,
         device: str | torch.device,
         request_queue: mp.Queue,
@@ -398,21 +391,18 @@ class _CentralNNMCTSInferenceServer(threading.Thread):
             critic_features = np.stack([request.critic_features for request in batch], axis=0)
             with torch.no_grad():
                 actor_tensor = torch.from_numpy(actor_features).to(self.device)
-                if self.model_type == "flat":
-                    logits = self.policy_model(actor_tensor)
-                elif self.model_type == "hierarchical":
-                    action_type_logits, param_logits = self.policy_model(actor_tensor)
-                    logits = self.policy_model.get_flat_action_logits(
-                        action_type_logits, param_logits
-                    )
-                else:
-                    raise ValueError(f"Unknown model_type '{self.model_type}'")
-                policy_logits = logits.detach().cpu().numpy()
-
                 critic_tensor = torch.from_numpy(critic_features).to(self.device)
-                values = self.critic_model(critic_tensor).view(-1).detach().cpu().numpy()
+                logits, values = forward_policy_value(
+                    self.policy_model,
+                    self.critic_model,
+                    actor_tensor,
+                    self.model_type,
+                    critic_states=critic_tensor,
+                )
+                policy_logits = logits.detach().cpu().numpy()
+                values_np = values.detach().cpu().numpy()
 
-            for request, logits_np, value in zip(batch, policy_logits, values):
+            for request, logits_np, value in zip(batch, policy_logits, values_np):
                 self.response_queues[request.worker_id].put(
                     {
                         "request_id": request.request_id,
@@ -436,7 +426,7 @@ class NNMCTSPlayer(Player):
         self,
         color: Color,
         model_type: str,
-        policy_model: PolicyNetworkWrapper | None,
+        policy_model: PolicyNetworkWrapper | PolicyValueNetworkWrapper | None,
         critic_model: ValueNetworkWrapper | None,
         map_type: Literal["BASE", "MINI", "TOURNAMENT"] = "BASE",
         num_simulations: int = 64,
@@ -490,14 +480,20 @@ class NNMCTSPlayer(Player):
         self.critic_model = None
         self._owns_inference_backend = inference_backend is None
         if inference_backend is None:
-            if policy_model is None or critic_model is None:
+            if policy_model is None:
                 raise ValueError(
-                    "policy_model and critic_model are required when inference_backend is not supplied."
+                    "policy_model is required when inference_backend is not supplied."
+                )
+            uses_shared_network = isinstance(policy_model, PolicyValueNetworkWrapper)
+            if not uses_shared_network and critic_model is None:
+                raise ValueError(
+                    "critic_model is required when policy_model is not a PolicyValueNetworkWrapper."
                 )
             self.policy_model = policy_model.to(self.device)
-            self.critic_model = critic_model.to(self.device)
+            self.critic_model = None if uses_shared_network else critic_model.to(self.device)
             self.policy_model.eval()
-            self.critic_model.eval()
+            if self.critic_model is not None:
+                self.critic_model.eval()
             self._inference_backend = _LocalNNMCTSInferenceBackend(
                 self.policy_model,
                 self.critic_model,
@@ -649,8 +645,12 @@ class NNMCTSPlayer(Player):
                     "num_search_workers > 1 with local models requires CPU device "
                     "(fork is unsafe after CUDA init)."
                 )
-            if self.policy_model is None or self.critic_model is None:
+            if self.policy_model is None:
                 raise RuntimeError("Local models are not configured for inference.")
+            if self.critic_model is None and not isinstance(
+                self.policy_model, PolicyValueNetworkWrapper
+            ):
+                raise RuntimeError("Local critic model is not configured for inference.")
             inference_backend: _NNMCTSInferenceBackend = _LocalNNMCTSInferenceBackend(
                 self.policy_model,
                 self.critic_model,

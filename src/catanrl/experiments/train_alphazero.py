@@ -19,10 +19,15 @@ from tqdm import tqdm
 from catanatron.players.minimax import AlphaBetaPlayer
 from catanatron.players.value import ValueFunctionPlayer
 
+from catanrl.algorithms.common.network_config import (
+    add_observation_network_arguments,
+    resolve_observation_network_args,
+)
 from catanrl.algorithms.alphazero.trainer import AlphaZeroConfig, AlphaZeroTrainer
 from catanrl.experiment_store import (
     GameConfig,
     KIND_POLICY,
+    KIND_POLICY_VALUE,
     KIND_VALUE,
     TrainingWarmStart,
     add_load_from_experiment_arguments,
@@ -32,7 +37,11 @@ from catanrl.experiment_store import (
     prepare_training_warm_start,
     save_experiment,
 )
-from catanrl.models.mcts_builders import build_critic_model, build_policy_model
+from catanrl.models.mcts_builders import (
+    build_critic_model,
+    build_policy_model,
+    build_policy_value_model,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -110,26 +119,18 @@ def parse_args() -> argparse.Namespace:
         choices=["BASE", "MINI", "TOURNAMENT"],
         help="Map layout",
     )
-    parser.add_argument(
-        "--actor-observation-level",
-        type=str,
-        default="private",
-        choices=["private", "public", "full"],
-        help="Information level the policy (actor) network observes during self-play",
+    add_observation_network_arguments(
+        parser,
+        policy_mode_default="private",
+        critic_mode_default="full",
+        network_mode_default="separate",
     )
     parser.add_argument(
-        "--critic-observation-level",
-        type=str,
-        default="full",
-        choices=["private", "public", "full"],
-        help="Information level the critic (value) network observes during self-play",
-    )
-    parser.add_argument(
-        "--critic-mode",
+        "--critic-hidden-mode",
         type=str,
         default="full",
         choices=["full", "guessed_dev_cards"],
-        help="How the critic observes hidden information.",
+        help="How the MCTS value net encodes hidden dev-card information.",
     )
     parser.add_argument("--vps-to-win", type=int, default=10, help="Victory points to win the game")
     parser.add_argument("--simulations", type=int, default=64, help="MCTS simulations per move")
@@ -247,12 +248,15 @@ def maybe_load_from_experiment(
     if warm_start is None:
         return
     ckpts = warm_start.checkpoints
-    if ckpts.critic is None:
-        raise FileNotFoundError(
-            f"Experiment '{ckpts.experiment_name}' has no critic checkpoint "
-            f"for selector '{ckpts.which}'."
-        )
-    trainer.load(ckpts.policy, ckpts.critic)
+    if trainer.uses_shared_network:
+        trainer.load(ckpts.policy)
+    else:
+        if ckpts.critic is None:
+            raise FileNotFoundError(
+                f"Experiment '{ckpts.experiment_name}' has no critic checkpoint "
+                f"for selector '{ckpts.which}'."
+            )
+        trainer.load(ckpts.policy, ckpts.critic)
     print("  Weights loaded successfully")
 
 
@@ -275,9 +279,12 @@ def build_train_config(
         "inference_wait_ms": args.inference_wait_ms,
         "map_type": config.map_type,
         "num_players": config.num_players,
+        "policy_mode": config.actor_observation_level,
+        "critic_mode": config.critic_observation_level,
         "actor_observation_level": config.actor_observation_level,
         "critic_observation_level": config.critic_observation_level,
-        "critic_mode": config.critic_mode,
+        "critic_hidden_mode": config.critic_hidden_mode,
+        "network_mode": config.network_mode,
         "vps_to_win": config.vps_to_win,
         "discard_limit": config.discard_limit,
         "simulations": config.simulations,
@@ -430,7 +437,8 @@ def run_training(args: argparse.Namespace, trainer: AlphaZeroTrainer, wandb_enab
                     trainer.save(args.save_path, stem="best")
                     print(
                         f"  → Saved new best model to {args.save_path} "
-                        f"(policy_best.pt, critic_best.pt; loss={best_loss:.4f})"
+                        f"({trainer.uses_shared_network and 'policy_value_best.pt' or 'policy_best.pt, critic_best.pt'}; "
+                        f"loss={best_loss:.4f})"
                     )
                     if wandb_enabled:
                         wandb.run.summary["best_loss"] = best_loss
@@ -441,7 +449,7 @@ def run_training(args: argparse.Namespace, trainer: AlphaZeroTrainer, wandb_enab
                 trainer.save(checkpoint_dir, stem=f"iter_{iteration}")
                 print(
                     f"  → Saved checkpoint to {checkpoint_dir} "
-                    f"(policy_iter_{iteration}.pt, critic_iter_{iteration}.pt)"
+                    f"({trainer.uses_shared_network and f'policy_value_iter_{iteration}.pt' or f'policy_iter_{iteration}.pt, critic_iter_{iteration}.pt'})"
                 )
 
             value_eval_stats = trainer.evaluate_against(
@@ -473,7 +481,7 @@ def run_training(args: argparse.Namespace, trainer: AlphaZeroTrainer, wandb_enab
             trainer.save(args.save_path, stem="best")
             print(
                 f"\nTraining finished without SGD metrics; saved model to {args.save_path} "
-                "(policy_best.pt, critic_best.pt)"
+                f"({trainer.uses_shared_network and 'policy_value_best.pt' or 'policy_best.pt, critic_best.pt'})"
             )
         else:
             print(f"\nBest loss achieved: {best_loss:.4f}")
@@ -484,8 +492,11 @@ def run_training(args: argparse.Namespace, trainer: AlphaZeroTrainer, wandb_enab
 def main() -> None:
     args = parse_args()
 
+    resolve_observation_network_args(args)
+
+    require_critic = args.network_mode == "separate"
     try:
-        warm_start = prepare_training_warm_start(args, require_critic=True)
+        warm_start = prepare_training_warm_start(args, require_critic=require_critic)
     except FileNotFoundError as exc:
         print(f"Error: {exc}")
         return
@@ -504,7 +515,8 @@ def main() -> None:
         map_type=args.map_type,
         actor_observation_level=args.actor_observation_level,
         critic_observation_level=args.critic_observation_level,
-        critic_mode=args.critic_mode,
+        critic_hidden_mode=args.critic_hidden_mode,
+        network_mode=args.network_mode,
         model_type=args.model_type,
         vps_to_win=args.vps_to_win,
         discard_limit=args.discard_limit,
@@ -532,23 +544,37 @@ def main() -> None:
     )
 
     device = config.device or ("cuda" if torch.cuda.is_available() else "cpu")
-    policy_model = build_policy_model(
-        backbone_type=args.backbone_type,
-        model_type=config.model_type,
-        hidden_dims=hidden_dims,
-        num_players=config.num_players,
-        map_type=config.map_type,
-        actor_observation_level=config.actor_observation_level,
-        device=device,
-    )
-    critic_model = build_critic_model(
-        backbone_type=args.backbone_type,
-        hidden_dims=hidden_dims,
-        num_players=config.num_players,
-        map_type=config.map_type,
-        critic_observation_level=config.critic_observation_level,
-        device=device,
-    )
+    critic_model = None
+    if args.network_mode == "shared":
+        policy_model = build_policy_value_model(
+            backbone_type=args.backbone_type,
+            model_type=config.model_type,
+            hidden_dims=hidden_dims,
+            num_players=config.num_players,
+            map_type=config.map_type,
+            actor_observation_level=config.actor_observation_level,
+            critic_observation_level=config.critic_observation_level,
+            device=device,
+            network_mode=args.network_mode,
+        )
+    else:
+        policy_model = build_policy_model(
+            backbone_type=args.backbone_type,
+            model_type=config.model_type,
+            hidden_dims=hidden_dims,
+            num_players=config.num_players,
+            map_type=config.map_type,
+            actor_observation_level=config.actor_observation_level,
+            device=device,
+        )
+        critic_model = build_critic_model(
+            backbone_type=args.backbone_type,
+            hidden_dims=hidden_dims,
+            num_players=config.num_players,
+            map_type=config.map_type,
+            critic_observation_level=config.critic_observation_level,
+            device=device,
+        )
 
     trainer = AlphaZeroTrainer(config=config, policy_model=policy_model, critic_model=critic_model)
     maybe_load_from_experiment(trainer, warm_start)
@@ -560,23 +586,35 @@ def main() -> None:
     print(f"  Backbone: {args.backbone_type} | model: {config.model_type}")
     print(f"  Hidden dims: {hidden_dims}")
     print(f"  Checkpoints: {args.save_path}")
-    print(f"  Game workers: {args.num_workers}")
+    print(f"  Network mode: {args.network_mode}")
 
     run_training(args, trainer, wandb_enabled)
 
-    networks = {
-        "policy": network_spec_from_model(
-            policy_model,
-            kind=KIND_POLICY,
-            model_type=config.model_type,
-            observation_level=config.actor_observation_level,
-        ),
-        "critic": network_spec_from_model(
-            critic_model,
-            kind=KIND_VALUE,
-            observation_level=config.critic_observation_level,
-        ),
-    }
+    print(f"  Game workers: {args.num_workers}")
+
+    if trainer.uses_shared_network:
+        networks = {
+            "policy": network_spec_from_model(
+                policy_model,
+                kind=KIND_POLICY_VALUE,
+                model_type=config.model_type,
+                observation_level=config.actor_observation_level,
+            ),
+        }
+    else:
+        networks = {
+            "policy": network_spec_from_model(
+                policy_model,
+                kind=KIND_POLICY,
+                model_type=config.model_type,
+                observation_level=config.actor_observation_level,
+            ),
+            "critic": network_spec_from_model(
+                critic_model,
+                kind=KIND_VALUE,
+                observation_level=config.critic_observation_level,
+            ),
+        }
     exp_path = save_experiment(
         experiment_name,
         args.save_path,
@@ -596,8 +634,11 @@ def main() -> None:
     print("AlphaZero training complete!")
     print("=" * 80)
     print(f"Checkpoints saved to: {args.save_path}")
-    print(f"  - Policy: {args.save_path}/policy_best.pt")
-    print(f"  - Critic: {args.save_path}/critic_best.pt")
+    if trainer.uses_shared_network:
+        print(f"  - Policy-value: {args.save_path}/policy_value_best.pt")
+    else:
+        print(f"  - Policy: {args.save_path}/policy_best.pt")
+        print(f"  - Critic: {args.save_path}/critic_best.pt")
     if exp_path:
         print(f"Experiment:  {exp_path}  (load via load_experiment('{experiment_name}'))")
 

@@ -3,8 +3,9 @@
 Self-play data is generated with the across-games parallelism stack (the path
 profiling showed scales best): independent game-worker processes run
 ``NNMCTSPlayer`` seats whose leaf evaluations are batched by a central
-inference server. Training optimizes two networks - a policy net (cross-entropy
-to the MCTS visit distribution) and a critic net (MSE to the game outcome).
+inference server. Training optimizes policy (cross-entropy to the MCTS visit
+distribution) and value (MSE to the game outcome), using either separate
+networks or a shared policy-value backbone.
 """
 
 from __future__ import annotations
@@ -23,7 +24,8 @@ from catanatron.game import Game
 from catanatron.models.player import Color, Player
 
 from ...features.catanatron_utils import ActorObservationLevel, CriticObservationLevel
-from ...models.wrappers import PolicyNetworkWrapper, ValueNetworkWrapper
+from ...models.inference_utils import forward_policy_value
+from ...models.wrappers import PolicyNetworkWrapper, PolicyValueNetworkWrapper, ValueNetworkWrapper
 from ...players import NNMCTSPlayer
 from ...utils.catanatron_map import build_catan_map
 from .parallel_self_play import SelfPlayExperience, generate_self_play_data
@@ -37,7 +39,8 @@ class AlphaZeroConfig:
     map_type: str = "BASE"
     actor_observation_level: ActorObservationLevel = "private"
     critic_observation_level: CriticObservationLevel = "full"
-    critic_mode: str = "full"
+    critic_hidden_mode: str = "full"
+    network_mode: str = "separate"
     model_type: str = "flat"
     vps_to_win: int = 10
     discard_limit: int = 7
@@ -67,15 +70,15 @@ class AlphaZeroConfig:
 
 
 class AlphaZeroTrainer:
-    """Self-play data generation + dual-network SGD."""
+    """Self-play data generation + policy/value SGD."""
 
     COLOR_ORDER = (Color.RED, Color.BLUE, Color.ORANGE, Color.WHITE)
 
     def __init__(
         self,
         config: Optional[AlphaZeroConfig],
-        policy_model: PolicyNetworkWrapper,
-        critic_model: ValueNetworkWrapper,
+        policy_model: PolicyNetworkWrapper | PolicyValueNetworkWrapper,
+        critic_model: ValueNetworkWrapper | None = None,
     ) -> None:
         self.config = config or AlphaZeroConfig()
         assert 2 <= self.config.num_players <= len(self.COLOR_ORDER), (
@@ -86,15 +89,47 @@ class AlphaZeroTrainer:
         self._set_seed(self.config.seed)
 
         self.policy_model = policy_model.to(self.device)
-        self.critic_model = critic_model.to(self.device)
+        self.uses_shared_network = isinstance(self.policy_model, PolicyValueNetworkWrapper)
+        if self.uses_shared_network:
+            if critic_model is not None:
+                raise ValueError(
+                    "critic_model must be None when policy_model is a PolicyValueNetworkWrapper."
+                )
+            self.critic_model = None
+        else:
+            if critic_model is None:
+                raise ValueError(
+                    "critic_model is required when policy_model is not a PolicyValueNetworkWrapper."
+                )
+            self.critic_model = critic_model.to(self.device)
+
         self.colors = self.COLOR_ORDER[: self.config.num_players]
 
         self.replay_buffer: Deque[SelfPlayExperience] = deque(maxlen=self.config.buffer_size)
-        params = list(self.policy_model.parameters()) + list(self.critic_model.parameters())
+        trainable_params = (
+            self.policy_model.parameters()
+            if self.uses_shared_network
+            else list(self.policy_model.parameters()) + list(self.critic_model.parameters())
+        )
         self.optimizer = torch.optim.Adam(
-            params, lr=self.config.lr, weight_decay=self.config.weight_decay
+            trainable_params, lr=self.config.lr, weight_decay=self.config.weight_decay
         )
         self._self_play_calls = 0
+
+    def _set_eval_mode(self) -> None:
+        self.policy_model.eval()
+        if self.critic_model is not None:
+            self.critic_model.eval()
+
+    def _set_train_mode(self) -> None:
+        self.policy_model.train()
+        if self.critic_model is not None:
+            self.critic_model.train()
+
+    def _trainable_parameters(self):
+        if self.uses_shared_network:
+            return self.policy_model.parameters()
+        return list(self.policy_model.parameters()) + list(self.critic_model.parameters())
 
     # ------------------------------------------------------------------
     # Self-play
@@ -103,8 +138,7 @@ class AlphaZeroTrainer:
     def self_play(self, num_games: int) -> Dict[str, float]:
         if num_games <= 0:
             return {}
-        self.policy_model.eval()
-        self.critic_model.eval()
+        self._set_eval_mode()
 
         base_seed = (self.config.seed or 0) + self._self_play_calls * 1_000_003
         self._self_play_calls += 1
@@ -120,7 +154,7 @@ class AlphaZeroTrainer:
             num_simulations=self.config.simulations,
             c_puct=self.config.c_puct,
             prunning=self.config.prunning,
-            critic_mode=self.config.critic_mode,
+            critic_hidden_mode=self.config.critic_hidden_mode,
             actor_observation_level=self.config.actor_observation_level,
             critic_observation_level=self.config.critic_observation_level,
             inference_batch_size=self.config.inference_batch_size,
@@ -143,14 +177,6 @@ class AlphaZeroTrainer:
     # Optimization
     # ------------------------------------------------------------------
 
-    def _policy_logits(self, actor_states: torch.Tensor) -> torch.Tensor:
-        if self.config.model_type == "flat":
-            return self.policy_model(actor_states)
-        if self.config.model_type == "hierarchical":
-            action_type_logits, param_logits = self.policy_model(actor_states)
-            return self.policy_model.get_flat_action_logits(action_type_logits, param_logits)
-        raise ValueError(f"Unknown model_type '{self.config.model_type}'")
-
     def update_weights(self) -> Optional[Dict[str, float]]:
         if len(self.replay_buffer) < self.config.batch_size:
             return None
@@ -169,14 +195,26 @@ class AlphaZeroTrainer:
             np.array([exp.value for exp in batch], dtype=np.float32)
         ).to(self.device)
 
-        self.policy_model.train()
-        self.critic_model.train()
+        self._set_train_mode()
 
-        logits = self._policy_logits(actor_states)
+        if self.uses_shared_network:
+            logits, values = forward_policy_value(
+                self.policy_model,
+                None,
+                actor_states,
+                self.config.model_type,
+            )
+        else:
+            logits, values = forward_policy_value(
+                self.policy_model,
+                self.critic_model,
+                actor_states,
+                self.config.model_type,
+                critic_states=critic_states,
+            )
+
         log_probs = torch.log_softmax(logits, dim=-1)
         policy_loss = -(policy_targets * log_probs).sum(dim=1).mean()
-
-        values = self.critic_model(critic_states).view(-1)
         value_loss = F.mse_loss(values, value_targets)
 
         loss = (
@@ -186,10 +224,7 @@ class AlphaZeroTrainer:
 
         self.optimizer.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(
-            list(self.policy_model.parameters()) + list(self.critic_model.parameters()),
-            self.config.max_grad_norm,
-        )
+        torch.nn.utils.clip_grad_norm_(self._trainable_parameters(), self.config.max_grad_norm)
         self.optimizer.step()
 
         return {
@@ -210,8 +245,7 @@ class AlphaZeroTrainer:
     ) -> Dict[str, float]:
         if num_games <= 0:
             return {}
-        self.policy_model.eval()
-        self.critic_model.eval()
+        self._set_eval_mode()
 
         stats: Counter[str] = Counter()
         seed_offset = 100_000
@@ -252,7 +286,7 @@ class AlphaZeroTrainer:
             num_simulations=self.config.simulations,
             c_puct=self.config.c_puct,
             prunning=self.config.prunning,
-            critic_mode=self.config.critic_mode,
+            critic_hidden_mode=self.config.critic_hidden_mode,
             actor_observation_level=self.config.actor_observation_level,
             critic_observation_level=self.config.critic_observation_level,
             device=self.device,
@@ -263,22 +297,41 @@ class AlphaZeroTrainer:
     # ------------------------------------------------------------------
 
     def save(self, save_dir: str, stem: str = "best") -> None:
-        """Save separate policy/critic state_dict files for the experiment store."""
         os.makedirs(save_dir, exist_ok=True)
+        if self.uses_shared_network:
+            torch.save(
+                self.policy_model.state_dict(),
+                os.path.join(save_dir, f"policy_value_{stem}.pt"),
+            )
+            return
+
         torch.save(
             self.policy_model.state_dict(),
             os.path.join(save_dir, f"policy_{stem}.pt"),
         )
+        assert self.critic_model is not None
         torch.save(
             self.critic_model.state_dict(),
             os.path.join(save_dir, f"critic_{stem}.pt"),
         )
 
-    def load(self, policy_path: str, critic_path: str) -> None:
-        """Load separate policy/critic state_dict files."""
+    def load(
+        self,
+        policy_path: str,
+        critic_path: str | None = None,
+    ) -> None:
+        if self.uses_shared_network:
+            self.policy_model.load_state_dict(
+                torch.load(policy_path, map_location=self.device)
+            )
+            return
+
         self.policy_model.load_state_dict(
             torch.load(policy_path, map_location=self.device)
         )
+        if critic_path is None:
+            raise ValueError("critic_path is required when loading separate networks.")
+        assert self.critic_model is not None
         self.critic_model.load_state_dict(
             torch.load(critic_path, map_location=self.device)
         )

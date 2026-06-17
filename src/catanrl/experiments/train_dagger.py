@@ -4,11 +4,16 @@ import os
 import wandb
 
 from ..envs.puffer.common import create_opponents
+from ..algorithms.common.network_config import (
+    add_observation_network_arguments,
+    resolve_observation_network_args,
+)
 from ..algorithms.imitation_learning.dagger import train as dagger_train
 from ..algorithms.imitation_learning.dataset import EvictionStrategy
 from ..experiment_store import (
     GameConfig,
     KIND_POLICY,
+    KIND_POLICY_VALUE,
     KIND_VALUE,
     add_load_from_experiment_arguments,
     default_checkpoints_dir,
@@ -193,25 +198,11 @@ def main():
         choices=["BASE", "MINI", "TOURNAMENT"],
         help="Board template to use (default: BASE)",
     )
-    parser.add_argument(
-        "--actor-observation-level",
-        type=str,
-        choices=["private", "public", "full"],
-        default="private",
-        help=(
-            "Actor information level: private (current behavior), public "
-            "(1v1 opponent resources), or full/privileged (default: private)"
-        ),
-    )
-    parser.add_argument(
-        "--critic-observation-level",
-        type=str,
-        choices=["private", "public", "full"],
-        default="full",
-        help=(
-            "Critic information level: private, public (1v1 opponent resources), "
-            "or full/privileged (default: full)"
-        ),
+    add_observation_network_arguments(
+        parser,
+        policy_mode_default="private",
+        critic_mode_default="full",
+        network_mode_default="separate",
     )
     parser.add_argument(
         "--num-envs",
@@ -312,8 +303,13 @@ def main():
 
     args = parser.parse_args()
 
+    resolve_observation_network_args(args)
+
     try:
-        warm_start = prepare_training_warm_start(args)
+        warm_start = prepare_training_warm_start(
+            args,
+            require_critic=args.network_mode == "separate",
+        )
     except FileNotFoundError as exc:
         print(f"Error: {exc}")
         return
@@ -377,8 +373,9 @@ def main():
                 "expert": args.expert,
                 "opponents": args.opponents,
                 "map_type": args.map_type,
-                "actor_observation_level": args.actor_observation_level,
-                "critic_observation_level": args.critic_observation_level,
+                "policy_mode": args.policy_mode,
+                "critic_mode": args.critic_mode,
+                "network_mode": args.network_mode,
                 "num_envs": args.num_envs,
                 "vps_to_win": args.vps_to_win,
                 "discard_limit": args.discard_limit,
@@ -429,6 +426,7 @@ def main():
         map_type=args.map_type,
         actor_observation_level=args.actor_observation_level,
         critic_observation_level=args.critic_observation_level,
+        network_mode=args.network_mode,
         vps_to_win=args.vps_to_win,
         discard_limit=args.discard_limit,
         beta_init=args.beta_init,
@@ -448,20 +446,29 @@ def main():
         max_grad_norm=args.max_grad_norm,
     )
 
-    networks = {
-        "policy": network_spec_from_model(
-            policy_model,
-            kind=KIND_POLICY,
-            model_type=args.model_type,
-            observation_level=args.actor_observation_level,
-        )
-    }
-    if critic_model is not None:
-        networks["critic"] = network_spec_from_model(
-            critic_model,
-            kind=KIND_VALUE,
-            observation_level=args.critic_observation_level,
-        )
+    if args.network_mode == "shared":
+        networks = {
+            "policy": network_spec_from_model(
+                policy_model,
+                kind=KIND_POLICY_VALUE,
+                model_type=args.model_type,
+                observation_level=args.actor_observation_level,
+            ),
+        }
+    else:
+        networks = {
+            "policy": network_spec_from_model(
+                policy_model,
+                kind=KIND_POLICY,
+                model_type=args.model_type,
+                observation_level=args.actor_observation_level,
+            ),
+            "critic": network_spec_from_model(
+                critic_model,
+                kind=KIND_VALUE,
+                observation_level=args.critic_observation_level,
+            ),
+        }
     exp_path = save_experiment(
         experiment_name,
         args.save_path,
