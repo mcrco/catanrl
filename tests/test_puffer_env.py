@@ -1,4 +1,4 @@
-"""Transition and edge-case tests for native Puffer Catan environments."""
+"""Transition, edge-case, and integration tests for native Puffer Catan environments."""
 
 from __future__ import annotations
 
@@ -12,14 +12,21 @@ from catanatron.game import TURNS_LIMIT
 from catanatron.models.player import Color
 from catanatron.state_functions import get_state_index
 
-from catanrl.envs.puffer.common import create_expert, create_opponents
+from catanrl.envs.puffer.common import compute_single_agent_dims, create_expert, create_opponents
 from catanrl.envs.puffer.multi_agent_env import (
     MultiAgentCatanatronEnvConfig,
     ParallelCatanatronPufferEnv,
+    compute_multiagent_input_dim,
     get_valid_actions,
+    make_vectorized_envs as make_multi_puffer_vectorized_envs,
 )
 from catanrl.envs.puffer.rewards import ShapedReward, WinReward
-from catanrl.envs.puffer.single_agent_env import SingleAgentCatanatronPufferEnv
+from catanrl.envs.puffer.rollout_utils import decode_puffer_batch
+from catanrl.envs.puffer.single_agent_env import (
+    SingleAgentCatanatronPufferEnv,
+    make_puffer_vectorized_envs,
+)
+from catanrl.features.catanatron_utils import get_observation_indices_from_full
 from catanrl.utils.catanatron_action_space import get_end_turn_index, to_action_space
 
 
@@ -294,15 +301,22 @@ def test_single_agent_step_after_done_auto_resets():
         env.close()
 
 
-def test_single_agent_nn_seat_second_still_leaves_p0_in_control_after_reset():
-    env = _make_single_env(nn_seat="second")
+def test_single_agent_nn_seat_ordering():
+    first_env = _make_single_env(nn_seat="first")
+    second_env = _make_single_env(nn_seat="second")
     try:
-        env.reset(seed=123)
-        assert env.game is not None
-        assert env.game.state.colors[1] == env.p0.color
-        assert env.game.state.current_color() == env.p0.color
+        first_env.reset(seed=123)
+        second_env.reset(seed=123)
+
+        assert first_env.game is not None
+        assert second_env.game is not None
+        assert first_env.game.state.colors[0] == first_env.p0.color
+        assert second_env.game.state.colors[1] == second_env.p0.color
+        assert second_env.game.state.colors[0] != second_env.p0.color
+        assert second_env.game.state.current_color() == second_env.p0.color
     finally:
-        env.close()
+        first_env.close()
+        second_env.close()
 
 
 def test_single_agent_nn_seat_second_requires_opponent():
@@ -644,3 +658,127 @@ def test_multi_agent_win_episode_terminates_with_valid_rewards():
             pytest.fail("Multi-agent episode did not terminate within step budget")
     finally:
         env.close()
+
+
+# ---------------------------------------------------------------------------
+# Vectorized env and observation-dimension integration
+# ---------------------------------------------------------------------------
+
+
+def test_vectorized_puffer_envs_decode_batches():
+    single_envs = make_puffer_vectorized_envs(
+        reward_function="win",
+        map_type="BASE",
+        opponent_configs=["F"],
+        num_envs=2,
+        vps_to_win=10,
+        discard_limit=7,
+        expert_config="F",
+    )
+    multi_envs = make_multi_puffer_vectorized_envs(
+        num_players=2,
+        map_type="BASE",
+        vps_to_win=10,
+        discard_limit=7,
+        shared_critic=True,
+        reward_function="win",
+        num_envs=1,
+    )
+
+    try:
+        single_obs, _ = single_envs.reset(seed=[101, 202])
+        single_driver = single_envs.driver_env
+        single_dims = compute_single_agent_dims(num_players=2, map_type="BASE")
+        single_actor, single_critic, single_masks = decode_puffer_batch(
+            flat_obs=single_obs,
+            obs_space=single_driver.env_single_observation_space,
+            obs_dtype=single_driver.obs_dtype,
+            actor_dim=single_dims["actor_dim"],
+            critic_dim=single_dims["critic_dim"],
+        )
+        assert single_actor.shape == (2, single_dims["actor_dim"])
+        assert single_critic is not None
+        assert single_critic.shape == (2, single_dims["critic_dim"])
+        assert single_masks.shape[0] == 2
+
+        multi_obs, _ = multi_envs.reset(seed=[303])
+        multi_driver = multi_envs.driver_env
+        actor_dim, board_shape, actor_numeric_dim = compute_multiagent_input_dim(2, "BASE")
+        assert board_shape is not None
+        critic_dim = compute_single_agent_dims(2, "BASE")["critic_dim"]
+        multi_actor, multi_critic, multi_masks = decode_puffer_batch(
+            flat_obs=multi_obs,
+            obs_space=multi_driver.env_single_observation_space,
+            obs_dtype=multi_driver.obs_dtype,
+            actor_dim=actor_dim,
+            critic_dim=critic_dim,
+        )
+        assert multi_actor.shape == (2, actor_dim)
+        assert multi_critic is not None
+        assert multi_critic.shape == (2, critic_dim)
+        assert multi_masks.shape[0] == 2
+        assert actor_numeric_dim > 0
+    finally:
+        single_envs.close()
+        multi_envs.close()
+
+
+def test_actor_observation_level_shapes_match_computed_dims():
+    for actor_level in ("private", "public", "full"):
+        _assert_observation_level_shapes(actor_level)
+
+
+def _assert_observation_level_shapes(actor_level: str):
+    single_env = _make_single_env(actor_observation_level=actor_level)
+    multi_env = _make_multi_env(actor_observation_level=actor_level)
+    try:
+        single_obs, _ = single_env.reset(seed=101)
+        single_dims = compute_single_agent_dims(
+            2,
+            "BASE",
+            actor_observation_level=actor_level,
+        )
+        single_actor, single_critic, _ = decode_puffer_batch(
+            flat_obs=single_obs,
+            obs_space=single_env.env_single_observation_space,
+            obs_dtype=single_env.obs_dtype,
+            actor_dim=single_dims["actor_dim"],
+            critic_dim=single_dims["critic_dim"],
+        )
+        assert single_actor.shape == (1, single_dims["actor_dim"])
+        assert single_critic is not None
+        assert single_critic.shape == (1, single_dims["critic_dim"])
+
+        multi_obs, _ = multi_env.reset(seed=202)
+        actor_dim, board_shape, actor_numeric_dim = compute_multiagent_input_dim(
+            2,
+            "BASE",
+            actor_observation_level=actor_level,
+        )
+        assert board_shape is not None
+        critic_dim = single_dims["critic_dim"]
+        multi_actor, multi_critic, _ = decode_puffer_batch(
+            flat_obs=multi_obs,
+            obs_space=multi_env.env_single_observation_space,
+            obs_dtype=multi_env.obs_dtype,
+            actor_dim=actor_dim,
+            critic_dim=critic_dim,
+        )
+        assert multi_actor.shape == (2, actor_dim)
+        assert multi_critic is not None
+        assert multi_critic.shape == (2, critic_dim)
+        assert actor_numeric_dim > 0
+    finally:
+        single_env.close()
+        multi_env.close()
+
+
+def test_critic_observation_levels_are_indexed_from_full_observation():
+    full_dims = compute_single_agent_dims(2, "BASE", critic_observation_level="full")
+    full_dim = full_dims["critic_dim"]
+    full_batch = np.zeros((3, full_dim), dtype=np.float32)
+
+    for critic_level in ("private", "public", "full"):
+        dims = compute_single_agent_dims(2, "BASE", critic_observation_level=critic_level)
+        indices = get_observation_indices_from_full(2, "BASE", critic_level)
+        assert full_batch[:, indices].shape == (3, dims["critic_dim"])
