@@ -21,7 +21,7 @@ from catanrl.experiment_store import (
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Train a multi-agent self-play PPO policy with centralized critic using the PettingZoo Catanatron env",
+        description="Train a multi-agent self-play PPO policy with centralized critic using the Puffer Catanatron env",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--num-players", type=int, default=2, choices=[2, 3, 4])

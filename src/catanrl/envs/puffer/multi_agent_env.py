@@ -23,7 +23,7 @@ from catanrl.envs.puffer.common import (
     compute_multiagent_input_dim,
     normalize_reset_seed,
 )
-from catanrl.envs.zoo.rewards import ShapedReward, WinReward
+from catanrl.envs.puffer.rewards import ShapedReward, WinReward
 from catanrl.features.catanatron_utils import (
     ActorObservationLevel,
     full_game_to_features,

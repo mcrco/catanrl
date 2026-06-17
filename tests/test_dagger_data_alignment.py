@@ -6,7 +6,7 @@ import numpy as np
 from pufferlib.emulation import nativize
 
 from catanrl.algorithms.imitation_learning.dataset import AggregatedDataset
-from catanrl.envs.gym.rewards import WinReward
+from catanrl.envs.puffer.rewards import WinReward
 from catanrl.envs.puffer.common import create_expert, create_opponents
 from catanrl.envs.puffer.single_agent_env import SingleAgentCatanatronPufferEnv
 from catanrl.envs.puffer.rollout_utils import flatten_puffer_observation, get_action_mask_from_obs

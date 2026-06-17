@@ -14,7 +14,6 @@ dependencies = [
     "wandb>=0.15.0",
     "gymnasium==0.29.1",
     "scikit-learn>=1.7.2",
-    "pettingzoo==1.24.1",
     "catanatron",
     "pufferlib>=2.0.6",
 ]

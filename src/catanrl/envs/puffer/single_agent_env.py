@@ -13,7 +13,7 @@ from catanatron.gym.board_tensor_features import create_board_tensor
 from catanatron.models.actions import generate_playable_actions
 from catanatron.models.player import Color, Player, RandomPlayer
 
-from catanrl.envs.gym.rewards import RewardFunction, ShapedReward, WinReward
+from catanrl.envs.puffer.rewards import RewardFunction, ShapedReward, WinReward
 from catanrl.envs.puffer.common import (
     BOARD_HEIGHT,
     BOARD_WIDTH,

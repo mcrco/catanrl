@@ -22,6 +22,7 @@ from .rollout_utils import (
     get_action_mask_from_obs,
     init_episode_buffers,
 )
+from .rewards import RewardFunction, ShapedReward, WinReward
 from .single_agent_env import SingleAgentCatanatronPufferEnv, make_puffer_vectorized_envs
 
 __all__ = [
@@ -43,6 +44,9 @@ __all__ = [
     "get_action_mask_from_obs",
     "get_valid_actions",
     "init_episode_buffers",
+    "RewardFunction",
+    "ShapedReward",
+    "WinReward",
     "make_puffer_vectorized_envs",
     "make_vectorized_envs",
 ]
