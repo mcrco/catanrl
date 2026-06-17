@@ -42,7 +42,9 @@ DEFAULT_SHAPED_REWARD_CONFIG = {
 
 
 def _vps_to_win(env: Any) -> int:
-    return int(getattr(env, "vps_to_win", env.config.vps_to_win))
+    if hasattr(env, "vps_to_win"):
+        return int(env.vps_to_win)
+    return int(env.config.vps_to_win)
 
 
 class ShapedReward(RewardFunction):
