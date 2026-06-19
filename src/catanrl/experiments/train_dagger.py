@@ -4,7 +4,7 @@ import os
 import wandb
 
 from ..envs.puffer.common import create_opponents
-from ..algorithms.common.network_config import (
+from .network_config import (
     add_observation_network_arguments,
     resolve_observation_network_args,
 )

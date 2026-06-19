@@ -1,7 +1,7 @@
 import argparse
 import os
 import wandb
-from catanrl.algorithms.common.network_config import (
+from catanrl.experiments.network_config import (
     add_observation_network_arguments,
     resolve_observation_network_args,
 )

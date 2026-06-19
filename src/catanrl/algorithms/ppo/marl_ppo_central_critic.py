@@ -29,7 +29,8 @@ from ...models.models import (
 from ...models.wrappers import PolicyNetworkWrapper, ValueNetworkWrapper
 from ...utils.catanatron_action_space import build_action_type_metadata, get_action_space_size
 from ...utils.seeding import set_global_seeds
-from ..common import PolicyAgent, build_backbone_config
+from ...models.backbone_builder import build_backbone_config
+from ..common import PolicyAgent
 from .action_stats import build_action_type_time_series_chart, compute_action_distributions
 from .buffers import CentralCriticExperienceBuffer
 from .ppo_update import run_ppo_update

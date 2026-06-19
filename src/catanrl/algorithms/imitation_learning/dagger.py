@@ -20,8 +20,8 @@ from tqdm import tqdm
 
 import wandb
 
-from catanrl.algorithms.common import PolicyAgent, build_backbone_config, mask_action_logits
-from catanrl.algorithms.common.network_config import assert_shared_network_obs_levels
+from catanrl.algorithms.common import PolicyAgent, mask_action_logits
+from catanrl.models.backbone_builder import build_backbone_config
 from ...envs import decode_puffer_batch, extract_expert_actions_from_infos
 from ...envs.puffer.single_agent_env import compute_single_agent_dims, make_puffer_vectorized_envs
 from ...eval.training_eval import eval_policy_value_against_baselines
@@ -665,11 +665,13 @@ def train(
     if not xdim_cnn_channels:
         raise ValueError("xdim_cnn_channels cannot be empty")
 
-    assert_shared_network_obs_levels(
-        network_mode,
-        actor_observation_level,
-        critic_observation_level,
-    )
+    if network_mode == "shared" and actor_observation_level != critic_observation_level:
+        raise ValueError(
+            f"network_mode='shared' requires policy and critic information levels to match, "
+            f"but got actor_observation_level={actor_observation_level!r} and "
+            f"critic_observation_level={critic_observation_level!r}. "
+            f"Either set both to the same level (e.g. 'private') or use network_mode='separate'."
+        )
     uses_shared_network = network_mode == "shared"
 
     # Compute dimensions

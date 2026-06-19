@@ -41,7 +41,8 @@ from ...models.models import (
     build_value_network,
 )
 from ...utils.catanatron_action_space import build_action_type_metadata, get_action_space_size
-from ..common import PolicyAgent, build_backbone_config
+from ...models.backbone_builder import build_backbone_config
+from ..common import PolicyAgent
 from .buffers import CentralCriticExperienceBuffer, ExperienceBuffer
 from .action_stats import build_action_type_time_series_chart, compute_action_distributions
 from .ppo_update import run_ppo_update

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Sequence, Tuple
 
-from ...models.backbones import BackboneConfig, CrossDimensionalBackboneConfig, MLPBackboneConfig
+from .backbones import BackboneConfig, CrossDimensionalBackboneConfig, MLPBackboneConfig
 
 
 def build_backbone_config(

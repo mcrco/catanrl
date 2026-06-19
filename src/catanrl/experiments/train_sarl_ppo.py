@@ -3,7 +3,7 @@ import os
 import wandb
 
 from ..envs.puffer.common import compute_single_agent_dims, create_opponents
-from ..algorithms.common.network_config import (
+from .network_config import (
     add_observation_network_arguments,
     resolve_observation_network_args,
 )

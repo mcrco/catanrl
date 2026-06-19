@@ -1,66 +1,27 @@
-"""Builders for policy, critic, and joint policy-value networks used by the unified
-NN MCTS engine (training and evaluation share these)."""
+"""Build policy, critic, and joint policy-value networks for training and inference."""
 
 from __future__ import annotations
 
-from typing import Literal, Sequence
+from typing import Literal, Sequence, Tuple
 
 import torch
 
-from catanrl.algorithms.common.network_config import assert_shared_network_obs_levels
-from catanrl.envs.puffer.common import compute_single_agent_dims
+from catanrl.envs.puffer.common import BOARD_HEIGHT, BOARD_WIDTH, compute_single_agent_dims
 from catanrl.features.catanatron_utils import (
     ActorObservationLevel,
     CriticObservationLevel,
 )
-from catanrl.models.backbones import (
-    BackboneConfig,
-    CrossDimensionalBackboneConfig,
-    MLPBackboneConfig,
-)
-from catanrl.models.models import (
+from catanrl.utils.catanatron_action_space import get_action_space_size
+
+from .backbone_builder import build_backbone_config
+from .models import (
     build_flat_policy_network,
     build_flat_policy_value_network,
     build_hierarchical_policy_network,
     build_hierarchical_policy_value_network,
     build_value_network,
 )
-from catanrl.models.wrappers import PolicyNetworkWrapper, PolicyValueNetworkWrapper, ValueNetworkWrapper
-from catanrl.utils.catanatron_action_space import get_action_space_size
-
-BOARD_WIDTH = 21
-BOARD_HEIGHT = 11
-
-
-def _build_backbone_config(
-    backbone_type: str,
-    hidden_dims: Sequence[int],
-    *,
-    input_dim: int,
-    numeric_dim: int,
-    board_channels: int,
-) -> BackboneConfig:
-    if backbone_type == "mlp":
-        return BackboneConfig(
-            architecture="mlp",
-            args=MLPBackboneConfig(input_dim=input_dim, hidden_dims=list(hidden_dims)),
-        )
-    if backbone_type == "xdim":
-        return BackboneConfig(
-            architecture="cross_dimensional",
-            args=CrossDimensionalBackboneConfig(
-                board_height=BOARD_HEIGHT,
-                board_width=BOARD_WIDTH,
-                board_channels=board_channels,
-                numeric_dim=numeric_dim,
-                cnn_channels=[64, 128, 128],
-                cnn_kernel_size=(3, 5),
-                numeric_hidden_dims=list(hidden_dims),
-                fusion_hidden_dim=hidden_dims[-1] if hidden_dims else 256,
-                output_dim=hidden_dims[-1] if hidden_dims else 256,
-            ),
-        )
-    raise ValueError(f"Unknown backbone_type '{backbone_type}'")
+from .wrappers import PolicyNetworkWrapper, PolicyValueNetworkWrapper, ValueNetworkWrapper
 
 
 def build_policy_model(
@@ -71,18 +32,27 @@ def build_policy_model(
     map_type: Literal["BASE", "MINI", "TOURNAMENT"],
     actor_observation_level: ActorObservationLevel,
     device: torch.device | str,
+    *,
+    xdim_cnn_channels: Sequence[int] = (64, 128, 128),
+    xdim_cnn_kernel_size: Tuple[int, int] = (3, 5),
+    xdim_fusion_hidden_dim: int | None = None,
 ) -> PolicyNetworkWrapper:
     dims = compute_single_agent_dims(
         num_players,
         map_type,
         actor_observation_level=actor_observation_level,
     )
-    backbone_config = _build_backbone_config(
-        backbone_type,
-        hidden_dims,
+    backbone_config = build_backbone_config(
+        backbone_type=backbone_type,
+        hidden_dims=hidden_dims,
         input_dim=dims["actor_dim"],
-        numeric_dim=dims["numeric_dim"],
+        board_height=BOARD_HEIGHT,
+        board_width=BOARD_WIDTH,
         board_channels=dims["board_channels"],
+        numeric_dim=dims["numeric_dim"],
+        xdim_cnn_channels=xdim_cnn_channels,
+        xdim_cnn_kernel_size=xdim_cnn_kernel_size,
+        xdim_fusion_hidden_dim=xdim_fusion_hidden_dim,
     )
 
     if model_type == "flat":
@@ -109,18 +79,27 @@ def build_critic_model(
     map_type: Literal["BASE", "MINI", "TOURNAMENT"],
     critic_observation_level: CriticObservationLevel,
     device: torch.device | str,
+    *,
+    xdim_cnn_channels: Sequence[int] = (64, 128, 128),
+    xdim_cnn_kernel_size: Tuple[int, int] = (3, 5),
+    xdim_fusion_hidden_dim: int | None = None,
 ) -> ValueNetworkWrapper:
     dims = compute_single_agent_dims(
         num_players,
         map_type,
         critic_observation_level=critic_observation_level,
     )
-    backbone_config = _build_backbone_config(
-        backbone_type,
-        hidden_dims,
+    backbone_config = build_backbone_config(
+        backbone_type=backbone_type,
+        hidden_dims=hidden_dims,
         input_dim=dims["critic_dim"],
-        numeric_dim=dims["critic_numeric_dim"],
+        board_height=BOARD_HEIGHT,
+        board_width=BOARD_WIDTH,
         board_channels=dims["board_channels"],
+        numeric_dim=dims["critic_numeric_dim"],
+        xdim_cnn_channels=xdim_cnn_channels,
+        xdim_cnn_kernel_size=xdim_cnn_kernel_size,
+        xdim_fusion_hidden_dim=xdim_fusion_hidden_dim,
     )
 
     model = build_value_network(backbone_config=backbone_config)
@@ -137,26 +116,28 @@ def build_policy_value_model(
     critic_observation_level: CriticObservationLevel,
     device: torch.device | str,
     *,
-    network_mode: str = "shared",
+    xdim_cnn_channels: Sequence[int] = (64, 128, 128),
+    xdim_cnn_kernel_size: Tuple[int, int] = (3, 5),
+    xdim_fusion_hidden_dim: int | None = None,
 ) -> PolicyValueNetworkWrapper:
     """Build a joint policy-value network with a shared backbone."""
-    assert_shared_network_obs_levels(
-        network_mode,
-        actor_observation_level,
-        critic_observation_level,
-    )
     dims = compute_single_agent_dims(
         num_players,
         map_type,
         actor_observation_level=actor_observation_level,
         critic_observation_level=critic_observation_level,
     )
-    backbone_config = _build_backbone_config(
-        backbone_type,
-        hidden_dims,
+    backbone_config = build_backbone_config(
+        backbone_type=backbone_type,
+        hidden_dims=hidden_dims,
         input_dim=dims["actor_dim"],
-        numeric_dim=dims["numeric_dim"],
+        board_height=BOARD_HEIGHT,
+        board_width=BOARD_WIDTH,
         board_channels=dims["board_channels"],
+        numeric_dim=dims["numeric_dim"],
+        xdim_cnn_channels=xdim_cnn_channels,
+        xdim_cnn_kernel_size=xdim_cnn_kernel_size,
+        xdim_fusion_hidden_dim=xdim_fusion_hidden_dim,
     )
 
     if model_type == "flat":
@@ -174,3 +155,6 @@ def build_policy_value_model(
         raise ValueError(f"Unknown model_type '{model_type}'")
 
     return model.to(device)
+
+
+__all__ = ["build_policy_model", "build_critic_model", "build_policy_value_model"]

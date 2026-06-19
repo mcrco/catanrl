@@ -19,9 +19,14 @@ from tqdm import tqdm
 from catanatron.players.minimax import AlphaBetaPlayer
 from catanatron.players.value import ValueFunctionPlayer
 
-from catanrl.algorithms.common.network_config import (
+from catanrl.experiments.network_config import (
     add_observation_network_arguments,
     resolve_observation_network_args,
+)
+from catanrl.models.model_builders import (
+    build_critic_model,
+    build_policy_model,
+    build_policy_value_model,
 )
 from catanrl.algorithms.alphazero.trainer import AlphaZeroConfig, AlphaZeroTrainer
 from catanrl.experiment_store import (
@@ -36,11 +41,6 @@ from catanrl.experiment_store import (
     network_spec_from_model,
     prepare_training_warm_start,
     save_experiment,
-)
-from catanrl.models.mcts_builders import (
-    build_critic_model,
-    build_policy_model,
-    build_policy_value_model,
 )
 
 
@@ -80,8 +80,32 @@ def parse_args() -> argparse.Namespace:
         "--backbone-type",
         type=str,
         default="mlp",
-        choices=["mlp", "xdim"],
+        choices=["mlp", "xdim", "xdim_res"],
         help="Shared backbone architecture for the policy and critic networks.",
+    )
+    parser.add_argument(
+        "--xdim-cnn-channels",
+        type=str,
+        default="64,128,128",
+        help="Comma-separated CNN channels for xdim/xdim_res (default: 64,128,128)",
+    )
+    parser.add_argument(
+        "--xdim-cnn-kernel-size",
+        type=str,
+        default="3,5",
+        help="Kernel size for xdim/xdim_res CNN as 'height,width' (default: 3,5)",
+    )
+    parser.add_argument(
+        "--xdim-fusion-hidden-dim",
+        type=int,
+        default=None,
+        help="Fusion hidden dim for xdim backbones (default: last hidden dim)",
+    )
+    parser.add_argument(
+        "--xdim-critic-fusion-hidden-dim",
+        type=int,
+        default=None,
+        help="Critic fusion hidden dim for separate xdim backbones (default: critic output dim)",
     )
     parser.add_argument(
         "--inference-batch-size",
@@ -174,6 +198,12 @@ def parse_args() -> argparse.Namespace:
         "--hidden-dims", type=str, default="512,512", help="Comma-separated hidden layer sizes"
     )
     parser.add_argument(
+        "--critic-hidden-dims",
+        type=str,
+        default=None,
+        help="Critic hidden dimensions when using separate networks (default: use --hidden-dims)",
+    )
+    parser.add_argument(
         "--device", type=str, default=None, help="Device override (cpu, cuda, cuda:0, ...)"
     )
     parser.add_argument("--seed", type=int, default=42, help="Random seed (set <0 for random)")
@@ -264,13 +294,22 @@ def build_train_config(
     args: argparse.Namespace,
     config: AlphaZeroConfig,
     hidden_dims: List[int],
+    critic_hidden_dims: List[int],
     device: str,
+    *,
+    xdim_cnn_channels: List[int],
+    xdim_cnn_kernel_size: tuple[int, int],
 ) -> Dict[str, object]:
     return {
         "algorithm": "AlphaZero",
         "model_type": config.model_type,
         "backbone_type": args.backbone_type,
         "hidden_dims": hidden_dims,
+        "critic_hidden_dims": critic_hidden_dims,
+        "xdim_cnn_channels": xdim_cnn_channels,
+        "xdim_cnn_kernel_size": list(xdim_cnn_kernel_size),
+        "xdim_fusion_hidden_dim": args.xdim_fusion_hidden_dim,
+        "xdim_critic_fusion_hidden_dim": args.xdim_critic_fusion_hidden_dim,
         "iterations": args.iterations,
         "games_per_iteration": args.games_per_iteration,
         "optimizer_steps": args.optimizer_steps,
@@ -502,6 +541,18 @@ def main() -> None:
         return
 
     hidden_dims = parse_hidden_dims(args.hidden_dims)
+    critic_hidden_dims = (
+        parse_hidden_dims(args.critic_hidden_dims)
+        if args.critic_hidden_dims
+        else list(hidden_dims)
+    )
+    xdim_cnn_channels = [int(ch) for ch in args.xdim_cnn_channels.split(",") if ch.strip()]
+    xdim_kernel_parts = [int(k) for k in args.xdim_cnn_kernel_size.split(",") if k.strip()]
+    if len(xdim_kernel_parts) != 2:
+        raise ValueError(
+            f"--xdim-cnn-kernel-size must have exactly 2 values (got: {args.xdim_cnn_kernel_size})"
+        )
+    xdim_cnn_kernel_size = (xdim_kernel_parts[0], xdim_kernel_parts[1])
 
     # Resolve experiment identity (shared by the folder and the W&B run).
     experiment_name = make_experiment_name("alphazero", args.wandb_run_name, args.experiment_name)
@@ -556,6 +607,9 @@ def main() -> None:
             critic_observation_level=config.critic_observation_level,
             device=device,
             network_mode=args.network_mode,
+            xdim_cnn_channels=xdim_cnn_channels,
+            xdim_cnn_kernel_size=xdim_cnn_kernel_size,
+            xdim_fusion_hidden_dim=args.xdim_fusion_hidden_dim,
         )
     else:
         policy_model = build_policy_model(
@@ -566,20 +620,34 @@ def main() -> None:
             map_type=config.map_type,
             actor_observation_level=config.actor_observation_level,
             device=device,
+            xdim_cnn_channels=xdim_cnn_channels,
+            xdim_cnn_kernel_size=xdim_cnn_kernel_size,
+            xdim_fusion_hidden_dim=args.xdim_fusion_hidden_dim,
         )
         critic_model = build_critic_model(
             backbone_type=args.backbone_type,
-            hidden_dims=hidden_dims,
+            hidden_dims=critic_hidden_dims,
             num_players=config.num_players,
             map_type=config.map_type,
             critic_observation_level=config.critic_observation_level,
             device=device,
+            xdim_cnn_channels=xdim_cnn_channels,
+            xdim_cnn_kernel_size=xdim_cnn_kernel_size,
+            xdim_fusion_hidden_dim=args.xdim_critic_fusion_hidden_dim,
         )
 
     trainer = AlphaZeroTrainer(config=config, policy_model=policy_model, critic_model=critic_model)
     maybe_load_from_experiment(trainer, warm_start)
 
-    train_config = build_train_config(args, config, hidden_dims, device)
+    train_config = build_train_config(
+        args,
+        config,
+        hidden_dims,
+        critic_hidden_dims,
+        device,
+        xdim_cnn_channels=xdim_cnn_channels,
+        xdim_cnn_kernel_size=xdim_cnn_kernel_size,
+    )
     wandb_enabled = init_wandb(args, train_config)
     print("\nStarting AlphaZero training...")
     print(f"  Device: {trainer.device}")

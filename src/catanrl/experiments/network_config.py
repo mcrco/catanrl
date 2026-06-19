@@ -1,4 +1,4 @@
-"""Shared network and observation configuration helpers."""
+"""Shared CLI helpers for policy/critic observation levels and network layout."""
 
 from __future__ import annotations
 
