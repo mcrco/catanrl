@@ -20,7 +20,6 @@ import numpy as np
 import torch
 import wandb
 from catanatron.game import Game
-from catanatron.models.actions import generate_playable_actions
 from catanatron.models.player import Color
 from catanatron.state_functions import get_actual_victory_points
 from tqdm import tqdm
@@ -54,6 +53,7 @@ from catanrl.players.nn_mcts_player import (
     _RemoteNNMCTSInferenceBackend,
 )
 from catanrl.utils.catanatron_action_space import get_action_space_size
+from catanrl.utils.catanatron_game import color_label, force_player_order
 from catanrl.utils.catanatron_map import build_catan_map
 from catanrl.utils.seeding import derive_map_and_game_seeds, derive_seed
 
@@ -546,20 +546,6 @@ def run_parallel_self_play_eval(
         raise RuntimeError(f"Parallel self-play worker failed:\n{first_error}")
 
     return _deserialize_player_stats(aggregate, num_players), turns
-
-
-def color_label(color: Color) -> str:
-    return getattr(color, "value", str(color))
-
-
-def force_player_order(game: Game, players: list[NNMCTSPlayer]) -> None:
-    colors = tuple(player.color for player in players)
-    game.state.players = list(players)
-    game.state.colors = colors
-    game.state.color_to_index = {color: idx for idx, color in enumerate(colors)}
-    game.state.current_player_index = 0
-    game.state.current_turn_index = 0
-    game.playable_actions = generate_playable_actions(game.state)
 
 
 def main():

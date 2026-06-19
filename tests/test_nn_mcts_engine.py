@@ -9,14 +9,12 @@ import torch
 from catanatron.game import Game
 from catanatron.models.player import RandomPlayer
 
-from catanrl.algorithms.alphazero.parallel_self_play import (
-    force_player_order,
-    generate_self_play_data,
-)
+from catanrl.algorithms.alphazero.parallel_self_play import generate_self_play_data
 from catanrl.features.catanatron_utils import COLOR_ORDER
 from catanrl.players import NNMCTSPlayer
 from catanrl.players.nn_mcts_player import _Node
 from catanrl.utils.catanatron_action_space import to_action_space
+from catanrl.utils.catanatron_game import force_player_order
 from catanrl.utils.catanatron_map import build_catan_map
 from nn_mcts_helpers import build_fake_torch_models, build_mock_player
 

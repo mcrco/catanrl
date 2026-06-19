@@ -9,14 +9,8 @@ from catanatron.features import create_sample, get_feature_ordering
 from catanatron.game import Game
 from catanatron.gym.board_tensor_features import create_board_tensor, is_graph_feature
 from catanatron.models.player import Color, RandomPlayer
+from catanrl.utils.catanatron_game import COLOR_ORDER
 from catanrl.utils.catanatron_map import build_catan_map
-
-COLOR_ORDER: Tuple[Color, ...] = (
-    Color.RED,
-    Color.BLUE,
-    Color.ORANGE,
-    Color.WHITE,
-)
 ObservationLevel = Literal["private", "public", "full"]
 ActorObservationLevel = ObservationLevel
 CriticObservationLevel = ObservationLevel

@@ -23,7 +23,7 @@ import torch.nn.functional as F
 from catanatron.game import Game
 from catanatron.models.player import Color, Player
 
-from ...features.catanatron_utils import ActorObservationLevel, CriticObservationLevel
+from ...features.catanatron_utils import ActorObservationLevel, COLOR_ORDER, CriticObservationLevel
 from ...models.inference_utils import forward_policy_value
 from ...models.wrappers import PolicyNetworkWrapper, PolicyValueNetworkWrapper, ValueNetworkWrapper
 from ...players import NNMCTSPlayer
@@ -72,8 +72,6 @@ class AlphaZeroConfig:
 class AlphaZeroTrainer:
     """Self-play data generation + policy/value SGD."""
 
-    COLOR_ORDER = (Color.RED, Color.BLUE, Color.ORANGE, Color.WHITE)
-
     def __init__(
         self,
         config: Optional[AlphaZeroConfig],
@@ -81,7 +79,7 @@ class AlphaZeroTrainer:
         critic_model: ValueNetworkWrapper | None = None,
     ) -> None:
         self.config = config or AlphaZeroConfig()
-        assert 2 <= self.config.num_players <= len(self.COLOR_ORDER), (
+        assert 2 <= self.config.num_players <= len(COLOR_ORDER), (
             "AlphaZero currently supports between 2 and 4 players."
         )
 
@@ -103,7 +101,7 @@ class AlphaZeroTrainer:
                 )
             self.critic_model = critic_model.to(self.device)
 
-        self.colors = self.COLOR_ORDER[: self.config.num_players]
+        self.colors = COLOR_ORDER[: self.config.num_players]
 
         self.replay_buffer: Deque[SelfPlayExperience] = deque(maxlen=self.config.buffer_size)
         trainable_params = (

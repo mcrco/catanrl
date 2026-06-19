@@ -20,7 +20,7 @@ from catanrl.features.catanatron_utils import (
     CriticObservationLevel,
     get_observation_numeric_feature_names,
 )
-from catanrl.utils.catanatron_action_space import PLAYER_COLOR_ORDER
+from catanrl.utils.catanatron_game import PLAYER_COLOR_ORDER
 
 MapType = Literal["BASE", "MINI", "TOURNAMENT"]
 

@@ -26,9 +26,8 @@ from ..features.catanatron_utils import (
     get_observation_indices_from_full,
 )
 from ..models.wrappers import PolicyNetworkWrapper, PolicyValueNetworkWrapper, ValueNetworkWrapper
+from ..utils.catanatron_game import SeatOption
 from ..utils.seeding import derive_seed
-
-SeatOption = Literal["first", "second", "random"]
 
 
 def _extract_nn_won_from_infos(infos: object, batch_size: int) -> Tuple[Any, Any]:

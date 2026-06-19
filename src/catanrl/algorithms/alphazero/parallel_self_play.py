@@ -26,7 +26,6 @@ from typing import Callable, Literal, Sequence
 import numpy as np
 import torch
 from catanatron.game import Game
-from catanatron.models.actions import generate_playable_actions
 from catanatron.models.player import Color
 from tqdm import tqdm
 
@@ -40,20 +39,9 @@ from catanrl.players.nn_mcts_player import (
     _CentralNNMCTSInferenceServer,
     _RemoteNNMCTSInferenceBackend,
 )
+from catanrl.utils.catanatron_game import force_player_order
 from catanrl.utils.catanatron_map import build_catan_map
 from catanrl.utils.seeding import derive_map_and_game_seeds, derive_seed
-
-
-def force_player_order(game: Game, players: Sequence[NNMCTSPlayer]) -> None:
-    """Seat ``players`` in the given order regardless of catanatron shuffling."""
-    colors = tuple(player.color for player in players)
-    game.state.players = list(players)
-    game.state.colors = colors
-    game.state.color_to_index = {color: idx for idx, color in enumerate(colors)}
-    game.state.current_player_index = 0
-    game.state.current_turn_index = 0
-    game.playable_actions = generate_playable_actions(game.state)
-
 
 def run_inference_server_workers(
     *,

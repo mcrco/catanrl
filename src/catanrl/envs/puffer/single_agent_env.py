@@ -10,7 +10,6 @@ from pufferlib.environment import PufferEnv
 
 from catanatron.game import Game, TURNS_LIMIT
 from catanatron.gym.board_tensor_features import create_board_tensor
-from catanatron.models.actions import generate_playable_actions
 from catanatron.models.player import Color, Player, RandomPlayer
 
 from catanrl.envs.puffer.rewards import RewardFunction, ShapedReward, WinReward
@@ -35,36 +34,9 @@ from catanrl.utils.catanatron_action_space import (
     get_action_space_size,
     to_action_space,
 )
+from catanrl.utils.catanatron_game import SeatOption, build_players_for_seat, force_player_order
 from catanrl.utils.catanatron_map import build_catan_map
 from catanrl.utils.seeding import derive_map_and_game_seeds, derive_seed
-
-SeatOption = Literal["first", "second", "random"]
-
-
-def _build_players_for_seat(
-    p0: Player,
-    enemies: List[Player],
-    nn_seat: SeatOption,
-) -> tuple[list[Player], bool]:
-    if nn_seat == "random":
-        return [p0] + enemies, True
-    if nn_seat == "first":
-        return [p0] + enemies, False
-    if nn_seat == "second":
-        if not enemies:
-            raise ValueError("Cannot place the NN player second without at least one opponent.")
-        return [enemies[0], p0] + enemies[1:], False
-    raise ValueError(f"Unknown nn_seat '{nn_seat}'")
-
-
-def _force_player_order(game: Game, players: list[Player]) -> None:
-    colors = tuple(player.color for player in players)
-    game.state.players = list(players)
-    game.state.colors = colors
-    game.state.color_to_index = {color: idx for idx, color in enumerate(colors)}
-    game.state.current_player_index = 0
-    game.state.current_turn_index = 0
-    game.playable_actions = generate_playable_actions(game.state)
 
 
 def _resolve_reward_function(reward_function: str | RewardFunction | None) -> RewardFunction:
@@ -102,7 +74,7 @@ class SingleAgentCatanatronPufferEnv(PufferEnv):
 
         assert all(player.color != Color.BLUE for player in self.enemies)
         self.p0 = Player(Color.BLUE)
-        self.players, self._allow_upstream_shuffle = _build_players_for_seat(
+        self.players, self._allow_upstream_shuffle = build_players_for_seat(
             self.p0,
             self.enemies,
             self.nn_seat,
@@ -271,7 +243,7 @@ class SingleAgentCatanatronPufferEnv(PufferEnv):
             vps_to_win=self.vps_to_win,
         )
         if not self._allow_upstream_shuffle:
-            _force_player_order(self.game, self.players)
+            force_player_order(self.game, self.players)
         if self.expert_player is not None:
             self.expert_player.reset_state()
 
