@@ -6,7 +6,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from .agent import PolicyAgent
+from ..common import PolicyAgent
 from .buffers import CentralCriticExperienceBuffer, ExperienceBuffer
 from .gae import compute_gae_batched
 
