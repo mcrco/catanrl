@@ -19,9 +19,17 @@ from tqdm import tqdm
 from catanatron.players.minimax import AlphaBetaPlayer
 from catanatron.players.value import ValueFunctionPlayer
 
-from catanrl.experiments.network_config import (
-    add_observation_network_arguments,
-    resolve_observation_network_args,
+from catanrl.experiments.architecture_config import (
+    ArchitecturePreset,
+    add_config_argument,
+    architecture_train_config_fields,
+)
+from catanrl.experiments.common_args import (
+    DEFAULT_MAX_GRAD_NORM,
+    add_device_argument,
+    add_experiment_name_argument,
+    add_save_every_updates_argument,
+    add_wandb_arguments,
 )
 from catanrl.models.model_builders import (
     build_critic_model,
@@ -39,7 +47,7 @@ from catanrl.experiment_store import (
     default_checkpoints_dir,
     make_experiment_name,
     network_spec_from_model,
-    prepare_training_warm_start,
+    resolve_training_architecture_and_warm_start,
     save_experiment,
 )
 
@@ -50,7 +58,6 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
-    # Training loop
     parser.add_argument(
         "--iterations", type=int, default=50, help="Outer self-play / SGD iterations"
     )
@@ -69,44 +76,7 @@ def parse_args() -> argparse.Namespace:
         "Throughput on a single shared GPU saturates near the core count; oversubscribing "
         "past it trades latency for a little more aggregate throughput.",
     )
-    parser.add_argument(
-        "--model-type",
-        type=str,
-        default="flat",
-        choices=["flat", "hierarchical"],
-        help="Policy head type: 'flat' or 'hierarchical'.",
-    )
-    parser.add_argument(
-        "--backbone-type",
-        type=str,
-        default="mlp",
-        choices=["mlp", "xdim", "xdim_res"],
-        help="Shared backbone architecture for the policy and critic networks.",
-    )
-    parser.add_argument(
-        "--xdim-cnn-channels",
-        type=str,
-        default="64,128,128",
-        help="Comma-separated CNN channels for xdim/xdim_res (default: 64,128,128)",
-    )
-    parser.add_argument(
-        "--xdim-cnn-kernel-size",
-        type=str,
-        default="3,5",
-        help="Kernel size for xdim/xdim_res CNN as 'height,width' (default: 3,5)",
-    )
-    parser.add_argument(
-        "--xdim-fusion-hidden-dim",
-        type=int,
-        default=None,
-        help="Fusion hidden dim for xdim backbones (default: last hidden dim)",
-    )
-    parser.add_argument(
-        "--xdim-critic-fusion-hidden-dim",
-        type=int,
-        default=None,
-        help="Critic fusion hidden dim for separate xdim backbones (default: critic output dim)",
-    )
+    add_config_argument(parser)
     parser.add_argument(
         "--inference-batch-size",
         type=int,
@@ -124,39 +94,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Prune clearly dominated actions before MCTS expansion.",
     )
-    parser.add_argument(
-        "--discard-limit", type=int, default=7, help="Hand size that triggers discards on a 7."
-    )
 
-    # Model + config knobs (mirrors AlphaZeroConfig)
-    parser.add_argument(
-        "--num-players",
-        type=int,
-        default=2,
-        choices=[2, 3, 4],
-        help="Number of players in self-play",
-    )
-    parser.add_argument(
-        "--map-type",
-        type=str,
-        default="BASE",
-        choices=["BASE", "MINI", "TOURNAMENT"],
-        help="Map layout",
-    )
-    add_observation_network_arguments(
-        parser,
-        policy_mode_default="private",
-        critic_mode_default="full",
-        network_mode_default="separate",
-    )
-    parser.add_argument(
-        "--critic-hidden-mode",
-        type=str,
-        default="full",
-        choices=["full", "guessed_dev_cards"],
-        help="How the MCTS value net encodes hidden dev-card information.",
-    )
-    parser.add_argument("--vps-to-win", type=int, default=10, help="Victory points to win the game")
     parser.add_argument("--simulations", type=int, default=64, help="MCTS simulations per move")
     parser.add_argument("--c-puct", type=float, default=1.5, help="PUCT exploration constant")
     parser.add_argument(
@@ -193,27 +131,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--value-loss-weight", type=float, default=1.0, help="Value loss multiplier"
     )
-    parser.add_argument("--max-grad-norm", type=float, default=1.0, help="Gradient clipping norm")
-    parser.add_argument(
-        "--hidden-dims", type=str, default="512,512", help="Comma-separated hidden layer sizes"
-    )
-    parser.add_argument(
-        "--critic-hidden-dims",
-        type=str,
-        default=None,
-        help="Critic hidden dimensions when using separate networks (default: use --hidden-dims)",
-    )
-    parser.add_argument(
-        "--device", type=str, default=None, help="Device override (cpu, cuda, cuda:0, ...)"
-    )
+    parser.add_argument("--max-grad-norm", type=float, default=DEFAULT_MAX_GRAD_NORM, help="Gradient clipping norm")
+    add_device_argument(parser)
     parser.add_argument("--seed", type=int, default=42, help="Random seed (set <0 for random)")
 
     # I/O
-    parser.add_argument(
-        "--checkpoint-every",
-        type=int,
+    add_save_every_updates_argument(
+        parser,
         default=0,
-        help="Save checkpoint every N iterations (0 to disable)",
+        help="Save checkpoint every N iterations (0 to disable periodic saves; best model always saved)",
     )
     parser.add_argument(
         "--checkpoint-dir",
@@ -223,41 +149,13 @@ def parse_args() -> argparse.Namespace:
     )
     add_load_from_experiment_arguments(parser)
 
-    # Logging
-    parser.add_argument(
-        "--experiment-name",
-        type=str,
-        default=None,
-        help="Experiment name (folder under experiments/ and W&B run name). "
-        "Defaults to --wandb-run-name, else an auto-generated name.",
-    )
-    parser.add_argument("--wandb", action="store_true", help="Enable Weights & Biases logging")
-    parser.add_argument(
-        "--wandb-project", type=str, default="catan-rl", help="Weights & Biases project name"
-    )
-    parser.add_argument(
-        "--wandb-run-name", type=str, default=None, help="Weights & Biases run name"
-    )
+    add_experiment_name_argument(parser)
+    add_wandb_arguments(parser)
     parser.add_argument(
         "--wandb-entity", type=str, default=None, help="Weights & Biases entity / team"
     )
 
     return parser.parse_args()
-
-
-def parse_hidden_dims(value: str) -> List[int]:
-    dims = []
-    for token in value.split(","):
-        token = token.strip()
-        if not token:
-            continue
-        dim = int(token)
-        if dim <= 0:
-            raise ValueError("Hidden dimensions must be positive integers.")
-        dims.append(dim)
-    if not dims:
-        raise ValueError("At least one hidden dimension is required.")
-    return dims
 
 
 
@@ -293,39 +191,20 @@ def maybe_load_from_experiment(
 def build_train_config(
     args: argparse.Namespace,
     config: AlphaZeroConfig,
-    hidden_dims: List[int],
-    critic_hidden_dims: List[int],
+    arch: ArchitecturePreset,
     device: str,
-    *,
-    xdim_cnn_channels: List[int],
-    xdim_cnn_kernel_size: tuple[int, int],
 ) -> Dict[str, object]:
     return {
         "algorithm": "AlphaZero",
-        "model_type": config.model_type,
-        "backbone_type": args.backbone_type,
-        "hidden_dims": hidden_dims,
-        "critic_hidden_dims": critic_hidden_dims,
-        "xdim_cnn_channels": xdim_cnn_channels,
-        "xdim_cnn_kernel_size": list(xdim_cnn_kernel_size),
-        "xdim_fusion_hidden_dim": args.xdim_fusion_hidden_dim,
-        "xdim_critic_fusion_hidden_dim": args.xdim_critic_fusion_hidden_dim,
+        **architecture_train_config_fields(arch),
         "iterations": args.iterations,
         "games_per_iteration": args.games_per_iteration,
         "optimizer_steps": args.optimizer_steps,
         "num_workers": args.num_workers,
         "inference_batch_size": args.inference_batch_size,
         "inference_wait_ms": args.inference_wait_ms,
-        "map_type": config.map_type,
         "num_players": config.num_players,
-        "policy_mode": config.actor_observation_level,
-        "critic_mode": config.critic_observation_level,
-        "actor_observation_level": config.actor_observation_level,
-        "critic_observation_level": config.critic_observation_level,
         "critic_hidden_mode": config.critic_hidden_mode,
-        "network_mode": config.network_mode,
-        "vps_to_win": config.vps_to_win,
-        "discard_limit": config.discard_limit,
         "simulations": config.simulations,
         "c_puct": config.c_puct,
         "prunning": config.prunning,
@@ -342,7 +221,7 @@ def build_train_config(
         "policy_loss_weight": config.policy_loss_weight,
         "value_loss_weight": config.value_loss_weight,
         "max_grad_norm": config.max_grad_norm,
-        "checkpoint_every": args.checkpoint_every,
+        "save_every_updates": args.save_every_updates,
         "load_from_experiment": args.load_from_experiment,
         "load_from_which": args.load_from_which,
         "seed": args.seed,
@@ -484,7 +363,7 @@ def run_training(args: argparse.Namespace, trainer: AlphaZeroTrainer, wandb_enab
             else:
                 print("  No optimizer metrics collected this iteration.")
 
-            if args.checkpoint_every and iteration % args.checkpoint_every == 0:
+            if args.save_every_updates and iteration % args.save_every_updates == 0:
                 trainer.save(checkpoint_dir, stem=f"iter_{iteration}")
                 print(
                     f"  → Saved checkpoint to {checkpoint_dir} "
@@ -531,46 +410,35 @@ def run_training(args: argparse.Namespace, trainer: AlphaZeroTrainer, wandb_enab
 def main() -> None:
     args = parse_args()
 
-    resolve_observation_network_args(args)
-
-    require_critic = args.network_mode == "separate"
     try:
-        warm_start = prepare_training_warm_start(args, require_critic=require_critic)
-    except FileNotFoundError as exc:
+        setup = resolve_training_architecture_and_warm_start(args)
+    except (FileNotFoundError, ValueError) as exc:
         print(f"Error: {exc}")
         return
 
-    hidden_dims = parse_hidden_dims(args.hidden_dims)
-    critic_hidden_dims = (
-        parse_hidden_dims(args.critic_hidden_dims)
-        if args.critic_hidden_dims
-        else list(hidden_dims)
-    )
-    xdim_cnn_channels = [int(ch) for ch in args.xdim_cnn_channels.split(",") if ch.strip()]
-    xdim_kernel_parts = [int(k) for k in args.xdim_cnn_kernel_size.split(",") if k.strip()]
-    if len(xdim_kernel_parts) != 2:
-        raise ValueError(
-            f"--xdim-cnn-kernel-size must have exactly 2 values (got: {args.xdim_cnn_kernel_size})"
-        )
-    xdim_cnn_kernel_size = (xdim_kernel_parts[0], xdim_kernel_parts[1])
+    arch = setup.arch
+    warm_start = setup.warm_start
+    if arch.num_players is None:
+        print("Error: AlphaZero training requires game.num_players in the architecture preset.")
+        return
 
-    # Resolve experiment identity (shared by the folder and the W&B run).
     experiment_name = make_experiment_name("alphazero", args.wandb_run_name, args.experiment_name)
     if args.wandb and not args.wandb_run_name:
         args.wandb_run_name = experiment_name
     args.save_path = default_checkpoints_dir(experiment_name)
     os.makedirs(args.save_path, exist_ok=True)
+    print(f"Architecture: {setup.architecture_source}")
 
     config = AlphaZeroConfig(
-        num_players=args.num_players,
-        map_type=args.map_type,
-        actor_observation_level=args.actor_observation_level,
-        critic_observation_level=args.critic_observation_level,
-        critic_hidden_mode=args.critic_hidden_mode,
-        network_mode=args.network_mode,
-        model_type=args.model_type,
-        vps_to_win=args.vps_to_win,
-        discard_limit=args.discard_limit,
+        num_players=arch.num_players,
+        map_type=arch.map_type,
+        actor_observation_level=arch.actor_observation_level,
+        critic_observation_level=arch.critic_observation_level,
+        critic_hidden_mode=arch.critic_hidden_mode or "full",
+        network_mode=arch.network_mode,
+        model_type=arch.model_type,
+        vps_to_win=arch.vps_to_win,
+        discard_limit=arch.discard_limit,
         simulations=args.simulations,
         c_puct=args.c_puct,
         prunning=args.prunning,
@@ -596,65 +464,58 @@ def main() -> None:
 
     device = config.device or ("cuda" if torch.cuda.is_available() else "cpu")
     critic_model = None
-    if args.network_mode == "shared":
+    if arch.network_mode == "shared":
         policy_model = build_policy_value_model(
-            backbone_type=args.backbone_type,
+            backbone_type=arch.backbone_type,
             model_type=config.model_type,
-            hidden_dims=hidden_dims,
+            hidden_dims=arch.policy_hidden_dims,
             num_players=config.num_players,
             map_type=config.map_type,
             actor_observation_level=config.actor_observation_level,
             critic_observation_level=config.critic_observation_level,
             device=device,
-            network_mode=args.network_mode,
-            xdim_cnn_channels=xdim_cnn_channels,
-            xdim_cnn_kernel_size=xdim_cnn_kernel_size,
-            xdim_fusion_hidden_dim=args.xdim_fusion_hidden_dim,
+            network_mode=arch.network_mode,
+            xdim_cnn_channels=arch.xdim_cnn_channels,
+            xdim_cnn_kernel_size=arch.xdim_cnn_kernel_size,
+            xdim_fusion_hidden_dim=arch.xdim_policy_fusion_hidden_dim,
         )
     else:
         policy_model = build_policy_model(
-            backbone_type=args.backbone_type,
+            backbone_type=arch.backbone_type,
             model_type=config.model_type,
-            hidden_dims=hidden_dims,
+            hidden_dims=arch.policy_hidden_dims,
             num_players=config.num_players,
             map_type=config.map_type,
             actor_observation_level=config.actor_observation_level,
             device=device,
-            xdim_cnn_channels=xdim_cnn_channels,
-            xdim_cnn_kernel_size=xdim_cnn_kernel_size,
-            xdim_fusion_hidden_dim=args.xdim_fusion_hidden_dim,
+            xdim_cnn_channels=arch.xdim_cnn_channels,
+            xdim_cnn_kernel_size=arch.xdim_cnn_kernel_size,
+            xdim_fusion_hidden_dim=arch.xdim_policy_fusion_hidden_dim,
         )
         critic_model = build_critic_model(
-            backbone_type=args.backbone_type,
-            hidden_dims=critic_hidden_dims,
+            backbone_type=arch.backbone_type,
+            hidden_dims=arch.critic_hidden_dims,
             num_players=config.num_players,
             map_type=config.map_type,
             critic_observation_level=config.critic_observation_level,
             device=device,
-            xdim_cnn_channels=xdim_cnn_channels,
-            xdim_cnn_kernel_size=xdim_cnn_kernel_size,
-            xdim_fusion_hidden_dim=args.xdim_critic_fusion_hidden_dim,
+            xdim_cnn_channels=arch.xdim_cnn_channels,
+            xdim_cnn_kernel_size=arch.xdim_cnn_kernel_size,
+            xdim_fusion_hidden_dim=arch.xdim_critic_fusion_hidden_dim,
         )
 
     trainer = AlphaZeroTrainer(config=config, policy_model=policy_model, critic_model=critic_model)
     maybe_load_from_experiment(trainer, warm_start)
 
-    train_config = build_train_config(
-        args,
-        config,
-        hidden_dims,
-        critic_hidden_dims,
-        device,
-        xdim_cnn_channels=xdim_cnn_channels,
-        xdim_cnn_kernel_size=xdim_cnn_kernel_size,
-    )
+    train_config = build_train_config(args, config, arch, device)
     wandb_enabled = init_wandb(args, train_config)
     print("\nStarting AlphaZero training...")
     print(f"  Device: {trainer.device}")
-    print(f"  Backbone: {args.backbone_type} | model: {config.model_type}")
-    print(f"  Hidden dims: {hidden_dims}")
+    print(f"  Backbone: {arch.backbone_type} | model: {config.model_type}")
+    print(f"  Policy hidden dims: {list(arch.policy_hidden_dims)}")
+    print(f"  Critic hidden dims: {list(arch.critic_hidden_dims)}")
     print(f"  Checkpoints: {args.save_path}")
-    print(f"  Network mode: {args.network_mode}")
+    print(f"  Network mode: {arch.network_mode}")
 
     run_training(args, trainer, wandb_enabled)
 

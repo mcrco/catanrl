@@ -33,24 +33,27 @@ experiments/<name>/
 ```
 
 Because `metadata.json` records the precise architecture, you never have to
-re-specify `--backbone-type` / `--policy-hidden-dims` / `--map-type` etc. at eval
-time — the model rebuilds itself from the experiment.
+re-specify model settings at eval time — the model rebuilds itself from the experiment.
 
 ### Training
 
-All training scripts take `--experiment-name` (it also becomes the W&B run name,
-so the run and the weights always cross-reference). If omitted, it falls back to
-`--wandb-run-name`, else an auto-generated `<algo>-<timestamp>`.
+Training scripts require **either** `--config` (YAML preset under `configs/models/`)
+**or** `--load-from-experiment` (warm start; architecture comes from experiment
+metadata). If both are passed, the architectures must match exactly.
+
+Also pass `--experiment-name` (it becomes the W&B run name when set). If omitted,
+it falls back to `--wandb-run-name`, else an auto-generated `<algo>-<timestamp>`.
 
 ```
 uv run train-sarl-ppo \
+  --config configs/models/xdim-flat-2p-private.yaml \
   --experiment-name ppo-sarl-f-winreward-xdim-flat-pretrained-dagger \
-  --backbone-type xdim --model-type flat --hidden-dims 2048,2048 \
   --opponents F --wandb
 ```
 
-Checkpoints are written to `experiments/<name>/checkpoints/` and metadata is
-emitted automatically when training finishes.
+Architecture presets define the model backbone, observation levels, and game
+settings (`map_type`, `vps_to_win`, etc.). The full resolved architecture is
+saved into experiment metadata when training finishes — not the YAML path.
 
 ### Loading a model in code
 

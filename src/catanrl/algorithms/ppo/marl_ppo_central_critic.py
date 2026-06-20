@@ -57,7 +57,7 @@ def train(
     value_coef: float = 0.5,
     entropy_coef: float = 0.01,
     activity_coef: float = 0.0,
-    ppo_epochs: int = 4,
+    train_epochs: int = 4,
     batch_size: int = 256,
     policy_hidden_dims: Sequence[int] = (512, 512),
     critic_hidden_dims: Sequence[int] = (512, 512),
@@ -66,11 +66,12 @@ def train(
     load_critic_weights: Optional[str] = None,
     wandb_config: Optional[Dict] = None,
     seed: Optional[int] = 42,
-    max_grad_norm: float = 0.5,
+    device: str | torch.device | None = None,
+    max_grad_norm: float = 1.0,
     deterministic_policy: bool = False,
-    eval_games_per_opponent: int = 250,
+    fresh_eval_games_per_opponent: int = 250,
     trend_eval_games_per_opponent: Optional[int] = None,
-    trend_eval_seed: Optional[int] = 42,
+    trend_eval_seed: Optional[int] = 43,
     h2h_eval_games: int = 0,
     h2h_eval_seed: Optional[int] = 123,
     eval_every_updates: int = 1,
@@ -78,8 +79,8 @@ def train(
     target_kl: Optional[float] = None,
     num_envs: int = 2,
     reward_function: Literal["shaped", "win"] = "shaped",
-    vps_to_win: int = 10,
-    discard_limit: int = 7,
+    vps_to_win: int = 15,
+    discard_limit: int = 9,
     metric_window: int = 200,
 ) -> Tuple[PolicyNetworkWrapper, ValueNetworkWrapper]:
     """Train a shared policy with a centralized critic using PPO."""
@@ -92,7 +93,7 @@ def train(
         raise ValueError("xdim_cnn_channels cannot be empty")
 
     set_global_seeds(seed)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     action_space_size = get_action_space_size(num_players, map_type)
     _, action_to_type_idx, action_type_names = build_action_type_metadata(num_players, map_type)
 
@@ -270,7 +271,7 @@ def train(
     print(f"Eval cadence: every {eval_every_updates} update(s)")
     print(f"Save cadence: every {save_every_updates} update(s)")
     trend_eval_games = (
-        eval_games_per_opponent
+        fresh_eval_games_per_opponent
         if trend_eval_games_per_opponent is None
         else max(1, trend_eval_games_per_opponent)
     )
@@ -301,7 +302,7 @@ def train(
                 model_type=model_type,
                 map_type=map_type,
                 eval_opponent_configs=["random"] * (num_players - 1),
-                num_games=eval_games_per_opponent,
+                num_games=fresh_eval_games_per_opponent,
                 gamma=gamma,
                 seed=random.randint(0, sys.maxsize),
                 vps_to_win=vps_to_win,
@@ -392,7 +393,7 @@ def train(
             eval_win_rate = None
             if trend_eval_games_per_opponent is not None and trend_eval_games_per_opponent > 0:
                 eval_win_rate = float(trend_eval_metrics.get("eval/win_rate_vs_value", 0.0))
-            elif eval_games_per_opponent is not None and eval_games_per_opponent > 0:
+            elif fresh_eval_games_per_opponent is not None and fresh_eval_games_per_opponent > 0:
                 eval_win_rate = float(fresh_eval_metrics.get("eval/win_rate_vs_value", 0.0))
 
             if eval_win_rate is not None and eval_win_rate > best_eval_win_rate:
@@ -517,7 +518,7 @@ def train(
                         value_coef=value_coef,
                         entropy_coef=entropy_coef,
                         activity_coef=activity_coef,
-                        n_epochs=ppo_epochs,
+                        train_epochs=train_epochs,
                         batch_size=batch_size,
                         device=device,
                         last_actor_states=bootstrap_actor_batch,

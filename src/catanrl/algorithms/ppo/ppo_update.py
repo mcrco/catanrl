@@ -49,7 +49,7 @@ def run_ppo_update(
     value_coef: float,
     entropy_coef: float,
     activity_coef: float,
-    n_epochs: int,
+    train_epochs: int,
     batch_size: int,
     device: str | torch.device,
     gamma: float = 0.99,
@@ -176,7 +176,7 @@ def run_ppo_update(
     n_updates = 0
     early_stop = False
 
-    for _ in range(n_epochs):
+    for _ in range(train_epochs):
         indices = np.random.permutation(len(actor_states))
         for start in range(0, len(actor_states), batch_size):
             end = start + batch_size

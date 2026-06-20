@@ -55,16 +55,16 @@ def train(
     backbone_type: str = "mlp",
     xdim_cnn_channels: Sequence[int] = (64, 128, 128),
     xdim_cnn_kernel_size: Tuple[int, int] = (3, 5),
-    xdim_fusion_hidden_dim: int | None = None,
+    xdim_policy_fusion_hidden_dim: int | None = None,
     xdim_critic_fusion_hidden_dim: int | None = None,
-    hidden_dims: Sequence[int] = (512, 512),
+    policy_hidden_dims: Sequence[int] = (512, 512),
     critic_hidden_dims: Sequence[int] | None = None,
     critic_mode: Literal["shared", "privileged"] = "shared",
     load_weights: str | None = None,
     load_critic_weights: str | None = None,
     total_timesteps: int = 1_000_000,
     rollout_steps: int = 4096,
-    lr: float = 1e-4,
+    policy_lr: float = 1e-4,
     critic_lr: float | None = None,
     gamma: float = 0.99,
     gae_lambda: float = 0.95,
@@ -72,11 +72,11 @@ def train(
     value_coef: float = 0.5,
     entropy_coef: float = 0.01,
     activity_coef: float = 0.0,
-    n_epochs: int = 4,
+    train_epochs: int = 4,
     batch_size: int = 64,
     save_path: str | None = "weights/sarl_ppo",
     save_every_updates: int = 1,
-    device: str | torch.device = "cuda" if torch.cuda.is_available() else "cpu",
+    device: str | torch.device | None = None,
     wandb_config: dict | None = None,
     map_type: Literal["BASE", "TOURNAMENT", "MINI"] = "BASE",
     actor_observation_level: ActorObservationLevel = "private",
@@ -89,12 +89,12 @@ def train(
     use_lr_scheduler: bool = False,
     lr_scheduler_kwargs: dict | None = None,
     metric_window: int = 200,
-    eval_games_per_opponent: int = 0,
+    fresh_eval_games_per_opponent: int = 0,
     trend_eval_games_per_opponent: int | None = None,
-    trend_eval_seed: int | None = 42,
+    trend_eval_seed: int | None = 43,
     eval_every_updates: int = 0,
     deterministic_policy: bool = False,
-    max_grad_norm: float = 0.5,
+    max_grad_norm: float = 1.0,
     target_kl: float | None = None,
 ):
     """Train SARL PPO with optional privileged critic."""
@@ -108,8 +108,11 @@ def train(
     effective_critic_observation_level = (
         critic_observation_level if uses_privileged_critic else actor_observation_level
     )
-    critic_lr = lr if critic_lr is None else critic_lr
-    critic_hidden_dims = tuple(hidden_dims if critic_hidden_dims is None else critic_hidden_dims)
+    critic_lr = policy_lr if critic_lr is None else critic_lr
+    critic_hidden_dims = tuple(
+        policy_hidden_dims if critic_hidden_dims is None else critic_hidden_dims
+    )
+    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 
     print(f"\n{'=' * 60}")
     print("Training Policy-Value Network with Single Agent Reinforcement Learning (PPO)")
@@ -185,7 +188,7 @@ def train(
 
     policy_backbone_config = build_backbone_config(
         backbone_type=backbone_type,
-        hidden_dims=hidden_dims,
+        hidden_dims=policy_hidden_dims,
         input_dim=actor_input_dim,
         board_height=BOARD_HEIGHT,
         board_width=BOARD_WIDTH,
@@ -193,7 +196,7 @@ def train(
         numeric_dim=actor_numeric_dim,
         xdim_cnn_channels=xdim_cnn_channels,
         xdim_cnn_kernel_size=xdim_cnn_kernel_size,
-        xdim_fusion_hidden_dim=xdim_fusion_hidden_dim,
+        xdim_fusion_hidden_dim=xdim_policy_fusion_hidden_dim,
     )
 
     if uses_privileged_critic:
@@ -259,7 +262,7 @@ def train(
         print("  Critic weights loaded successfully.")
 
     agent = PolicyAgent(policy_model, model_type, device)
-    policy_optimizer = optim.Adam(policy_model.parameters(), lr=lr)
+    policy_optimizer = optim.Adam(policy_model.parameters(), lr=policy_lr)
     critic_optimizer = (
         optim.Adam(critic_model.parameters(), lr=critic_lr) if critic_model is not None else None
     )
@@ -346,11 +349,11 @@ def train(
         print("Eval cadence: disabled")
     print(f"Save cadence: every {save_every_updates} update(s)")
     do_eval = eval_every_updates > 0 and (
-        eval_games_per_opponent > 0
+        fresh_eval_games_per_opponent > 0
         or (trend_eval_games_per_opponent is not None and trend_eval_games_per_opponent > 0)
     )
     trend_eval_games = (
-        eval_games_per_opponent
+        fresh_eval_games_per_opponent
         if trend_eval_games_per_opponent is None
         else max(1, trend_eval_games_per_opponent)
     )
@@ -557,7 +560,7 @@ def train(
                     value_coef=value_coef,
                     entropy_coef=entropy_coef,
                     activity_coef=activity_coef,
-                    n_epochs=n_epochs,
+                    train_epochs=train_epochs,
                     batch_size=batch_size,
                     device=device,
                     last_actor_states=bootstrap_actor_states,
@@ -637,7 +640,7 @@ def train(
                         model_type=model_type,
                         map_type=map_type,
                         eval_opponent_configs=opponent_configs,
-                        num_games=eval_games_per_opponent,
+                        num_games=fresh_eval_games_per_opponent,
                         gamma=gamma,
                         seed=random.randint(0, sys.maxsize),
                         vps_to_win=vps_to_win,
@@ -690,7 +693,7 @@ def train(
                             eval_win_rate = float(
                                 trend_eval_metrics.get("eval/win_rate_vs_value", 0.0)
                             )
-                        elif eval_games_per_opponent is not None and eval_games_per_opponent > 0:
+                        elif fresh_eval_games_per_opponent is not None and fresh_eval_games_per_opponent > 0:
                             eval_win_rate = float(
                                 fresh_eval_metrics.get("eval/win_rate_vs_value", 0.0)
                             )

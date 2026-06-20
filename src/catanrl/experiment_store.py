@@ -474,7 +474,6 @@ def _apply_xdim_backbone_args(args: argparse.Namespace, backbone: BackboneConfig
     kernel = f"{bb_args.cnn_kernel_size[0]},{bb_args.cnn_kernel_size[1]}"
     _set_arg(args, "xdim_cnn_channels", channels)
     _set_arg(args, "xdim_cnn_kernel_size", kernel)
-    _set_arg(args, "xdim_fusion_hidden_dim", bb_args.fusion_hidden_dim)
     _set_arg(args, "xdim_policy_fusion_hidden_dim", bb_args.fusion_hidden_dim)
 
 
@@ -498,7 +497,6 @@ def apply_experiment_architecture_to_args(args: argparse.Namespace, exp: Experim
 
     _set_arg(args, "backbone_type", backbone_display_type(policy.backbone))
     policy_dims = _hidden_dims_csv(policy.backbone)
-    _set_arg(args, "hidden_dims", policy_dims)
     _set_arg(args, "policy_hidden_dims", policy_dims)
     _apply_xdim_backbone_args(args, policy.backbone)
 
@@ -527,6 +525,19 @@ def apply_experiment_architecture_to_args(args: argparse.Namespace, exp: Experim
             args,
             "critic_hidden_dims",
             ",".join(str(dim) for dim in tc["critic_hidden_dims"]),
+        )
+
+    if isinstance(tc.get("policy_hidden_dims"), list):
+        _set_arg(
+            args,
+            "policy_hidden_dims",
+            ",".join(str(dim) for dim in tc["policy_hidden_dims"]),
+        )
+    elif isinstance(tc.get("hidden_dims"), list):
+        _set_arg(
+            args,
+            "policy_hidden_dims",
+            ",".join(str(dim) for dim in tc["hidden_dims"]),
         )
 
     if "critic_observation_level" in tc:
@@ -565,7 +576,6 @@ def apply_experiment_architecture_to_args(args: argparse.Namespace, exp: Experim
         if isinstance(kernel, list):
             _set_arg(args, "xdim_cnn_kernel_size", ",".join(str(k) for k in kernel))
     for key in (
-        "xdim_fusion_hidden_dim",
         "xdim_policy_fusion_hidden_dim",
         "xdim_critic_fusion_hidden_dim",
     ):
@@ -634,10 +644,9 @@ def add_load_from_experiment_arguments(parser: argparse.ArgumentParser) -> None:
         default=None,
         dest="load_from_experiment",
         help=(
-            "Warm-start from a saved experiment (name under experiments/ or path). "
-            "Checkpoint paths and architecture flags (backbone, hidden dims, map, "
-            "model type, observation levels, etc.) are read from metadata.json; "
-            "matching CLI flags are ignored."
+            "Warm-start weights from a saved experiment (name under experiments/ or path). "
+            "When --config is omitted, architecture is read from the experiment metadata. "
+            "When both are set, the preset must match the source experiment."
         ),
     )
     parser.add_argument(
@@ -652,18 +661,44 @@ def add_load_from_experiment_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _assert_config_matches_experiment_architecture(
+    config_arch: "ArchitecturePreset", exp: Experiment
+) -> None:
+    """Raise when ``--config`` and ``--load-from-experiment`` describe different architectures."""
+    from catanrl.experiments.architecture_config import architecture_train_config_fields
+
+    exp_arch = architecture_preset_from_experiment(exp)
+    if config_arch == exp_arch:
+        return
+
+    config_fields = architecture_train_config_fields(config_arch)
+    exp_fields = architecture_train_config_fields(exp_arch)
+    diffs: list[str] = []
+    for key in sorted(set(config_fields) | set(exp_fields)):
+        config_value = config_fields.get(key)
+        exp_value = exp_fields.get(key)
+        if config_value != exp_value:
+            diffs.append(f"  {key}: preset={config_value!r}, experiment={exp_value!r}")
+    raise ValueError(
+        f"--config architecture does not match --load-from-experiment "
+        f"'{exp.metadata.name}':\n" + "\n".join(diffs)
+    )
+
+
 def prepare_training_warm_start(
     args: argparse.Namespace,
     *,
     require_critic: bool = False,
+    architecture: "ArchitecturePreset | None" = None,
 ) -> Optional[TrainingWarmStart]:
-    """Load a source experiment, inherit architecture args, and resolve checkpoints."""
+    """Load checkpoint paths for warm-start. Architecture comes from --config, not the source experiment."""
     name_or_path = getattr(args, "load_from_experiment", None)
     if not name_or_path:
         return None
     which = getattr(args, "load_from_which", "best")
     exp = load_experiment(name_or_path)
-    apply_experiment_architecture_to_args(args, exp)
+    if architecture is not None:
+        _assert_config_matches_experiment_architecture(architecture, exp)
     checkpoints = resolve_training_checkpoints_from_experiment(
         exp, which, require_critic=require_critic
     )
@@ -675,6 +710,174 @@ def prepare_training_warm_start(
     if checkpoints.critic:
         print(f"  critic: {checkpoints.critic}")
     return TrainingWarmStart(experiment=exp, checkpoints=checkpoints)
+
+
+def architecture_preset_from_experiment(exp: Experiment) -> "ArchitecturePreset":
+    """Build an :class:`ArchitecturePreset` from saved experiment metadata."""
+    from catanrl.experiments.architecture_config import ArchitecturePreset
+
+    meta = exp.metadata
+    tc = meta.train_config
+    policy = exp.policy_spec
+    critic = meta.networks.get("critic")
+    game = meta.game
+
+    policy_dims = tuple(backbone_hidden_dims(policy.backbone))
+    if not policy_dims:
+        raise ValueError(
+            f"Experiment '{meta.name}' has no policy hidden dims in metadata."
+        )
+
+    if critic is not None:
+        critic_dims = tuple(backbone_hidden_dims(critic.backbone))
+    elif isinstance(tc.get("critic_hidden_dims"), list):
+        critic_dims = tuple(int(dim) for dim in tc["critic_hidden_dims"])
+    else:
+        critic_dims = policy_dims
+
+    policy_mode = (
+        policy.observation_level
+        or tc.get("policy_mode")
+        or tc.get("actor_observation_level")
+    )
+    if policy_mode not in ("private", "public", "full"):
+        raise ValueError(
+            f"Experiment '{meta.name}' has no policy observation level in metadata."
+        )
+
+    if critic is not None and critic.observation_level in ("private", "public", "full"):
+        critic_mode = critic.observation_level
+    elif tc.get("critic_mode") in ("private", "public", "full"):
+        critic_mode = tc["critic_mode"]
+    elif tc.get("critic_observation_level") in ("private", "public", "full"):
+        critic_mode = tc["critic_observation_level"]
+    elif policy.kind == KIND_POLICY_VALUE:
+        critic_mode = policy_mode
+    else:
+        raise ValueError(
+            f"Experiment '{meta.name}' has no critic observation level in metadata."
+        )
+
+    network_mode = tc.get("network_mode")
+    if network_mode is None:
+        if policy.kind == KIND_POLICY_VALUE:
+            network_mode = "shared"
+        elif tc.get("critic_mode") in ("shared", "privileged"):
+            network_mode = "shared" if tc["critic_mode"] == "shared" else "separate"
+        elif critic is not None:
+            network_mode = "separate"
+        else:
+            network_mode = "shared"
+
+    model_type = policy.model_type or tc.get("model_type")
+    if model_type not in ("flat", "hierarchical"):
+        raise ValueError(f"Experiment '{meta.name}' has no model_type in metadata.")
+
+    xdim_cnn_channels = (64, 128, 128)
+    xdim_cnn_kernel_size = (3, 5)
+    xdim_policy_fusion_hidden_dim: int | None = None
+    xdim_critic_fusion_hidden_dim: int | None = None
+
+    if isinstance(policy.backbone.args, CrossDimensionalBackboneConfig):
+        bb = policy.backbone.args
+        xdim_cnn_channels = tuple(bb.cnn_channels)
+        xdim_cnn_kernel_size = (bb.cnn_kernel_size[0], bb.cnn_kernel_size[1])
+        xdim_policy_fusion_hidden_dim = bb.fusion_hidden_dim
+
+    if critic is not None and isinstance(critic.backbone.args, CrossDimensionalBackboneConfig):
+        xdim_critic_fusion_hidden_dim = critic.backbone.args.fusion_hidden_dim
+
+    if isinstance(tc.get("xdim_cnn_channels"), list):
+        xdim_cnn_channels = tuple(int(ch) for ch in tc["xdim_cnn_channels"])
+    kernel = tc.get("xdim_cnn_kernel_size")
+    if isinstance(kernel, list) and len(kernel) == 2:
+        xdim_cnn_kernel_size = (int(kernel[0]), int(kernel[1]))
+    if tc.get("xdim_policy_fusion_hidden_dim") is not None:
+        xdim_policy_fusion_hidden_dim = int(tc["xdim_policy_fusion_hidden_dim"])
+    if tc.get("xdim_critic_fusion_hidden_dim") is not None:
+        xdim_critic_fusion_hidden_dim = int(tc["xdim_critic_fusion_hidden_dim"])
+
+    critic_hidden_mode = tc.get("critic_hidden_mode")
+    if critic_hidden_mode is None and tc.get("critic_mode") in ("full", "guessed_dev_cards"):
+        critic_hidden_mode = tc["critic_mode"]
+
+    return ArchitecturePreset(
+        model_type=model_type,
+        backbone_type=backbone_display_type(policy.backbone),
+        policy_hidden_dims=policy_dims,
+        critic_hidden_dims=critic_dims,
+        policy_mode=policy_mode,
+        critic_mode=critic_mode,
+        network_mode=network_mode,
+        xdim_cnn_channels=xdim_cnn_channels,
+        xdim_cnn_kernel_size=xdim_cnn_kernel_size,
+        xdim_policy_fusion_hidden_dim=xdim_policy_fusion_hidden_dim,
+        xdim_critic_fusion_hidden_dim=xdim_critic_fusion_hidden_dim,
+        map_type=game.map_type,
+        vps_to_win=game.vps_to_win or tc.get("vps_to_win") or 15,
+        discard_limit=game.discard_limit or tc.get("discard_limit") or 9,
+        num_players=game.num_players,
+        critic_hidden_mode=critic_hidden_mode,
+    )
+
+
+@dataclass
+class TrainingArchitectureSetup:
+    """Resolved architecture plus optional warm-start checkpoints."""
+
+    arch: "ArchitecturePreset"
+    warm_start: Optional[TrainingWarmStart]
+    architecture_source: str
+
+
+def resolve_training_architecture_and_warm_start(
+    args: argparse.Namespace,
+) -> TrainingArchitectureSetup:
+    """Require ``--config`` and/or ``--load-from-experiment``; resolve architecture and warm-start."""
+    from catanrl.experiments.architecture_config import (
+        load_architecture_preset,
+        validate_architecture_source,
+    )
+
+    config_path = getattr(args, "config", None)
+    load_from = getattr(args, "load_from_experiment", None)
+    validate_architecture_source(config_path, load_from)
+
+    exp: Optional[Experiment] = None
+    which = getattr(args, "load_from_which", "best")
+    if load_from:
+        exp = load_experiment(load_from)
+
+    if config_path:
+        arch = load_architecture_preset(config_path)
+        architecture_source = config_path
+        if exp is not None:
+            _assert_config_matches_experiment_architecture(arch, exp)
+    else:
+        assert exp is not None
+        arch = architecture_preset_from_experiment(exp)
+        architecture_source = f"experiment:{exp.metadata.name}"
+
+    warm_start: Optional[TrainingWarmStart] = None
+    if exp is not None:
+        require_critic = arch.network_mode == "separate"
+        checkpoints = resolve_training_checkpoints_from_experiment(
+            exp, which, require_critic=require_critic
+        )
+        print(
+            f"Warm-start checkpoints from '{checkpoints.experiment_name}' "
+            f"(which={checkpoints.which})"
+        )
+        print(f"  policy: {checkpoints.policy}")
+        if checkpoints.critic:
+            print(f"  critic: {checkpoints.critic}")
+        warm_start = TrainingWarmStart(experiment=exp, checkpoints=checkpoints)
+
+    return TrainingArchitectureSetup(
+        arch=arch,
+        warm_start=warm_start,
+        architecture_source=architecture_source,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -903,7 +1106,10 @@ __all__ = [
     "Experiment",
     "TrainingCheckpoints",
     "TrainingWarmStart",
+    "TrainingArchitectureSetup",
     "load_experiment",
+    "architecture_preset_from_experiment",
+    "resolve_training_architecture_and_warm_start",
     "apply_experiment_architecture_to_args",
     "resolve_training_checkpoints",
     "resolve_training_checkpoints_from_experiment",

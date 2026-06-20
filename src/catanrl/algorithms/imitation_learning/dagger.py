@@ -368,7 +368,7 @@ def _train_on_dataset(
     device: torch.device,
     num_players: int,
     map_type: Literal["BASE", "MINI", "TOURNAMENT"],
-    max_grad_norm: float = 5.0,
+    max_grad_norm: float = 1.0,
     progress_desc: str = "Train",
     *,
     model_type: str = "flat",
@@ -564,15 +564,15 @@ def train(
     save_path: Optional[str] = None,
     device: Optional[str] = None,
     wandb_config: Optional[Dict[str, Any]] = None,
-    eval_games_per_opponent: int = 250,
+    fresh_eval_games_per_opponent: int = 250,
     eval_compare_to_expert: bool = True,
     eval_expert_config: Optional[str] = None,
     eval_every_iterations: int = 1,
-    save_every_iterations: int = 1,
+    save_every_updates: int = 1,
     seed: int = 42,
     num_envs: int = 4,
     reward_function: Literal["shaped", "win"] = "shaped",
-    max_grad_norm: float = 5.0,
+    max_grad_norm: float = 1.0,
 ) -> Tuple[PolicyNetworkWrapper | PolicyValueNetworkWrapper, ValueNetworkWrapper | None]:
     """
     Train separate policy and critic networks with DAgger using vectorized environments.
@@ -612,11 +612,11 @@ def train(
         save_path: Directory to save checkpoints
         device: Torch device ("cuda" or "cpu")
         wandb_config: W&B initialization config
-        eval_games_per_opponent: Number of games to play against each baseline opponent
+        fresh_eval_games_per_opponent: Number of games to play against each baseline opponent
         eval_compare_to_expert: Whether to compute expert-accuracy/F1 during eval
         eval_expert_config: Expert config to use for eval labels (defaults to expert_config)
         eval_every_iterations: Run eval every N DAgger iterations (always evals on final iteration)
-        save_every_iterations: Save periodic checkpoints every N iterations
+        save_every_updates: Save periodic checkpoints every N iterations
         seed: Random seed
         num_envs: Number of parallel environments
         reward_function: Reward function type ("shaped" or "win")
@@ -645,18 +645,18 @@ def train(
 
     if eval_every_iterations < 1:
         raise ValueError("eval_every_iterations must be >= 1")
-    if save_every_iterations < 1:
-        raise ValueError("save_every_iterations must be >= 1")
+    if save_every_updates < 1:
+        raise ValueError("save_every_updates must be >= 1")
 
     update_every_iterations = 1
-    if save_every_iterations % update_every_iterations != 0:
+    if save_every_updates % update_every_iterations != 0:
         raise ValueError(
-            "save_every_iterations must be a multiple of update frequency "
+            "save_every_updates must be a multiple of update frequency "
             f"({update_every_iterations})"
         )
-    if save_every_iterations % eval_every_iterations != 0:
+    if save_every_updates % eval_every_iterations != 0:
         raise ValueError(
-            "save_every_iterations must be a multiple of eval_every_iterations "
+            "save_every_updates must be a multiple of eval_every_iterations "
             f"({eval_every_iterations})"
         )
 
@@ -739,7 +739,7 @@ def train(
     print(f"Parallel environments: {num_envs}")
     print(f"Steps per iteration: {steps_per_iteration}")
     print(f"Eval cadence: every {eval_every_iterations} iteration(s)")
-    print(f"Save cadence: every {save_every_iterations} iteration(s)")
+    print(f"Save cadence: every {save_every_updates} iteration(s)")
 
     policy_backbone_config = build_backbone_config(
         backbone_type=backbone_type,
@@ -938,7 +938,7 @@ def train(
                             model_type=model_type,
                             map_type=map_type,
                             eval_opponent_configs=opponent_configs,
-                            num_games=eval_games_per_opponent,
+                            num_games=fresh_eval_games_per_opponent,
                             gamma=gamma,
                             seed=random.randint(0, sys.maxsize),
                             vps_to_win=vps_to_win,
@@ -1000,7 +1000,7 @@ def train(
                         )
 
                 # Save periodic checkpoints aligned with eval/update cadence.
-                if iteration % save_every_iterations == 0:
+                if iteration % save_every_updates == 0:
                     os.makedirs(save_path, exist_ok=True)
                     if uses_shared_network:
                         torch.save(

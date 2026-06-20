@@ -24,7 +24,7 @@ def parse_args() -> argparse.Namespace:
         default="BASE",
         choices=["BASE", "MINI", "TOURNAMENT"],
     )
-    parser.add_argument("--hidden-dims", type=str, default="512,512")
+    parser.add_argument("--policy-hidden-dims", type=str, default="512,512")
     parser.add_argument("--device", type=str, default="cuda", help="cpu, cuda, or cuda:0 style")
     parser.add_argument(
         "--batch-sizes",

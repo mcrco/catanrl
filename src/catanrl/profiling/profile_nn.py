@@ -107,7 +107,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--map-type", type=str, default="BASE", choices=["BASE", "MINI", "TOURNAMENT"]
     )
-    parser.add_argument("--hidden-dims", type=str, default="512,512")
+    parser.add_argument("--policy-hidden-dims", type=str, default="512,512")
     parser.add_argument("--device", type=str, default="cuda", help="cpu, cuda, or cuda:0 style")
     parser.add_argument(
         "--batch-sizes",
@@ -142,14 +142,14 @@ def main() -> None:
     torch.manual_seed(args.seed)
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
 
-    hidden_dims = parse_int_list(args.hidden_dims)
+    policy_hidden_dims = parse_int_list(args.policy_hidden_dims)
     batch_sizes = parse_int_list(args.batch_sizes)
 
     num_players = len(COLOR_ORDER)
     input_dim = compute_feature_vector_dim(num_players, args.map_type)
     backbone_config = BackboneConfig(
         architecture="mlp",
-        args=MLPBackboneConfig(input_dim=input_dim, hidden_dims=hidden_dims),
+        args=MLPBackboneConfig(input_dim=input_dim, hidden_dims=policy_hidden_dims),
     )
     model = build_hierarchical_policy_value_network(
         backbone_config=backbone_config,
@@ -160,7 +160,7 @@ def main() -> None:
     print("== AlphaZero timing profile ==")
     print(f"Device: {device}")
     print(f"Map: {args.map_type} | Players: {num_players}")
-    print(f"Input dim: {input_dim} | Hidden dims: {hidden_dims}")
+    print(f"Input dim: {input_dim} | Policy hidden dims: {policy_hidden_dims}")
 
     print("\nModel forward (hierarchical wrapper):")
     forward_stats = bench_model_forward(
