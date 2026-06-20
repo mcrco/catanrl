@@ -182,7 +182,6 @@ def build_self_play_players(
     num_simulations: int,
     c_puct: float,
     prunning: bool,
-    critic_mode: str,
     actor_observation_level: ActorObservationLevel,
     critic_observation_level: CriticObservationLevel,
     ismcts_determinizations: int = 1,
@@ -204,7 +203,6 @@ def build_self_play_players(
             c_puct=c_puct,
             prunning=prunning,
             opponent_policy="self",
-            critic_mode=critic_mode,
             actor_observation_level=actor_observation_level,
             critic_observation_level=critic_observation_level,
             num_search_workers=num_search_workers,
@@ -375,7 +373,6 @@ def _self_play_worker_main(
             num_simulations=int(args_dict["num_simulations"]),
             c_puct=float(args_dict["c_puct"]),
             prunning=bool(args_dict["prunning"]),
-            critic_mode=str(args_dict["critic_mode"]),
             actor_observation_level=args_dict["actor_observation_level"],
             critic_observation_level=args_dict["critic_observation_level"],
             ismcts_determinizations=int(args_dict["ismcts_determinizations"]),
@@ -428,7 +425,6 @@ def run_parallel_self_play_eval(
     virtual_loss: float,
     c_puct: float,
     prunning: bool,
-    critic_mode: str,
     actor_observation_level: ActorObservationLevel,
     critic_observation_level: CriticObservationLevel,
     num_game_workers: int,
@@ -470,7 +466,6 @@ def run_parallel_self_play_eval(
         "virtual_loss": virtual_loss,
         "c_puct": c_puct,
         "prunning": prunning,
-        "critic_mode": critic_mode,
         "actor_observation_level": actor_observation_level,
         "critic_observation_level": critic_observation_level,
         "ismcts_determinizations": ismcts_determinizations,
@@ -704,16 +699,6 @@ def main():
         help="Enable catanatron action prunning heuristics",
     )
     parser.add_argument(
-        "--critic-mode",
-        type=str,
-        default="full",
-        choices=["full", "guess"],
-        help=(
-            "Critic observation mode. 'full' uses privileged critic features; "
-            "'guess' samples hidden opponent dev cards before scoring."
-        ),
-    )
-    parser.add_argument(
         "--num-games",
         type=int,
         default=100,
@@ -832,7 +817,6 @@ def main():
     print(f"Critic hidden dims: {args.critic_hidden_dims}")
     print(f"Policy weights: {args.policy_weights}")
     print(f"Critic weights: {args.critic_weights}")
-    print(f"Critic mode: {args.critic_mode}")
     print(f"MCTS simulations: {args.num_simulations} | c_puct: {args.c_puct}")
     print(f"IS-MCTS determinizations: {args.ismcts_determinizations}")
     print(
@@ -907,7 +891,6 @@ def main():
             num_simulations=args.num_simulations,
             c_puct=args.c_puct,
             prunning=args.prunning,
-            critic_mode=args.critic_mode,
             actor_observation_level=args.actor_observation_level,
             critic_observation_level=args.critic_observation_level,
             ismcts_determinizations=args.ismcts_determinizations,
@@ -943,7 +926,6 @@ def main():
             virtual_loss=args.virtual_loss,
             c_puct=args.c_puct,
             prunning=args.prunning,
-            critic_mode=args.critic_mode,
             actor_observation_level=args.actor_observation_level,
             critic_observation_level=args.critic_observation_level,
             ismcts_determinizations=args.ismcts_determinizations,

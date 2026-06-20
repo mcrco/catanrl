@@ -533,10 +533,6 @@ def apply_experiment_architecture_to_args(args: argparse.Namespace, exp: Experim
         _set_arg(args, "critic_observation_level", tc["critic_observation_level"])
     if "critic_mode" in tc and tc["critic_mode"] in ("private", "public", "full"):
         _set_arg(args, "critic_mode", tc["critic_mode"])
-    if "critic_hidden_mode" in tc:
-        _set_arg(args, "critic_hidden_mode", tc["critic_hidden_mode"])
-    elif "critic_mode" in tc and tc["critic_mode"] in ("full", "guessed_dev_cards"):
-        _set_arg(args, "critic_hidden_mode", tc["critic_mode"])
     if "network_mode" in tc:
         _set_arg(args, "network_mode", tc["network_mode"])
     elif "critic_mode" in tc and tc["critic_mode"] in ("shared", "privileged"):

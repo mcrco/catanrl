@@ -39,7 +39,6 @@ class AlphaZeroConfig:
     map_type: str = "BASE"
     actor_observation_level: ActorObservationLevel = "private"
     critic_observation_level: CriticObservationLevel = "full"
-    critic_hidden_mode: str = "full"
     network_mode: str = "separate"
     model_type: str = "flat"
     vps_to_win: int = 10
@@ -154,7 +153,6 @@ class AlphaZeroTrainer:
             num_simulations=self.config.simulations,
             c_puct=self.config.c_puct,
             prunning=self.config.prunning,
-            critic_mode=self.config.critic_hidden_mode,
             actor_observation_level=self.config.actor_observation_level,
             critic_observation_level=self.config.critic_observation_level,
             ismcts_determinizations=self.config.ismcts_determinizations,
@@ -287,7 +285,6 @@ class AlphaZeroTrainer:
             num_simulations=self.config.simulations,
             c_puct=self.config.c_puct,
             prunning=self.config.prunning,
-            critic_mode=self.config.critic_hidden_mode,
             actor_observation_level=self.config.actor_observation_level,
             critic_observation_level=self.config.critic_observation_level,
             ismcts_determinizations=self.config.ismcts_determinizations,

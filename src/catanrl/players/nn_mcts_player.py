@@ -24,12 +24,11 @@ from catanatron.players.value import ValueFunctionPlayer
 from catanatron.players.weighted_random import WeightedRandomPlayer
 
 from catanrl.beliefs.dev_card_belief import DevCardBelief
-from catanrl.beliefs.determinize import patch_full_features
+from catanrl.beliefs.determinize import determinize_game
 from catanrl.features.catanatron_utils import (
     ActorObservationLevel,
     CriticObservationLevel,
     full_game_to_features,
-    get_full_numeric_feature_names,
     get_observation_indices_from_full,
 )
 from catanrl.models import PolicyNetworkWrapper, PolicyValueNetworkWrapper, ValueNetworkWrapper
@@ -37,12 +36,6 @@ from catanrl.models.inference_utils import forward_policy_value
 from catanrl.utils.catanatron_action_space import get_action_space_size, to_action_space
 
 EPSILON = 1e-8
-CRITIC_MODE_ALIASES = {
-    "full": "full",
-    "guess": "guessed_dev_cards",
-    "guessed": "guessed_dev_cards",
-    "guessed_dev_cards": "guessed_dev_cards",
-}
 
 # Populated in the parent immediately before fork-based within-tree workers start.
 _FORK_SEARCH_CTX: dict[str, object] = {}
@@ -433,7 +426,6 @@ class NNMCTSPlayer(Player):
         prunning: bool = False,
         opponent_policy: str = "self",
         opponent_factory: Callable[[Color], Player] | None = None,
-        critic_mode: Literal["full", "guessed_dev_cards"] = "full",
         actor_observation_level: ActorObservationLevel = "private",
         critic_observation_level: CriticObservationLevel = "full",
         num_search_workers: int = 1,
@@ -457,7 +449,6 @@ class NNMCTSPlayer(Player):
         self.prunning = bool(prunning)
         self.opponent_policy = opponent_policy.lower()
         self.opponent_factory = opponent_factory
-        self.critic_mode = self._normalize_critic_mode(critic_mode)
         self.actor_observation_level = actor_observation_level
         self.critic_observation_level = critic_observation_level
         self.num_search_workers = max(1, int(num_search_workers))
@@ -483,7 +474,6 @@ class NNMCTSPlayer(Player):
                 f"'{actor_observation_level}')."
             )
         self._opponents_by_color: dict[Color, Player] = {}
-        self._critic_index_cache: dict[int, dict[str, int]] = {}
         self._observation_index_cache: dict[tuple[int, str], np.ndarray] = {}
 
         if self.opponent_factory is None and self.opponent_policy != "self":
@@ -979,14 +969,6 @@ class NNMCTSPlayer(Player):
             "sameturnalphabeta, mcts, playouts."
         )
 
-    @staticmethod
-    def _normalize_critic_mode(critic_mode: str) -> str:
-        normalized = CRITIC_MODE_ALIASES.get(critic_mode.lower())
-        if normalized is None:
-            valid_modes = ", ".join(sorted(CRITIC_MODE_ALIASES))
-            raise ValueError(f"Unknown critic_mode '{critic_mode}'. Use one of: {valid_modes}.")
-        return normalized
-
     def _select(self, node: _Node) -> _Node:
         lock = self._tree_process_lock
         if lock is not None:
@@ -1063,19 +1045,11 @@ class NNMCTSPlayer(Player):
         )
         # Evaluate the position from the mover's (to_play) perspective so the
         # returned value is correctly oriented for N-player backprop.
-        if self.critic_mode == "full":
-            critic_features = self._observation_features(
-                game,
-                current_color,
-                self.critic_observation_level,
-            )
-        else:
-            full_guess = self._guessed_dev_cards_features(game, current_color)
-            critic_features = self._select_observation_features(
-                full_guess,
-                len(game.state.colors),
-                self.critic_observation_level,
-            )
+        critic_features = self._observation_features(
+            game,
+            current_color,
+            self.critic_observation_level,
+        )
         return inference_backend.evaluate_leaf(actor_features, critic_features)
 
     def _observation_features(
@@ -1101,42 +1075,6 @@ class NNMCTSPlayer(Player):
     ) -> np.ndarray:
         indices = self._get_observation_indices(num_players, level)
         return full_features[indices].astype(np.float32, copy=False)
-
-    def _guessed_dev_cards_features(self, game, base_color: Color | None = None) -> np.ndarray:
-        """Full-info features with opponents' dev hands replaced by a belief sample.
-
-        Draws a single determinization of the opponents' hidden dev cards from
-        ``DevCardBelief`` (multivariate-hypergeometric over the unseen pool) and
-        patches it into the full feature vector. This hides the opponents' exact
-        dev-card types from the critic while keeping everything else perfect-info.
-        """
-        base_color = base_color if base_color is not None else self.color
-        num_players = len(game.state.colors)
-        base_full = full_game_to_features(
-            game,
-            num_players,
-            self.map_type,
-            base_color=base_color,
-        )
-        belief = DevCardBelief(game, base_color)
-        hypothesis = belief.sample_hypotheses(1, random)[0]
-        numeric_name_to_index = self._get_full_numeric_index(num_players)
-        return patch_full_features(
-            base_full,
-            hypothesis,
-            base_color=base_color,
-            colors=tuple(game.state.colors),
-            numeric_name_to_index=numeric_name_to_index,
-        )
-
-    def _get_full_numeric_index(self, num_players: int) -> dict[str, int]:
-        index = self._critic_index_cache.get(num_players)
-        if index is not None:
-            return index
-        numeric_names = get_full_numeric_feature_names(num_players, self.map_type)
-        index = {name: idx for idx, name in enumerate(numeric_names)}
-        self._critic_index_cache[num_players] = index
-        return index
 
     def _get_observation_indices(
         self,
@@ -1166,16 +1104,6 @@ class NNMCTSPlayer(Player):
 
     def __repr__(self) -> str:
         return super().__repr__().replace("Player", "NNMCTSPlayer")
-
-
-class NNMCTSGuessedDevCardsPlayer(NNMCTSPlayer):
-    """
-    NNMCTS player that hides exact opponent dev-card types from the critic.
-    """
-
-    def __init__(self, *args, **kwargs):
-        kwargs.setdefault("critic_mode", "guessed_dev_cards")
-        super().__init__(*args, **kwargs)
 
 
 class NNMCTSInformationSetPlayer(NNMCTSPlayer):

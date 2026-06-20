@@ -149,13 +149,6 @@ def parse_args() -> argparse.Namespace:
         critic_mode_default="full",
         network_mode_default="separate",
     )
-    parser.add_argument(
-        "--critic-hidden-mode",
-        type=str,
-        default="full",
-        choices=["full", "guessed_dev_cards"],
-        help="How the MCTS value net encodes hidden dev-card information.",
-    )
     parser.add_argument("--vps-to-win", type=int, default=10, help="Victory points to win the game")
     parser.add_argument("--simulations", type=int, default=64, help="MCTS simulations per move")
     parser.add_argument(
@@ -334,7 +327,6 @@ def build_train_config(
         "critic_mode": config.critic_observation_level,
         "actor_observation_level": config.actor_observation_level,
         "critic_observation_level": config.critic_observation_level,
-        "critic_hidden_mode": config.critic_hidden_mode,
         "network_mode": config.network_mode,
         "vps_to_win": config.vps_to_win,
         "discard_limit": config.discard_limit,
@@ -586,7 +578,6 @@ def main() -> None:
         map_type=args.map_type,
         actor_observation_level=args.actor_observation_level,
         critic_observation_level=args.critic_observation_level,
-        critic_hidden_mode=args.critic_hidden_mode,
         network_mode=args.network_mode,
         model_type=args.model_type,
         vps_to_win=args.vps_to_win,

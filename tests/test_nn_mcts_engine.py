@@ -10,7 +10,6 @@ from catanatron.game import Game
 from catanatron.models.player import RandomPlayer
 
 from catanrl.algorithms.alphazero.parallel_self_play import generate_self_play_data
-from catanrl.algorithms.alphazero.trainer import AlphaZeroConfig, AlphaZeroTrainer
 from catanrl.features.catanatron_utils import COLOR_ORDER
 from catanrl.players import NNMCTSPlayer
 from catanrl.players.nn_mcts_player import _Node
@@ -126,7 +125,6 @@ def test_generate_self_play_data_smoke():
         num_simulations=2,
         c_puct=1.5,
         prunning=False,
-        critic_mode="full",
         actor_observation_level="private",
         critic_observation_level="full",
         ismcts_determinizations=1,
@@ -152,21 +150,3 @@ def test_generate_self_play_data_smoke():
     assert sample.value in (-1.0, 0.0, 1.0)
     assert sample.actor_state.ndim == 1
     assert sample.critic_state.ndim == 1
-
-
-def test_alphazero_trainer_maps_critic_hidden_mode_to_mcts_critic_mode():
-    """AlphaZeroConfig.critic_hidden_mode must reach NNMCTSPlayer as critic_mode."""
-    policy_model, critic_model = build_fake_torch_models(NUM_PLAYERS, MAP_TYPE)
-    config = AlphaZeroConfig(
-        num_players=NUM_PLAYERS,
-        map_type=MAP_TYPE,
-        critic_hidden_mode="guessed_dev_cards",
-        simulations=2,
-    )
-    trainer = AlphaZeroTrainer(
-        config=config,
-        policy_model=policy_model,
-        critic_model=critic_model,
-    )
-    player = trainer._build_agent_player(COLOR_ORDER[0])
-    assert player.critic_mode == "guessed_dev_cards"

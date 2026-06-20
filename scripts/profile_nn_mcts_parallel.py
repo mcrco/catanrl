@@ -262,7 +262,6 @@ def make_player(
         c_puct=args.c_puct,
         prunning=args.prunning,
         opponent_policy=args.adversarial_policy,
-        critic_mode=args.critic_mode,
         actor_observation_level=args.actor_observation_level,
         critic_observation_level=args.critic_observation_level,
         num_search_workers=num_search_workers,
@@ -283,7 +282,6 @@ def _args_dict(args: argparse.Namespace) -> dict:
         "c_puct": args.c_puct,
         "prunning": args.prunning,
         "adversarial_policy": args.adversarial_policy,
-        "critic_mode": args.critic_mode,
         "actor_observation_level": args.actor_observation_level,
         "critic_observation_level": args.critic_observation_level,
         "inference_batch_size": args.inference_batch_size,
@@ -388,7 +386,6 @@ def _within_tree_coordinator_main(
             c_puct=float(args_dict["c_puct"]),
             prunning=bool(args_dict["prunning"]),
             opponent_policy=str(args_dict["adversarial_policy"]),
-            critic_mode=str(args_dict["critic_mode"]),
             actor_observation_level=args_dict["actor_observation_level"],
             critic_observation_level=args_dict["critic_observation_level"],
             num_search_workers=num_search_workers,
@@ -720,7 +717,6 @@ def _across_games_worker_main(
             c_puct=float(args_dict["c_puct"]),
             prunning=bool(args_dict["prunning"]),
             opponent_policy=str(args_dict["adversarial_policy"]),
-            critic_mode=str(args_dict["critic_mode"]),
             actor_observation_level=args_dict["actor_observation_level"],
             critic_observation_level=args_dict["critic_observation_level"],
             num_search_workers=1,
@@ -915,7 +911,6 @@ def parse_args() -> argparse.Namespace:
         ],
         default="self",
     )
-    parser.add_argument("--critic-mode", choices=["full", "guess"], default="full")
     parser.add_argument("--vps-to-win", type=int, default=10)
     parser.add_argument("--discard-limit", type=int, default=9)
     parser.add_argument("--seed", type=int, default=1234)
