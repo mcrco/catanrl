@@ -8,7 +8,7 @@ import threading
 import time
 from collections import defaultdict
 from concurrent.futures import Future
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable, Literal, Sequence, Tuple
 
 import numpy as np
@@ -442,6 +442,8 @@ class NNMCTSPlayer(Player):
         virtual_loss: float = 1.0,
         dirichlet_alpha: float = 0.3,
         dirichlet_frac: float = 0.25,
+        ismcts: bool = False,
+        num_determinizations: int = 8,
         device: str | torch.device | None = None,
         inference_backend: _NNMCTSInferenceBackend | None = None,
         **kwargs,
@@ -468,6 +470,11 @@ class NNMCTSPlayer(Player):
         # decide() ignores them).
         self.dirichlet_alpha = float(dirichlet_alpha)
         self.dirichlet_frac = float(dirichlet_frac)
+        # Information-Set MCTS via determinization (PIMC): run an independent
+        # search per sampled/enumerated determinization of opponents' hidden dev
+        # cards and aggregate root visit counts weighted by belief probability.
+        self.ismcts = bool(ismcts)
+        self.num_determinizations = max(1, int(num_determinizations))
         self._opponents_by_color: dict[Color, Player] = {}
         self._critic_index_cache: dict[int, dict[str, int]] = {}
         self._observation_index_cache: dict[tuple[int, str], np.ndarray] = {}
@@ -505,6 +512,20 @@ class NNMCTSPlayer(Player):
         if len(playable_actions) == 1:
             return playable_actions[0]
 
+        num_players = len(game.state.colors)
+        game_colors = tuple(game.state.colors)
+
+        if self.ismcts:
+            agg_visits = self._ismcts_aggregate_visits(game, add_noise=False)
+            indices = [
+                to_action_space(action, num_players, self.map_type, game_colors)
+                for action in playable_actions
+            ]
+            playable_visits = agg_visits[indices]
+            if playable_visits.sum() <= 0:
+                return playable_actions[0]
+            return playable_actions[int(playable_visits.argmax())]
+
         root = self._search_root(game, add_noise=False)
         if not root.children:
             return playable_actions[0]
@@ -514,7 +535,7 @@ class NNMCTSPlayer(Player):
             key=lambda action: sum(child.visits for child, _ in root.children[action]),
         )
         return self._resolve_root_action(
-            best_action, playable_actions, len(game.state.colors), tuple(game.state.colors)
+            best_action, playable_actions, num_players, game_colors
         )
 
     def _search_root(self, game, add_noise: bool = False) -> _Node:
@@ -544,6 +565,105 @@ class NNMCTSPlayer(Player):
         for action, noise_val in zip(actions, noise):
             priors[action] = priors[action] * (1.0 - frac) + float(noise_val) * frac
 
+    def _determinizations(self, game) -> list[tuple[Game, float]]:
+        """Belief-weighted determinizations of opponents' hidden dev cards.
+
+        The belief is taken from the current mover's perspective (the player about
+        to act). In 1v1 the belief is enumerated exactly and (optionally)
+        subsampled to ``num_determinizations``; otherwise it is sampled.
+        """
+        perspective = game.state.current_color()
+        belief = DevCardBelief(game, perspective)
+        if belief.num_players == 2:
+            hypotheses = belief.enumerate_hypotheses()
+            if len(hypotheses) > self.num_determinizations:
+                hypotheses = self._subsample_hypotheses(
+                    hypotheses, self.num_determinizations
+                )
+        else:
+            hypotheses = belief.sample_hypotheses(self.num_determinizations, random)
+        return [
+            (determinize_game(belief, hyp, rng=random), hyp.weight)
+            for hyp in hypotheses
+        ]
+
+    @staticmethod
+    def _subsample_hypotheses(hypotheses, k: int):
+        """Sample ``k`` hypotheses without replacement by weight and renormalize."""
+        weights = np.array([h.weight for h in hypotheses], dtype=np.float64)
+        weights = weights / weights.sum()
+        chosen_idx = np.random.choice(
+            len(hypotheses), size=k, replace=False, p=weights
+        )
+        chosen = [hypotheses[i] for i in chosen_idx]
+        total = sum(hypotheses[i].weight for i in chosen_idx)
+        if total <= 0:
+            total = 1.0
+        return [replace(h, weight=h.weight / total) for h in chosen]
+
+    def _ismcts_aggregate_visits(self, game, add_noise: bool) -> np.ndarray:
+        """Run one search per determinization and aggregate belief-weighted visits.
+
+        Returns visit counts over the flat action space (indexed by
+        ``to_action_space``), summed across determinizations and weighted by each
+        determinization's belief probability.
+        """
+        num_players = len(game.state.colors)
+        game_colors = tuple(game.state.colors)
+        action_space_size = get_action_space_size(num_players, self.map_type)
+        aggregate = np.zeros(action_space_size, dtype=np.float64)
+
+        for det_game, weight in self._determinizations(game):
+            root = self._search_root(det_game, add_noise=add_noise)
+            if not root.children:
+                continue
+            for action, kids in root.children.items():
+                idx = to_action_space(action, num_players, self.map_type, game_colors)
+                aggregate[idx] += weight * sum(child.visits for child, _ in kids)
+        return aggregate
+
+    def _ismcts_search_policy(
+        self,
+        game,
+        temperature: float,
+        add_noise: bool,
+        playable_actions: list,
+    ) -> Tuple[np.ndarray, object]:
+        num_players = len(game.state.colors)
+        game_colors = tuple(game.state.colors)
+        action_space_size = get_action_space_size(num_players, self.map_type)
+        policy = np.zeros(action_space_size, dtype=np.float32)
+
+        aggregate = self._ismcts_aggregate_visits(game, add_noise=add_noise)
+        indices = [
+            to_action_space(action, num_players, self.map_type, game_colors)
+            for action in playable_actions
+        ]
+        visits = aggregate[indices].astype(np.float64)
+
+        if visits.sum() <= 0:
+            uniform = 1.0 / len(playable_actions)
+            for idx in indices:
+                policy[idx] = uniform
+            return policy, random.choice(playable_actions)
+
+        if temperature <= 1e-3:
+            best = int(visits.argmax())
+            policy[indices[best]] = 1.0
+            return policy, playable_actions[best]
+
+        adjusted = visits ** (1.0 / temperature)
+        total = adjusted.sum()
+        adjusted = (
+            adjusted / total
+            if total > 0
+            else np.ones_like(adjusted) / len(adjusted)
+        )
+        for idx, prob in zip(indices, adjusted):
+            policy[idx] = prob
+        chosen = playable_actions[int(np.random.choice(len(playable_actions), p=adjusted))]
+        return policy, chosen
+
     def run_search_policy(
         self,
         game,
@@ -562,6 +682,11 @@ class NNMCTSPlayer(Player):
             only = playable_actions[0]
             policy[to_action_space(only, num_players, self.map_type, game_colors)] = 1.0
             return policy, only
+
+        if self.ismcts:
+            return self._ismcts_search_policy(
+                game, temperature, add_noise, playable_actions
+            )
 
         root = self._search_root(game, add_noise=add_noise)
         if not root.children:
@@ -1043,5 +1168,16 @@ class NNMCTSGuessedDevCardsPlayer(NNMCTSPlayer):
 
     def __init__(self, *args, **kwargs):
         kwargs.setdefault("critic_mode", "guessed_dev_cards")
+        super().__init__(*args, **kwargs)
+
+
+class NNMCTSInformationSetPlayer(NNMCTSPlayer):
+    """
+    NNMCTS player that runs Information-Set MCTS (PIMC) over the belief about
+    opponents' hidden development cards instead of searching the true state.
+    """
+
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("ismcts", True)
         super().__init__(*args, **kwargs)
 
