@@ -185,6 +185,7 @@ def build_self_play_players(
     critic_mode: str,
     actor_observation_level: ActorObservationLevel,
     critic_observation_level: CriticObservationLevel,
+    ismcts_determinizations: int = 1,
     num_search_workers: int = 1,
     inference_batch_size: int = 32,
     inference_wait_ms: float = 1.0,
@@ -199,6 +200,7 @@ def build_self_play_players(
             critic_model=critic_model,
             map_type=map_type,
             num_simulations=num_simulations,
+            ismcts_determinizations=ismcts_determinizations,
             c_puct=c_puct,
             prunning=prunning,
             opponent_policy="self",
@@ -376,6 +378,7 @@ def _self_play_worker_main(
             critic_mode=str(args_dict["critic_mode"]),
             actor_observation_level=args_dict["actor_observation_level"],
             critic_observation_level=args_dict["critic_observation_level"],
+            ismcts_determinizations=int(args_dict["ismcts_determinizations"]),
             num_search_workers=int(args_dict["num_search_workers"]),
             inference_batch_size=int(args_dict["inference_batch_size"]),
             inference_wait_ms=float(args_dict["inference_wait_ms"]),
@@ -430,6 +433,7 @@ def run_parallel_self_play_eval(
     critic_observation_level: CriticObservationLevel,
     num_game_workers: int,
     device: torch.device,
+    ismcts_determinizations: int = 1,
     show_tqdm: bool = True,
 ) -> tuple[dict[Color, PlayerStats], list[int]]:
     if num_games <= 0:
@@ -469,6 +473,7 @@ def run_parallel_self_play_eval(
         "critic_mode": critic_mode,
         "actor_observation_level": actor_observation_level,
         "critic_observation_level": critic_observation_level,
+        "ismcts_determinizations": ismcts_determinizations,
         "seed": seed,
         "vps_to_win": vps_to_win,
         "discard_limit": discard_limit,
@@ -649,6 +654,18 @@ def main():
         help="MCTS simulations per move",
     )
     parser.add_argument(
+        "--ismcts-determinizations",
+        "--is-mcts-determinizations",
+        dest="ismcts_determinizations",
+        type=int,
+        default=1,
+        help=(
+            "Information-Set MCTS: number of belief determinizations of opponents' "
+            "hidden dev cards searched per move. 1 disables IS-MCTS (plain search); "
+            ">1 requires --actor-observation-level full."
+        ),
+    )
+    parser.add_argument(
         "--num-search-workers",
         type=int,
         default=1,
@@ -817,6 +834,7 @@ def main():
     print(f"Critic weights: {args.critic_weights}")
     print(f"Critic mode: {args.critic_mode}")
     print(f"MCTS simulations: {args.num_simulations} | c_puct: {args.c_puct}")
+    print(f"IS-MCTS determinizations: {args.ismcts_determinizations}")
     print(
         "MCTS workers: "
         f"{args.num_search_workers} | inference batch: {args.inference_batch_size} "
@@ -871,6 +889,13 @@ def main():
         print(f"Loaded policy weights from {args.policy_weights}")
         print(f"Loaded critic weights from {args.critic_weights}")
 
+    if args.ismcts_determinizations > 1 and args.actor_observation_level != "full":
+        parser.error(
+            "Information-Set MCTS (--ismcts-determinizations > 1) requires a "
+            f"full-information policy, but actor observation level is "
+            f"'{args.actor_observation_level}'."
+        )
+
     print(f"\nRunning {args.num_games} self-play games...")
     if args.num_game_workers <= 1:
         players = build_self_play_players(
@@ -885,6 +910,7 @@ def main():
             critic_mode=args.critic_mode,
             actor_observation_level=args.actor_observation_level,
             critic_observation_level=args.critic_observation_level,
+            ismcts_determinizations=args.ismcts_determinizations,
             num_search_workers=args.num_search_workers,
             inference_batch_size=args.inference_batch_size,
             inference_wait_ms=args.inference_wait_ms,
@@ -920,6 +946,7 @@ def main():
             critic_mode=args.critic_mode,
             actor_observation_level=args.actor_observation_level,
             critic_observation_level=args.critic_observation_level,
+            ismcts_determinizations=args.ismcts_determinizations,
             num_game_workers=args.num_game_workers,
             device=device,
             show_tqdm=True,

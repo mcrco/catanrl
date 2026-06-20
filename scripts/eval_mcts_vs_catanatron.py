@@ -290,6 +290,18 @@ def main():
         help="MCTS simulations per move",
     )
     parser.add_argument(
+        "--ismcts-determinizations",
+        "--is-mcts-determinizations",
+        dest="ismcts_determinizations",
+        type=int,
+        default=1,
+        help=(
+            "Information-Set MCTS: number of belief determinizations of opponents' "
+            "hidden dev cards searched per move. 1 disables IS-MCTS (plain search); "
+            ">1 requires --actor-observation-level full."
+        ),
+    )
+    parser.add_argument(
         "--num-search-workers",
         type=int,
         default=1,
@@ -469,6 +481,7 @@ def main():
     print(f"Critic weights: {args.critic_weights}")
     print(f"Critic mode: {args.critic_mode}")
     print(f"MCTS simulations: {args.num_simulations} | c_puct: {args.c_puct}")
+    print(f"IS-MCTS determinizations: {args.ismcts_determinizations}")
     print(
         "MCTS workers: "
         f"{args.num_search_workers} | inference batch: {args.inference_batch_size} "
@@ -522,6 +535,13 @@ def main():
         print(f"Loaded policy weights from {args.policy_weights}")
         print(f"Loaded critic weights from {args.critic_weights}")
 
+    if args.ismcts_determinizations > 1 and args.actor_observation_level != "full":
+        parser.error(
+            "Information-Set MCTS (--ismcts-determinizations > 1) requires a "
+            f"full-information policy, but actor observation level is "
+            f"'{args.actor_observation_level}'."
+        )
+
     nn_mcts_player = NNMCTSPlayer(
         color=COLOR_ORDER[0],
         model_type=args.model_type,
@@ -529,6 +549,7 @@ def main():
         critic_model=critic_model,
         map_type=args.map_type,
         num_simulations=args.num_simulations,
+        ismcts_determinizations=args.ismcts_determinizations,
         c_puct=args.c_puct,
         prunning=args.prunning,
         opponent_policy=args.adversarial_policy,

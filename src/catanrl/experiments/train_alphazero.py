@@ -158,6 +158,18 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--vps-to-win", type=int, default=10, help="Victory points to win the game")
     parser.add_argument("--simulations", type=int, default=64, help="MCTS simulations per move")
+    parser.add_argument(
+        "--ismcts-determinizations",
+        "--is-mcts-determinizations",
+        dest="ismcts_determinizations",
+        type=int,
+        default=1,
+        help=(
+            "Information-Set MCTS: number of belief determinizations of opponents' "
+            "hidden dev cards searched per move. 1 disables IS-MCTS (plain search); "
+            ">1 requires --policy-mode full."
+        ),
+    )
     parser.add_argument("--c-puct", type=float, default=1.5, help="PUCT exploration constant")
     parser.add_argument(
         "--temperature", type=float, default=1.0, help="Sampling temperature for early moves"
@@ -327,6 +339,7 @@ def build_train_config(
         "vps_to_win": config.vps_to_win,
         "discard_limit": config.discard_limit,
         "simulations": config.simulations,
+        "ismcts_determinizations": config.ismcts_determinizations,
         "c_puct": config.c_puct,
         "prunning": config.prunning,
         "temperature": config.temperature,
@@ -533,6 +546,13 @@ def main() -> None:
 
     resolve_observation_network_args(args)
 
+    if args.ismcts_determinizations > 1 and args.actor_observation_level != "full":
+        raise SystemExit(
+            "Information-Set MCTS (--ismcts-determinizations > 1) requires "
+            "--policy-mode full: it samples a full belief state, so privatizing the "
+            f"policy input again is inconsistent (got '{args.actor_observation_level}')."
+        )
+
     require_critic = args.network_mode == "separate"
     try:
         warm_start = prepare_training_warm_start(args, require_critic=require_critic)
@@ -572,6 +592,7 @@ def main() -> None:
         vps_to_win=args.vps_to_win,
         discard_limit=args.discard_limit,
         simulations=args.simulations,
+        ismcts_determinizations=args.ismcts_determinizations,
         c_puct=args.c_puct,
         prunning=args.prunning,
         temperature=args.temperature,

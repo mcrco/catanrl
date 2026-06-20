@@ -442,8 +442,7 @@ class NNMCTSPlayer(Player):
         virtual_loss: float = 1.0,
         dirichlet_alpha: float = 0.3,
         dirichlet_frac: float = 0.25,
-        ismcts: bool = False,
-        num_determinizations: int = 8,
+        ismcts_determinizations: int = 1,
         device: str | torch.device | None = None,
         inference_backend: _NNMCTSInferenceBackend | None = None,
         **kwargs,
@@ -473,8 +472,16 @@ class NNMCTSPlayer(Player):
         # Information-Set MCTS via determinization (PIMC): run an independent
         # search per sampled/enumerated determinization of opponents' hidden dev
         # cards and aggregate root visit counts weighted by belief probability.
-        self.ismcts = bool(ismcts)
-        self.num_determinizations = max(1, int(num_determinizations))
+        # A single determinization (the default) means plain perfect-info search.
+        self.ismcts_determinizations = max(1, int(ismcts_determinizations))
+        self.ismcts = self.ismcts_determinizations > 1
+        if self.ismcts and actor_observation_level != "full":
+            raise ValueError(
+                "Information-Set MCTS (ismcts_determinizations > 1) requires "
+                "actor_observation_level='full': it samples a full belief state, so "
+                f"privatizing the policy input again is inconsistent (got "
+                f"'{actor_observation_level}')."
+            )
         self._opponents_by_color: dict[Color, Player] = {}
         self._critic_index_cache: dict[int, dict[str, int]] = {}
         self._observation_index_cache: dict[tuple[int, str], np.ndarray] = {}
@@ -576,12 +583,12 @@ class NNMCTSPlayer(Player):
         belief = DevCardBelief(game, perspective)
         if belief.num_players == 2:
             hypotheses = belief.enumerate_hypotheses()
-            if len(hypotheses) > self.num_determinizations:
+            if len(hypotheses) > self.ismcts_determinizations:
                 hypotheses = self._subsample_hypotheses(
-                    hypotheses, self.num_determinizations
+                    hypotheses, self.ismcts_determinizations
                 )
         else:
-            hypotheses = belief.sample_hypotheses(self.num_determinizations, random)
+            hypotheses = belief.sample_hypotheses(self.ismcts_determinizations, random)
         return [
             (determinize_game(belief, hyp, rng=random), hyp.weight)
             for hyp in hypotheses
@@ -1175,9 +1182,12 @@ class NNMCTSInformationSetPlayer(NNMCTSPlayer):
     """
     NNMCTS player that runs Information-Set MCTS (PIMC) over the belief about
     opponents' hidden development cards instead of searching the true state.
+
+    Defaults to a full-information policy, as required by IS-MCTS.
     """
 
     def __init__(self, *args, **kwargs):
-        kwargs.setdefault("ismcts", True)
+        kwargs.setdefault("ismcts_determinizations", 8)
+        kwargs.setdefault("actor_observation_level", "full")
         super().__init__(*args, **kwargs)
 
