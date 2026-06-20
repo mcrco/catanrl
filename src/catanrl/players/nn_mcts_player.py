@@ -6,17 +6,14 @@ import queue
 import random
 import threading
 import time
-from collections import Counter, defaultdict
+from collections import defaultdict
 from concurrent.futures import Future
 from dataclasses import dataclass, field
 from typing import Callable, Literal, Sequence, Tuple
 
 import numpy as np
 import torch
-from catanatron.features import create_sample
 from catanatron.game import Game
-from catanatron.models.decks import starting_devcard_bank
-from catanatron.models.enums import DEVELOPMENT_CARDS
 from catanatron.models.player import Color, Player, RandomPlayer
 from catanatron.players.mcts import MCTSPlayer
 from catanatron.players.minimax import AlphaBetaPlayer, SameTurnAlphaBetaPlayer
@@ -26,6 +23,8 @@ from catanatron.players.tree_search_utils import execute_spectrum, list_prunned_
 from catanatron.players.value import ValueFunctionPlayer
 from catanatron.players.weighted_random import WeightedRandomPlayer
 
+from catanrl.beliefs.dev_card_belief import DevCardBelief
+from catanrl.beliefs.determinize import patch_full_features
 from catanrl.features.catanatron_utils import (
     ActorObservationLevel,
     CriticObservationLevel,
@@ -472,7 +471,6 @@ class NNMCTSPlayer(Player):
         self._opponents_by_color: dict[Color, Player] = {}
         self._critic_index_cache: dict[int, dict[str, int]] = {}
         self._observation_index_cache: dict[tuple[int, str], np.ndarray] = {}
-        self._starting_dev_counter = Counter(starting_devcard_bank())
 
         if self.opponent_factory is None and self.opponent_policy != "self":
             self.opponent_factory = self._build_opponent_factory(self.opponent_policy)
@@ -973,67 +971,31 @@ class NNMCTSPlayer(Player):
         return full_features[indices].astype(np.float32, copy=False)
 
     def _guessed_dev_cards_features(self, game, base_color: Color | None = None) -> np.ndarray:
+        """Full-info features with opponents' dev hands replaced by a belief sample.
+
+        Draws a single determinization of the opponents' hidden dev cards from
+        ``DevCardBelief`` (multivariate-hypergeometric over the unseen pool) and
+        patches it into the full feature vector. This hides the opponents' exact
+        dev-card types from the critic while keeping everything else perfect-info.
+        """
         base_color = base_color if base_color is not None else self.color
         num_players = len(game.state.colors)
-        features = full_game_to_features(
+        base_full = full_game_to_features(
             game,
             num_players,
             self.map_type,
             base_color=base_color,
-        ).astype(np.float32, copy=True)
-        sample = create_sample(game, base_color)
-        dev_guess = self._sample_opponent_dev_cards(sample, num_players)
+        )
+        belief = DevCardBelief(game, base_color)
+        hypothesis = belief.sample_hypotheses(1, random)[0]
         numeric_name_to_index = self._get_full_numeric_index(num_players)
-
-        for player_idx, card_counter in dev_guess.items():
-            vp_feature = f"P{player_idx}_VICTORY_POINT_IN_HAND"
-            old_vp = float(features[numeric_name_to_index[vp_feature]])
-            new_vp = float(card_counter.get("VICTORY_POINT", 0))
-            features[numeric_name_to_index[vp_feature]] = new_vp
-            for dev_card in DEVELOPMENT_CARDS:
-                feature_name = f"P{player_idx}_{dev_card}_IN_HAND"
-                features[numeric_name_to_index[feature_name]] = float(card_counter.get(dev_card, 0))
-            actual_vps_feature = f"P{player_idx}_ACTUAL_VPS"
-            if actual_vps_feature in numeric_name_to_index:
-                features[numeric_name_to_index[actual_vps_feature]] += new_vp - old_vp
-        return features
-
-    def _sample_opponent_dev_cards(self, sample, num_players: int) -> dict[int, Counter]:
-        known_cards = Counter()
-        for dev_card in DEVELOPMENT_CARDS:
-            known_cards[dev_card] += int(sample.get(f"P0_{dev_card}_IN_HAND", 0))
-            for player_idx in range(num_players):
-                known_cards[dev_card] += int(sample.get(f"P{player_idx}_{dev_card}_PLAYED", 0))
-
-        unseen = self._starting_dev_counter - known_cards
-        unseen_cards = [card for card, count in unseen.items() for _ in range(max(0, int(count)))]
-        random.shuffle(unseen_cards)
-
-        opponent_card_counts = {
-            player_idx: int(sample.get(f"P{player_idx}_NUM_DEVS_IN_HAND", 0))
-            for player_idx in range(1, num_players)
-        }
-        guessed: dict[int, Counter] = {}
-        cursor = 0
-        for player_idx in range(1, num_players):
-            num_cards = max(0, opponent_card_counts[player_idx])
-            draw = unseen_cards[cursor : cursor + num_cards]
-            cursor += num_cards
-            hand_counter = Counter(draw)
-            if len(draw) < num_cards:
-                self._fill_missing_dev_cards(hand_counter, num_cards - len(draw), unseen)
-            guessed[player_idx] = hand_counter
-        return guessed
-
-    @staticmethod
-    def _fill_missing_dev_cards(hand_counter: Counter, missing: int, unseen: Counter) -> None:
-        if missing <= 0:
-            return
-        fallback_pool = [card for card, count in unseen.items() for _ in range(max(0, int(count)))]
-        if not fallback_pool:
-            fallback_pool = ["KNIGHT"]
-        for _ in range(missing):
-            hand_counter[random.choice(fallback_pool)] += 1
+        return patch_full_features(
+            base_full,
+            hypothesis,
+            base_color=base_color,
+            colors=tuple(game.state.colors),
+            numeric_name_to_index=numeric_name_to_index,
+        )
 
     def _get_full_numeric_index(self, num_players: int) -> dict[str, int]:
         index = self._critic_index_cache.get(num_players)
