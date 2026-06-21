@@ -189,6 +189,14 @@ def main():
 
     args = parser.parse_args()
 
+    if args.save_every_updates % args.eval_every_iterations != 0:
+        aligned = args.eval_every_iterations
+        print(
+            f"Adjusting save_every_updates from {args.save_every_updates} to {aligned} "
+            f"(must be a multiple of eval_every_iterations={args.eval_every_iterations})."
+        )
+        args.save_every_updates = aligned
+
     try:
         setup = resolve_training_architecture_and_warm_start(args)
     except (FileNotFoundError, ValueError) as exc:

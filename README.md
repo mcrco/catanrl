@@ -169,6 +169,7 @@ Training hparams:
 | reward | shaped |
 | train seed | 42 |
 | eval every N iterations | 5 |
+| save every N iterations | 5 |
 | eval games / opponent | 500 (250 first + 250 second; vs random + F) |
 
 ```bash
@@ -182,6 +183,7 @@ DAGGER_HPARAMS=(
   --beta-min 0.1
   --seed 42
   --eval-every-iterations 5
+  --save-every-updates 5
   --fresh-eval-games-per-opponent 500
 )
 ```
