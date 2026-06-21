@@ -7,7 +7,7 @@ import argparse
 DEFAULT_MAX_GRAD_NORM = 1.0
 DEFAULT_METRIC_WINDOW = 200
 DEFAULT_TREND_EVAL_SEED = 43
-DEFAULT_WANDB_PROJECT = "catan-rl"
+DEFAULT_WANDB_PROJECT = "catan"
 
 
 def add_device_argument(parser: argparse.ArgumentParser) -> None:

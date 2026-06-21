@@ -31,6 +31,7 @@ from catanrl.experiment_store import (
     backbone_hidden_dims,
     load_experiment,
 )
+from catanrl.experiments.common_args import DEFAULT_WANDB_PROJECT
 from catanrl.experiments.network_config import resolve_observation_network_args
 from catanrl.features.catanatron_utils import (
     ActorObservationLevel,
@@ -748,7 +749,7 @@ def main():
     parser.add_argument(
         "--wandb-project",
         type=str,
-        default="catan-evals",
+        default=DEFAULT_WANDB_PROJECT,
         help="Weights & Biases project name",
     )
     parser.add_argument(
