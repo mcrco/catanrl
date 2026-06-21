@@ -1,13 +1,49 @@
-"""Round-trip tests for catanrl relative robber action encoding."""
+"""Round-trip tests for the catanrl flat action encoding.
 
+The flat action <-> Catanatron Action mapping is the contract every agent relies
+on: a single off-by-one or a non-bijective entry silently mislabels training
+targets and corrupts both PPO and MCTS.
+"""
+
+import pytest
 from catanatron.models.actions import Action
 from catanatron.models.enums import ActionType
 
 from catanrl.utils.catanatron_action_space import (
     from_action_space,
+    get_action_array,
+    get_action_space_size,
     get_player_colors,
     to_action_space,
 )
+
+
+@pytest.mark.parametrize("num_players", [2, 3, 4])
+@pytest.mark.parametrize("map_type", ["BASE", "MINI"])
+def test_every_action_index_round_trips(num_players, map_type):
+    """from_action_space(i) -> to_action_space(...) == i for the whole array."""
+    game_colors = tuple(get_player_colors(num_players))
+    actor = game_colors[0]
+    size = get_action_space_size(num_players, map_type)
+    assert size == len(get_action_array(num_players, map_type))
+
+    seen = set()
+    for idx in range(size):
+        action = from_action_space(idx, actor, num_players, map_type, game_colors)
+        assert action.color == actor
+        round_tripped = to_action_space(action, num_players, map_type, game_colors)
+        assert round_tripped == idx, (
+            f"index {idx} decoded to {action} which re-encoded to {round_tripped}"
+        )
+        seen.add(idx)
+    assert len(seen) == size
+
+
+@pytest.mark.parametrize("num_players", [2, 3, 4])
+def test_action_array_entries_are_unique(num_players):
+    """The action array must be a bijection (no duplicate semantic entries)."""
+    array = get_action_array(num_players, "BASE")
+    assert len(set(array)) == len(array)
 
 
 def test_move_robber_round_trip_relative_seating():

@@ -11,21 +11,9 @@ from catanatron.models.enums import RESOURCES, ActionType
 from catanatron.models.map import build_map
 from catanatron.models.player import Color
 
+from catanrl.utils.catanatron_game import PLAYER_COLOR_ORDER, get_player_colors
+
 MapType = Literal["BASE", "TOURNAMENT", "MINI"]
-
-# catanrl consistently uses Blue as the controlled player first.
-PLAYER_COLOR_ORDER: Tuple[Color, ...] = (
-    Color.BLUE,
-    Color.RED,
-    Color.WHITE,
-    Color.ORANGE,
-)
-
-
-def get_player_colors(num_players: int) -> Tuple[Color, ...]:
-    if not 1 <= num_players <= len(PLAYER_COLOR_ORDER):
-        raise ValueError(f"num_players must be in [1, {len(PLAYER_COLOR_ORDER)}], got {num_players}")
-    return PLAYER_COLOR_ORDER[:num_players]
 
 
 def _relative_opponent_slot(actor: Color, victim: Color, game_colors: Tuple[Color, ...]) -> int:

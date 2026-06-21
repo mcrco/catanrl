@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Any, Callable, Dict, List, Literal, Optional
 
 import numpy as np
-import pufferlib
 import pufferlib.vector as puffer_vector
 from gymnasium import spaces
 from pufferlib.emulation import emulate, emulate_action_space, emulate_observation_space, nativize
@@ -13,7 +12,7 @@ from catanatron.game import Game, TURNS_LIMIT
 from catanatron.gym.board_tensor_features import create_board_tensor
 from catanatron.models.player import Color, Player, RandomPlayer
 
-from catanrl.envs.gym.rewards import RewardFunction, ShapedReward, WinReward
+from catanrl.envs.puffer.rewards import RewardFunction, ShapedReward, WinReward
 from catanrl.envs.puffer.common import (
     BOARD_HEIGHT,
     BOARD_WIDTH,
@@ -25,12 +24,17 @@ from catanrl.envs.puffer.common import (
     create_opponents,
     normalize_reset_seed,
 )
-from catanrl.features.catanatron_utils import full_game_to_features, game_to_features
+from catanrl.features.catanatron_utils import (
+    ActorObservationLevel,
+    full_game_to_features,
+    get_actor_indices_from_full,
+)
 from catanrl.utils.catanatron_action_space import (
     from_action_space,
     get_action_space_size,
     to_action_space,
 )
+from catanrl.utils.catanatron_game import SeatOption, build_players_for_seat, force_player_order
 from catanrl.utils.catanatron_map import build_catan_map
 from catanrl.utils.seeding import derive_map_and_game_seeds, derive_seed
 
@@ -60,25 +64,44 @@ class SingleAgentCatanatronPufferEnv(PufferEnv):
         self.shared_critic = bool(self.config.get("shared_critic", True))
         if not self.shared_critic:
             raise ValueError("SingleAgentCatanatronPufferEnv requires shared_critic=True")
+        self.actor_observation_level: ActorObservationLevel = self.config.get(
+            "actor_observation_level", "private"
+        )
 
         self.reward_function = _resolve_reward_function(self.config.get("reward_function"))
         self.expert_player: Player | None = self.config.get("expert_player")
+        self.nn_seat: SeatOption = self.config.get("nn_seat", "random")
 
         assert all(player.color != Color.BLUE for player in self.enemies)
         self.p0 = Player(Color.BLUE)
-        self.players = [self.p0] + self.enemies
+        self.players, self._allow_upstream_shuffle = build_players_for_seat(
+            self.p0,
+            self.enemies,
+            self.nn_seat,
+        )
         self.num_players = len(self.players)
         self.action_space_size = get_action_space_size(self.num_players, self.map_type)
 
-        dims = compute_single_agent_dims(self.num_players, self.map_type)
-        self.numeric_dim = dims["numeric_dim"]
-        self.full_numeric_dim = dims["full_numeric_dim"]
+        dims = compute_single_agent_dims(
+            self.num_players,
+            self.map_type,
+            actor_observation_level=self.actor_observation_level,
+        )
+        self.actor_numeric_dim = dims["actor_numeric_dim"]
+        self.numeric_dim = self.actor_numeric_dim
+        self.critic_numeric_dim = dims["critic_numeric_dim"]
         self.board_channels = dims["board_channels"]
         self.board_tensor_shape = (self.board_channels, BOARD_WIDTH, BOARD_HEIGHT)
         self.critic_vector_dim = dims["critic_dim"]
+        self.actor_observation_indices = get_actor_indices_from_full(
+            self.num_players,
+            self.map_type,
+            level=self.actor_observation_level,
+        )
+        self.actor_numeric_indices = self.actor_observation_indices[: self.actor_numeric_dim]
 
         self.env_single_observation_space = build_shared_critic_observation_space(
-            numeric_dim=self.numeric_dim,
+            numeric_dim=self.actor_numeric_dim,
             board_tensor_shape=self.board_tensor_shape,
             critic_dim=self.critic_vector_dim,
             action_space_size=self.action_space_size,
@@ -136,8 +159,13 @@ class SingleAgentCatanatronPufferEnv(PufferEnv):
 
     def _actor_observation(self) -> Dict[str, np.ndarray]:
         assert self.game is not None
-        vector = game_to_features(self.game, self.p0.color, self.num_players, self.map_type)
-        numeric = vector[: self.numeric_dim]
+        full_vector = full_game_to_features(
+            self.game,
+            self.num_players,
+            self.map_type,
+            base_color=self.p0.color,
+        )
+        numeric = full_vector[self.actor_numeric_indices]
         board = create_board_tensor(self.game, self.p0.color, channels_first=True).astype(
             np.float32,
             copy=False,
@@ -149,7 +177,12 @@ class SingleAgentCatanatronPufferEnv(PufferEnv):
 
     def _critic_observation(self) -> np.ndarray:
         assert self.game is not None
-        return full_game_to_features(self.game, self.num_players, self.map_type)
+        return full_game_to_features(
+            self.game,
+            self.num_players,
+            self.map_type,
+            base_color=self.p0.color,
+        )
 
     def _action_mask(self) -> np.ndarray:
         mask = np.zeros(self.action_space_size, dtype=np.int8)
@@ -171,12 +204,16 @@ class SingleAgentCatanatronPufferEnv(PufferEnv):
     def _build_info(self) -> Dict[str, Any]:
         assert self.game is not None
         winning_color = self.game.winning_color()
+        is_terminal = winning_color is not None or self.game.state.num_turns >= TURNS_LIMIT
         info: Dict[str, Any] = {
             "valid_actions": self.get_valid_actions(),
             "nn_won": bool(winning_color == self.p0.color),
         }
         if self.expert_player is not None:
-            info["expert_action"] = self._get_expert_action()
+            valid_actions = info["valid_actions"]
+            info["expert_action"] = (
+                int(valid_actions[0]) if is_terminal else self._get_expert_action()
+            )
         return info
 
     def _get_observation(self) -> Dict[str, Any]:
@@ -205,6 +242,8 @@ class SingleAgentCatanatronPufferEnv(PufferEnv):
             discard_limit=self.discard_limit,
             vps_to_win=self.vps_to_win,
         )
+        if not self._allow_upstream_shuffle:
+            force_player_order(self.game, self.players)
         if self.expert_player is not None:
             self.expert_player.reset_state()
 
@@ -282,9 +321,11 @@ def _make_puffer_env(
     reward_function: str,
     map_type: MapType,
     opponent_configs: List[str],
+    nn_seat: SeatOption = "random",
     vps_to_win: int = 15,
     discard_limit: int = 9,
     expert_config: str | None = None,
+    actor_observation_level: ActorObservationLevel = "private",
 ) -> Callable[..., SingleAgentCatanatronPufferEnv]:
     def _config() -> Dict[str, Any]:
         expert_player = create_expert(expert_config) if expert_config else None
@@ -296,6 +337,8 @@ def _make_puffer_env(
             "reward_function": _resolve_reward_function(reward_function),
             "shared_critic": True,
             "expert_player": expert_player,
+            "actor_observation_level": actor_observation_level,
+            "nn_seat": nn_seat,
         }
 
     return lambda **kwargs: SingleAgentCatanatronPufferEnv(config=_config(), **kwargs)
@@ -306,18 +349,22 @@ def make_puffer_vectorized_envs(
     map_type: Literal["BASE", "MINI", "TOURNAMENT"],
     opponent_configs: List[str],
     num_envs: int,
+    nn_seat: SeatOption = "random",
     vps_to_win: int = 15,
     discard_limit: int = 9,
     expert_config: str | None = None,
+    actor_observation_level: ActorObservationLevel = "private",
 ):
     return puffer_vector.make(
         _make_puffer_env(
             reward_function,
             map_type,
             opponent_configs,
+            nn_seat,
             vps_to_win,
             discard_limit,
             expert_config,
+            actor_observation_level,
         ),
         num_envs=num_envs,
         backend=puffer_vector.Multiprocessing,

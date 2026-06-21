@@ -4,9 +4,49 @@ import os
 import wandb
 
 from ..envs.puffer.common import create_opponents
+from .architecture_config import (
+    add_config_argument,
+    architecture_train_config_fields,
+    validate_player_count,
+)
+from .common_args import (
+    DEFAULT_MAX_GRAD_NORM,
+    add_device_argument,
+    add_experiment_name_argument,
+    add_reward_function_argument,
+    add_wandb_arguments,
+)
 from ..algorithms.imitation_learning.dagger import train as dagger_train
 from ..algorithms.imitation_learning.dataset import EvictionStrategy
+from ..experiment_store import (
+    GameConfig,
+    KIND_POLICY,
+    KIND_POLICY_VALUE,
+    KIND_VALUE,
+    add_load_from_experiment_arguments,
+    add_resume_argument,
+    default_checkpoints_dir,
+    make_experiment_name,
+    network_spec_from_model,
+    prepare_resume,
+    resolve_training_architecture_and_warm_start,
+    save_experiment,
+    training_state_file,
+    wandb_grouping_kwargs,
+)
 from ..utils.catanatron_action_space import get_action_space_size
+
+
+def _wandb_info(args: argparse.Namespace) -> dict:
+    """Experiment metadata W&B block, including the live run id when available."""
+    if not args.wandb:
+        return {}
+    info = {"project": args.wandb_project, "name": args.wandb_run_name}
+    if wandb.run is not None:
+        info["id"] = wandb.run.id
+        if wandb.run.tags:
+            info["tags"] = list(wandb.run.tags)
+    return info
 
 
 def main():
@@ -14,94 +54,9 @@ def main():
         description="Train Catan policy and critic networks with DAgger imitation learning",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-
-    # Model architecture
-    parser.add_argument(
-        "--model-type",
-        type=str,
-        choices=["flat", "hierarchical"],
-        default="flat",
-        help="Policy model architecture (default: flat)",
-    )
-    parser.add_argument(
-        "--backbone-type",
-        type=str,
-        choices=["mlp", "xdim", "xdim_res"],
-        default="mlp",
-        help=(
-            "Backbone architecture: 'mlp', 'xdim' (cross-dimensional), "
-            "or 'xdim_res' (residual cross-dimensional) (default: mlp)"
-        ),
-    )
-    parser.add_argument(
-        "--xdim-cnn-channels",
-        type=str,
-        default="64,128,128",
-        help=(
-            "Comma-separated CNN channels for xdim/xdim_res backbones "
-            "(default: 64,128,128)"
-        ),
-    )
-    parser.add_argument(
-        "--xdim-cnn-kernel-size",
-        type=str,
-        default="3,5",
-        help="Kernel size for xdim/xdim_res CNN as 'height,width' (default: 3,5)",
-    )
-    parser.add_argument(
-        "--xdim-policy-fusion-hidden-dim",
-        type=int,
-        default=None,
-        help=(
-            "Fusion hidden dim for policy xdim/xdim_res backbone "
-            "(default: last policy hidden dim)"
-        ),
-    )
-    parser.add_argument(
-        "--xdim-critic-fusion-hidden-dim",
-        type=int,
-        default=None,
-        help=(
-            "Fusion hidden dim for critic xdim/xdim_res backbone "
-            "(default: last critic hidden dim)"
-        ),
-    )
-    parser.add_argument(
-        "--policy-hidden-dims",
-        type=str,
-        default="512,512",
-        help="Comma-separated hidden layer sizes for policy network (default: 512,512)",
-    )
-    parser.add_argument(
-        "--critic-hidden-dims",
-        type=str,
-        default="512,512",
-        help="Comma-separated hidden layer sizes for critic network (default: 512,512)",
-    )
-
-    # Weight loading
-    parser.add_argument(
-        "--load-policy-weights",
-        type=str,
-        default=None,
-        help="Optional policy initialization checkpoint",
-    )
-    parser.add_argument(
-        "--load-critic-weights",
-        type=str,
-        default=None,
-        help="Optional critic initialization checkpoint",
-    )
-
-    # Saving
-    parser.add_argument(
-        "--save-path",
-        type=str,
-        default=None,
-        help="Directory to store checkpoints (default: weights/dagger)",
-    )
-
-    # Training loop
+    add_config_argument(parser)
+    add_load_from_experiment_arguments(parser)
+    add_resume_argument(parser)
     parser.add_argument(
         "--iterations",
         type=int,
@@ -126,8 +81,6 @@ def main():
         default=256,
         help="Batch size for training (default: 256)",
     )
-
-    # Learning rates
     parser.add_argument(
         "--policy-lr",
         type=float,
@@ -146,8 +99,6 @@ def main():
         default=0.99,
         help="Discount factor (default: 0.99)",
     )
-
-    # DAgger-specific
     parser.add_argument(
         "--expert",
         type=str,
@@ -183,23 +134,14 @@ def main():
         type=str,
         choices=["random", "fifo", "correct"],
         default="fifo",
-        help="Eviction strategy when dataset is full: random, fifo, or correct (default: random)",
+        help="Eviction strategy when dataset is full: random, fifo, or correct",
     )
-
-    # Environment
     parser.add_argument(
         "--opponents",
         type=str,
         nargs="+",
         default=["F"],
-        help="Opponent bot configs for the environment (default: random)",
-    )
-    parser.add_argument(
-        "--map-type",
-        type=str,
-        default="BASE",
-        choices=["BASE", "MINI", "TOURNAMENT"],
-        help="Board template to use (default: BASE)",
+        help="Opponent bot configs for the environment (default: F)",
     )
     parser.add_argument(
         "--num-envs",
@@ -207,32 +149,12 @@ def main():
         default=4,
         help="Number of parallel environments (default: 4)",
     )
+    add_reward_function_argument(parser)
     parser.add_argument(
-        "--vps-to-win",
-        type=int,
-        default=15,
-        help="Victory points required to win each game (default: 15)",
-    )
-    parser.add_argument(
-        "--discard-limit",
-        type=int,
-        default=9,
-        help="Discard threshold used when a 7 is rolled (default: 9)",
-    )
-    parser.add_argument(
-        "--reward-function",
-        type=str,
-        default="shaped",
-        choices=["shaped", "win"],
-        help="Reward function type (default: shaped)",
-    )
-
-    # Evaluation
-    parser.add_argument(
-        "--eval-games-per-opponent",
+        "--fresh-eval-games-per-opponent",
         type=int,
         default=1000,
-        help="Games to play against each baseline opponent for evaluation (default: 1000)",
+        help="Fresh evaluation games per baseline opponent (default: 1000)",
     )
     parser.add_argument(
         "--eval-every-iterations",
@@ -244,21 +166,12 @@ def main():
         ),
     )
     parser.add_argument(
-        "--save-every-iterations",
+        "--save-every-updates",
         type=int,
         default=1,
-        help=(
-            "Save checkpoints every N DAgger iterations (default: 1)"
-        ),
+        help="Save checkpoints every N DAgger iterations (default: 1)",
     )
-
-    # Misc
-    parser.add_argument(
-        "--device",
-        type=str,
-        default=None,
-        help="Torch device (cpu, cuda, cuda:1, ...). Default: auto",
-    )
+    add_device_argument(parser)
     parser.add_argument(
         "--seed",
         type=int,
@@ -268,127 +181,123 @@ def main():
     parser.add_argument(
         "--max-grad-norm",
         type=float,
-        default=5.0,
-        help="Maximum gradient norm for clipping (default: 5.0)",
+        default=DEFAULT_MAX_GRAD_NORM,
+        help="Maximum gradient norm for clipping",
     )
-
-    # Weights & Biases    
-    parser.add_argument(
-        "--wandb",
-        action="store_true",
-        help="Enable Weights & Biases logging",
-    )
-    parser.add_argument(
-        "--wandb-project",
-        type=str,
-        default="catan-rl",
-        help="Weights & Biases project (default: catan-rl)",
-    )
-    parser.add_argument(
-        "--wandb-run-name",
-        type=str,
-        default=None,
-        help="Weights & Biases run name (default: auto-generated)",
-    )
+    add_experiment_name_argument(parser)
+    add_wandb_arguments(parser)
 
     args = parser.parse_args()
 
-    # Validate weight paths if provided
-    if args.load_policy_weights and not os.path.exists(args.load_policy_weights):
-        print(f"Error: policy weights file '{args.load_policy_weights}' not found")
-        return
-    if args.load_critic_weights and not os.path.exists(args.load_critic_weights):
-        print(f"Error: critic weights file '{args.load_critic_weights}' not found")
+    if args.save_every_updates % args.eval_every_iterations != 0:
+        aligned = args.eval_every_iterations
+        print(
+            f"Adjusting save_every_updates from {args.save_every_updates} to {aligned} "
+            f"(must be a multiple of eval_every_iterations={args.eval_every_iterations})."
+        )
+        args.save_every_updates = aligned
+
+    try:
+        setup = resolve_training_architecture_and_warm_start(args)
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"Error: {exc}")
         return
 
-    # Set save path
-    if args.save_path is None:
-        if args.wandb and args.wandb_run_name:
-            args.save_path = f"weights/{args.wandb_run_name}"
-        else:
-            args.save_path = "weights/dagger"
+    arch = setup.arch
+    warm_start = setup.warm_start
 
+    try:
+        resume = prepare_resume(args, warm_start)
+    except ValueError as exc:
+        print(f"Error: {exc}")
+        return
+
+    if resume.active:
+        experiment_name = resume.experiment_name
+        if args.wandb and not args.wandb_run_name:
+            args.wandb_run_name = resume.wandb_run_name or experiment_name
+    else:
+        experiment_name = make_experiment_name(
+            "dagger", args.wandb_run_name, args.experiment_name
+        )
+        if args.wandb and not args.wandb_run_name:
+            args.wandb_run_name = experiment_name
+
+    args.save_path = default_checkpoints_dir(experiment_name)
     os.makedirs(args.save_path, exist_ok=True)
+    training_state_path = training_state_file(experiment_name)
 
-    # Parse hidden dims
     if not args.opponents:
         args.opponents = ["random"]
     opponents = create_opponents(args.opponents)
     num_players = len(opponents) + 1
-    action_space_size = get_action_space_size(num_players, args.map_type)
+    validate_player_count(arch, num_players)
+    if warm_start is not None and warm_start.experiment.num_players != num_players:
+        print(
+            f"Warning: source experiment was trained for "
+            f"{warm_start.experiment.num_players} players but --opponents implies "
+            f"{num_players}."
+        )
+    action_space_size = get_action_space_size(num_players, arch.map_type)
+    print(f"Architecture: {setup.architecture_source}")
     print(f"Number of players: {num_players}")
 
-    policy_hidden_dims = [
-        int(dim.strip()) for dim in args.policy_hidden_dims.split(",") if dim.strip()
-    ]
-    critic_hidden_dims = [
-        int(dim.strip()) for dim in args.critic_hidden_dims.split(",") if dim.strip()
-    ]
-    xdim_cnn_channels = [
-        int(ch.strip()) for ch in args.xdim_cnn_channels.split(",") if ch.strip()
-    ]
-    xdim_kernel_parts = [int(k.strip()) for k in args.xdim_cnn_kernel_size.split(",") if k.strip()]
-    if len(xdim_kernel_parts) != 2:
-        raise ValueError(
-            f"--xdim-cnn-kernel-size must have exactly 2 values (got: {args.xdim_cnn_kernel_size})"
-        )
-    xdim_cnn_kernel_size = (xdim_kernel_parts[0], xdim_kernel_parts[1])
+    train_config = {
+        "algorithm": "DAgger",
+        **architecture_train_config_fields(arch),
+        "iterations": args.iterations,
+        "steps_per_iteration": args.steps_per_iter,
+        "train_epochs": args.train_epochs,
+        "batch_size": args.batch_size,
+        "policy_lr": args.policy_lr,
+        "critic_lr": args.critic_lr,
+        "gamma": args.gamma,
+        "expert": args.expert,
+        "opponents": args.opponents,
+        "num_envs": args.num_envs,
+        "reward_function": args.reward_function,
+        "beta_init": args.beta_init,
+        "beta_decay": args.beta_decay,
+        "beta_min": args.beta_min,
+        "max_dataset_size": args.max_dataset_size,
+        "eviction_strategy": args.eviction_strategy,
+        "fresh_eval_games_per_opponent": args.fresh_eval_games_per_opponent,
+        "eval_every_iterations": args.eval_every_iterations,
+        "save_every_updates": args.save_every_updates,
+        "seed": args.seed,
+        "load_from_experiment": args.load_from_experiment,
+        "load_from_which": args.load_from_which,
+    }
 
-    # Setup W&B
     wandb_config = None
     if args.wandb:
         wandb_config = {
             "project": args.wandb_project,
             "name": args.wandb_run_name,
-            "config": {
-                "algorithm": "DAgger",
-                "model_type": args.model_type,
-                "backbone_type": args.backbone_type,
-                "policy_hidden_dims": policy_hidden_dims,
-                "critic_hidden_dims": critic_hidden_dims,
-                "xdim_cnn_channels": xdim_cnn_channels,
-                "xdim_cnn_kernel_size": xdim_cnn_kernel_size,
-                "xdim_policy_fusion_hidden_dim": args.xdim_policy_fusion_hidden_dim,
-                "xdim_critic_fusion_hidden_dim": args.xdim_critic_fusion_hidden_dim,
-                "iterations": args.iterations,
-                "steps_per_iteration": args.steps_per_iter,
-                "train_epochs": args.train_epochs,
-                "batch_size": args.batch_size,
-                "policy_lr": args.policy_lr,
-                "critic_lr": args.critic_lr,
-                "gamma": args.gamma,
-                "expert": args.expert,
-                "opponents": args.opponents,
-                "map_type": args.map_type,
-                "num_envs": args.num_envs,
-                "vps_to_win": args.vps_to_win,
-                "discard_limit": args.discard_limit,
-                "reward_function": args.reward_function,
-                "beta_init": args.beta_init,
-                "beta_decay": args.beta_decay,
-                "beta_min": args.beta_min,
-                "max_dataset_size": args.max_dataset_size,
-                "eviction_strategy": args.eviction_strategy,
-                "eval_games_per_opponent": args.eval_games_per_opponent,
-                "eval_every_iterations": args.eval_every_iterations,
-                "save_every_iterations": args.save_every_iterations,
-                "seed": args.seed,
-            },
+            "config": train_config,
+            **wandb_grouping_kwargs(
+                args,
+                group_default="dagger",
+                warm_start=warm_start,
+                resume=resume,
+            ),
         }
+        if resume.active and resume.wandb_run_id:
+            wandb_config["id"] = resume.wandb_run_id
+            wandb_config["resume"] = "must"
 
-    # Run training
     policy_model, critic_model = dagger_train(
         num_actions=action_space_size,
-        model_type=args.model_type,
-        backbone_type=args.backbone_type,
-        policy_hidden_dims=policy_hidden_dims,
-        critic_hidden_dims=critic_hidden_dims,
-        xdim_cnn_channels=xdim_cnn_channels,
-        xdim_cnn_kernel_size=xdim_cnn_kernel_size,
-        xdim_policy_fusion_hidden_dim=args.xdim_policy_fusion_hidden_dim,
-        xdim_critic_fusion_hidden_dim=args.xdim_critic_fusion_hidden_dim,
-        load_policy_weights=args.load_policy_weights,
-        load_critic_weights=args.load_critic_weights,
+        model_type=arch.model_type,
+        backbone_type=arch.backbone_type,
+        policy_hidden_dims=arch.policy_hidden_dims,
+        critic_hidden_dims=arch.critic_hidden_dims,
+        xdim_cnn_channels=arch.xdim_cnn_channels,
+        xdim_cnn_kernel_size=arch.xdim_cnn_kernel_size,
+        xdim_policy_fusion_hidden_dim=arch.xdim_policy_fusion_hidden_dim,
+        xdim_critic_fusion_hidden_dim=arch.xdim_critic_fusion_hidden_dim,
+        load_policy_weights=warm_start.checkpoints.policy if warm_start else None,
+        load_critic_weights=warm_start.checkpoints.critic if warm_start else None,
         n_iterations=args.iterations,
         steps_per_iteration=args.steps_per_iter,
         train_epochs=args.train_epochs,
@@ -398,9 +307,12 @@ def main():
         gamma=args.gamma,
         expert_config=args.expert,
         opponent_configs=args.opponents,
-        map_type=args.map_type,
-        vps_to_win=args.vps_to_win,
-        discard_limit=args.discard_limit,
+        map_type=arch.map_type,
+        actor_observation_level=arch.actor_observation_level,
+        critic_observation_level=arch.critic_observation_level,
+        network_mode=arch.network_mode,
+        vps_to_win=arch.vps_to_win,
+        discard_limit=arch.discard_limit,
         beta_init=args.beta_init,
         beta_decay=args.beta_decay,
         beta_min=args.beta_min,
@@ -409,13 +321,53 @@ def main():
         save_path=args.save_path,
         device=args.device,
         wandb_config=wandb_config,
-        eval_games_per_opponent=args.eval_games_per_opponent,
+        fresh_eval_games_per_opponent=args.fresh_eval_games_per_opponent,
         eval_every_iterations=args.eval_every_iterations,
-        save_every_iterations=args.save_every_iterations,
+        save_every_updates=args.save_every_updates,
         seed=args.seed,
         num_envs=args.num_envs,
         reward_function=args.reward_function,
         max_grad_norm=args.max_grad_norm,
+        resume_state=resume.state,
+        training_state_path=training_state_path,
+    )
+
+    if arch.network_mode == "shared":
+        networks = {
+            "policy": network_spec_from_model(
+                policy_model,
+                kind=KIND_POLICY_VALUE,
+                model_type=arch.model_type,
+                observation_level=arch.actor_observation_level,
+            ),
+        }
+    else:
+        networks = {
+            "policy": network_spec_from_model(
+                policy_model,
+                kind=KIND_POLICY,
+                model_type=arch.model_type,
+                observation_level=arch.actor_observation_level,
+            ),
+            "critic": network_spec_from_model(
+                critic_model,
+                kind=KIND_VALUE,
+                observation_level=arch.critic_observation_level,
+            ),
+        }
+    exp_path = save_experiment(
+        experiment_name,
+        args.save_path,
+        algorithm="dagger",
+        game=GameConfig(
+            num_players=num_players,
+            map_type=arch.map_type,
+            vps_to_win=arch.vps_to_win,
+            discard_limit=arch.discard_limit,
+        ),
+        networks=networks,
+        train_config=train_config,
+        wandb_info=_wandb_info(args),
     )
 
     print("\n" + "=" * 60)
@@ -424,6 +376,8 @@ def main():
     print(f"Checkpoints saved to: {args.save_path}")
     print(f"  - Policy: {args.save_path}/policy_best.pt")
     print(f"  - Critic: {args.save_path}/critic_best.pt")
+    if exp_path:
+        print(f"Experiment:  {exp_path}  (load via load_experiment('{experiment_name}'))")
 
     if args.wandb:
         wandb.finish()

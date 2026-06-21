@@ -1,0 +1,21 @@
+# Phase 1 D-L: wide xdim (3072×2).
+name: xdim-flat-2p-d-l
+
+model:
+  model_type: flat
+  backbone_type: xdim
+  policy_hidden_dims: [3072, 3072]
+  critic_hidden_dims: [3072, 3072]
+  policy_mode: public
+  critic_mode: full
+  network_mode: separate
+  xdim_cnn_channels: [64, 128, 128]
+  xdim_cnn_kernel_size: [3, 5]
+  xdim_policy_fusion_hidden_dim: 3072
+  xdim_critic_fusion_hidden_dim: 3072
+
+game:
+  map_type: BASE
+  vps_to_win: 15
+  discard_limit: 9
+  num_players: 2

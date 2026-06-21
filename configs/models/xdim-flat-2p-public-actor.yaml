@@ -1,0 +1,21 @@
+# Same xdim flat 2048 backbone as the default preset, with public actor observations.
+name: xdim-flat-2p-public-actor
+
+model:
+  model_type: flat
+  backbone_type: xdim
+  policy_hidden_dims: [2048, 2048]
+  critic_hidden_dims: [2048, 2048]
+  policy_mode: public
+  critic_mode: full
+  network_mode: separate
+  xdim_cnn_channels: [64, 128, 128]
+  xdim_cnn_kernel_size: [3, 5]
+  xdim_policy_fusion_hidden_dim: 2048
+  xdim_critic_fusion_hidden_dim: 2048
+
+game:
+  map_type: BASE
+  vps_to_win: 15
+  discard_limit: 9
+  num_players: 2

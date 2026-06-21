@@ -9,12 +9,19 @@ import argparse
 from typing import Literal, Sequence
 
 import torch
+import wandb
 from catanatron.cli.cli_players import CLI_PLAYERS
 from catanatron.models.player import Player
 
+from catanrl.envs.puffer.common import compute_single_agent_dims
 from catanrl.eval.eval_nn_vs_catanatron import eval
-from catanrl.envs.gym.single_env import compute_single_agent_dims
-from catanrl.features.catanatron_utils import COLOR_ORDER
+from catanrl.experiment_store import (
+    backbone_display_type,
+    backbone_hidden_dims,
+    load_experiment,
+)
+from catanrl.experiments.common_args import DEFAULT_WANDB_PROJECT
+from catanrl.features.catanatron_utils import ActorObservationLevel, COLOR_ORDER
 from catanrl.models.backbones import (
     BackboneConfig,
     CrossDimensionalBackboneConfig,
@@ -36,10 +43,15 @@ def build_policy_model(
     hidden_dims: Sequence[int],
     num_players: int,
     map_type: Literal["BASE", "MINI", "TOURNAMENT"],
+    actor_observation_level: ActorObservationLevel,
     device: torch.device,
 ) -> PolicyNetworkWrapper:
     """Build a policy network with the same configuration as dagger.py."""
-    dims = compute_single_agent_dims(num_players, map_type)
+    dims = compute_single_agent_dims(
+        num_players,
+        map_type,
+        actor_observation_level=actor_observation_level,
+    )
     actor_dim = dims["actor_dim"]
     numeric_dim = dims["numeric_dim"]
     board_channels = dims["board_channels"]
@@ -160,13 +172,40 @@ def main():
             "Examples: 'F', 'AB:2', 'F,AB:2,R'"
         ),
     )
+    parser.add_argument(
+        "--actor-observation-level",
+        type=str,
+        choices=["private", "public", "full"],
+        default="private",
+        help=(
+            "Information level used by the policy network: private, public "
+            "(1v1 opponent resources), or full/privileged."
+        ),
+    )
 
-    # Model weights
+    # Experiment-based loading (preferred): rebuilds the model from metadata.
+    parser.add_argument(
+        "--experiment",
+        type=str,
+        default=None,
+        help=(
+            "Experiment name (under experiments/) or path. When set, the model "
+            "architecture and observation level are read from metadata.json and "
+            "the architecture flags above are ignored."
+        ),
+    )
+    parser.add_argument(
+        "--which",
+        type=str,
+        default="best",
+        help="Checkpoint selector for --experiment: 'best', 'latest', or a step.",
+    )
+    # Model weights (legacy path: requires matching architecture flags).
     parser.add_argument(
         "--policy-weights",
         type=str,
-        required=True,
-        help="Path to policy model weights (.pt file)",
+        default=None,
+        help="Path to policy model weights (.pt file). Alternative to --experiment.",
     )
     # Evaluation settings
     parser.add_argument(
@@ -206,8 +245,34 @@ def main():
         default=None,
         help="Device to use (cuda or cpu). Defaults to cuda if available.",
     )
+    parser.add_argument(
+        "--wandb",
+        action="store_true",
+        help="Log evaluation config and summary metrics to Weights & Biases",
+    )
+    parser.add_argument(
+        "--wandb-project",
+        type=str,
+        default=DEFAULT_WANDB_PROJECT,
+        help="Weights & Biases project name",
+    )
+    parser.add_argument(
+        "--wandb-run-name",
+        type=str,
+        default=None,
+        help="Weights & Biases run name",
+    )
+    parser.add_argument(
+        "--wandb-group",
+        type=str,
+        default=None,
+        help="Optional Weights & Biases group name",
+    )
 
     args = parser.parse_args()
+
+    if (args.experiment is None) == (args.policy_weights is None):
+        parser.error("Provide exactly one of --experiment or --policy-weights.")
 
     opponents = parse_opponents(args.opponents)
     num_players = len(opponents) + 1
@@ -218,12 +283,30 @@ def main():
     else:
         device = torch.device(args.device)
 
+    # Experiment path: rebuild model from metadata and adopt its architecture.
+    experiment_model = None
+    if args.experiment is not None:
+        exp = load_experiment(args.experiment)
+        args.model_type = exp.model_type or args.model_type
+        args.map_type = exp.map_type
+        args.backbone_type = backbone_display_type(exp.policy_spec.backbone)
+        args.policy_hidden_dims = backbone_hidden_dims(exp.policy_spec.backbone)
+        if exp.policy_spec.observation_level is not None:
+            args.actor_observation_level = exp.policy_spec.observation_level
+        if exp.num_players != num_players:
+            parser.error(
+                f"--opponents implies {num_players} players but experiment "
+                f"'{args.experiment}' was trained for {exp.num_players}."
+            )
+        experiment_model = exp.build_policy(which=args.which, device=device)
+
     print(f"\n{'=' * 60}")
     print("Policy Evaluation vs Catanatron Bot")
     print(f"{'=' * 60}")
     print(f"Device: {device}")
     print(f"Map type: {args.map_type} | Players: {num_players}")
     print(f"Backbone: {args.backbone_type} | Model type: {args.model_type}")
+    print(f"Actor observation: {args.actor_observation_level}")
     print(f"Hidden dims: {args.policy_hidden_dims}")
     print(f"Policy weights: {args.policy_weights}")
     print(f"Opponents: {args.opponents}")
@@ -231,21 +314,32 @@ def main():
     print(f"Games: {args.num_games}")
     print(f"VPs to win: {args.vps_to_win} | Discard limit: {args.discard_limit}")
 
-    # Build model
-    model = build_policy_model(
-        backbone_type=args.backbone_type,
-        model_type=args.model_type,
-        hidden_dims=args.policy_hidden_dims,
-        num_players=num_players,
-        map_type=args.map_type,
-        device=device,
-    )
+    if args.wandb:
+        wandb.init(
+            project=args.wandb_project,
+            name=args.wandb_run_name,
+            group=args.wandb_group,
+            job_type="eval",
+            config=vars(args) | {"num_players": num_players},
+        )
 
-    # Load weights
-    state_dict = torch.load(args.policy_weights, map_location=device)
-    model.load_state_dict(state_dict)
-    model.eval()
-    print(f"Loaded policy weights from {args.policy_weights}")
+    if experiment_model is not None:
+        model = experiment_model
+        print(f"Loaded policy from experiment '{args.experiment}' ({args.which})")
+    else:
+        model = build_policy_model(
+            backbone_type=args.backbone_type,
+            model_type=args.model_type,
+            hidden_dims=args.policy_hidden_dims,
+            num_players=num_players,
+            map_type=args.map_type,
+            actor_observation_level=args.actor_observation_level,
+            device=device,
+        )
+        state_dict = torch.load(args.policy_weights, map_location=device)
+        model.load_state_dict(state_dict)
+        model.eval()
+        print(f"Loaded policy weights from {args.policy_weights}")
 
     # Create NN player
     nn_player = NNPolicyPlayer(
@@ -253,6 +347,7 @@ def main():
         model_type=args.model_type,
         model=model,
         map_type=args.map_type,
+        actor_observation_level=args.actor_observation_level,
     )
 
     # Run evaluation
@@ -277,6 +372,18 @@ def main():
     print(f"Average VPs: {sum(vps) / len(vps):.2f}")
     print(f"Average Total VPs: {sum(total_vps) / len(total_vps):.2f}")
     print(f"Average Turns: {sum(turns) / len(turns):.1f}")
+
+    if args.wandb:
+        wandb.log(
+            {
+                "wins": wins,
+                "win_rate": wins / args.num_games if args.num_games else 0.0,
+                "avg_vps": sum(vps) / len(vps) if vps else 0.0,
+                "avg_total_vps": sum(total_vps) / len(total_vps) if total_vps else 0.0,
+                "avg_turns": sum(turns) / len(turns) if turns else 0.0,
+            }
+        )
+        wandb.finish()
 
 
 if __name__ == "__main__":

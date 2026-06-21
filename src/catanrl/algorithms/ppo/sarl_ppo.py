@@ -8,7 +8,7 @@ import os
 import random
 import sys
 from collections import deque
-from typing import List, Literal, Sequence, Tuple, cast
+from typing import Any, List, Literal, Sequence, Tuple, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -27,9 +27,12 @@ from ...envs.puffer.single_agent_env import (
     create_opponents,
     make_puffer_vectorized_envs,
 )
-from ...eval.training_eval import eval_policy_against_baselines
-from ...models import policy_value_to_policy_only
-from ...models.wrappers import PolicyValueNetworkWrapper
+from ...eval.training_eval import eval_policy_value_against_baselines
+from ...features.catanatron_utils import (
+    ActorObservationLevel,
+    CriticObservationLevel,
+    get_observation_indices_from_full,
+)
 from ...models.models import (
     build_flat_policy_network,
     build_flat_policy_value_network,
@@ -38,10 +41,10 @@ from ...models.models import (
     build_value_network,
 )
 from ...utils.catanatron_action_space import build_action_type_metadata, get_action_space_size
+from ...models.backbone_builder import build_backbone_config
+from ..common import PolicyAgent
 from .buffers import CentralCriticExperienceBuffer, ExperienceBuffer
-from .agent import PolicyAgent
-from .action_stats import build_raw_policy_log_dict
-from .backbone_builder import build_backbone_config
+from .action_stats import build_action_type_time_series_chart, compute_action_distributions
 from .ppo_update import run_ppo_update
 
 
@@ -52,16 +55,16 @@ def train(
     backbone_type: str = "mlp",
     xdim_cnn_channels: Sequence[int] = (64, 128, 128),
     xdim_cnn_kernel_size: Tuple[int, int] = (3, 5),
-    xdim_fusion_hidden_dim: int | None = None,
+    xdim_policy_fusion_hidden_dim: int | None = None,
     xdim_critic_fusion_hidden_dim: int | None = None,
-    hidden_dims: Sequence[int] = (512, 512),
+    policy_hidden_dims: Sequence[int] = (512, 512),
     critic_hidden_dims: Sequence[int] | None = None,
     critic_mode: Literal["shared", "privileged"] = "shared",
     load_weights: str | None = None,
     load_critic_weights: str | None = None,
     total_timesteps: int = 1_000_000,
     rollout_steps: int = 4096,
-    lr: float = 1e-4,
+    policy_lr: float = 1e-4,
     critic_lr: float | None = None,
     gamma: float = 0.99,
     gae_lambda: float = 0.95,
@@ -69,13 +72,15 @@ def train(
     value_coef: float = 0.5,
     entropy_coef: float = 0.01,
     activity_coef: float = 0.0,
-    n_epochs: int = 4,
+    train_epochs: int = 4,
     batch_size: int = 64,
     save_path: str | None = "weights/sarl_ppo",
     save_every_updates: int = 1,
-    device: str | torch.device = "cuda" if torch.cuda.is_available() else "cpu",
+    device: str | torch.device | None = None,
     wandb_config: dict | None = None,
     map_type: Literal["BASE", "TOURNAMENT", "MINI"] = "BASE",
+    actor_observation_level: ActorObservationLevel = "private",
+    critic_observation_level: CriticObservationLevel = "full",
     vps_to_win: int = 15,
     discard_limit: int = 9,
     opponent_configs: List[str] | None = None,
@@ -84,15 +89,24 @@ def train(
     use_lr_scheduler: bool = False,
     lr_scheduler_kwargs: dict | None = None,
     metric_window: int = 200,
-    eval_games_per_opponent: int = 0,
+    fresh_eval_games_per_opponent: int = 0,
     trend_eval_games_per_opponent: int | None = None,
-    trend_eval_seed: int | None = 42,
+    trend_eval_seed: int | None = 43,
     eval_every_updates: int = 0,
     deterministic_policy: bool = False,
-    max_grad_norm: float = 0.5,
+    max_grad_norm: float = 1.0,
     target_kl: float | None = None,
+    resume_state: dict | None = None,
+    training_state_path: str | None = None,
 ):
-    """Train SARL PPO with optional privileged critic."""
+    """Train SARL PPO with optional privileged critic.
+
+    When ``resume_state`` is provided the run continues in place: model weights,
+    optimizer/scheduler state and step counters are restored, and
+    ``total_timesteps`` is interpreted as *additional* steps to run. When
+    ``training_state_path`` is set, the full training state is persisted there at
+    every checkpoint save so the run can be resumed later.
+    """
     if total_timesteps <= 0:
         raise ValueError("total_timesteps must be > 0")
     if num_envs <= 0:
@@ -100,8 +114,14 @@ def train(
     if critic_mode not in ("shared", "privileged"):
         raise ValueError(f"Unknown critic_mode '{critic_mode}'")
     uses_privileged_critic = critic_mode == "privileged"
-    critic_lr = lr if critic_lr is None else critic_lr
-    critic_hidden_dims = tuple(hidden_dims if critic_hidden_dims is None else critic_hidden_dims)
+    effective_critic_observation_level = (
+        critic_observation_level if uses_privileged_critic else actor_observation_level
+    )
+    critic_lr = policy_lr if critic_lr is None else critic_lr
+    critic_hidden_dims = tuple(
+        policy_hidden_dims if critic_hidden_dims is None else critic_hidden_dims
+    )
+    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 
     print(f"\n{'=' * 60}")
     print("Training Policy-Value Network with Single Agent Reinforcement Learning (PPO)")
@@ -118,12 +138,29 @@ def train(
     num_players = len(opponents) + 1  # add the learning agent
     action_space_size = num_actions or get_action_space_size(num_players, map_type)
     _, action_to_type_idx, action_type_names = build_action_type_metadata(num_players, map_type)
-    dims = compute_single_agent_dims(num_players, map_type)
+    dims = compute_single_agent_dims(
+        num_players,
+        map_type,
+        actor_observation_level=actor_observation_level,
+        critic_observation_level=effective_critic_observation_level,
+    )
+    full_dims = compute_single_agent_dims(
+        num_players,
+        map_type,
+        actor_observation_level=actor_observation_level,
+        critic_observation_level="full",
+    )
     actor_input_dim = dims["actor_dim"]
     critic_input_dim = dims["critic_dim"]
-    numeric_dim = dims["numeric_dim"]
-    full_numeric_dim = dims["full_numeric_dim"]
+    full_critic_input_dim = full_dims["critic_dim"]
+    actor_numeric_dim = dims["actor_numeric_dim"]
+    critic_numeric_dim = dims["critic_numeric_dim"]
     board_channels = dims["board_channels"]
+    critic_observation_indices = get_observation_indices_from_full(
+        num_players,
+        map_type,
+        level=effective_critic_observation_level,
+    )
     if input_dim is not None and int(input_dim) != actor_input_dim:
         print(
             f"Warning: input_dim={input_dim} does not match computed actor dim {actor_input_dim}. "
@@ -132,7 +169,11 @@ def train(
 
     print(f"Number of players: {num_players}")
     print(f"Opponents: {[repr(o) for o in opponents]}")
-    print(f"Backbone: {backbone_type} | Model type: {model_type} | Critic mode: {critic_mode}")
+    print(
+        f"Backbone: {backbone_type} | Model type: {model_type} | "
+        f"Critic mode: {critic_mode} | Actor observation: {actor_observation_level} | "
+        f"Critic observation: {effective_critic_observation_level}"
+    )
 
     if wandb.run is None:
         if wandb_config:
@@ -156,15 +197,15 @@ def train(
 
     policy_backbone_config = build_backbone_config(
         backbone_type=backbone_type,
-        hidden_dims=hidden_dims,
+        hidden_dims=policy_hidden_dims,
         input_dim=actor_input_dim,
         board_height=BOARD_HEIGHT,
         board_width=BOARD_WIDTH,
         board_channels=board_channels,
-        numeric_dim=numeric_dim,
+        numeric_dim=actor_numeric_dim,
         xdim_cnn_channels=xdim_cnn_channels,
         xdim_cnn_kernel_size=xdim_cnn_kernel_size,
-        xdim_fusion_hidden_dim=xdim_fusion_hidden_dim,
+        xdim_fusion_hidden_dim=xdim_policy_fusion_hidden_dim,
     )
 
     if uses_privileged_critic:
@@ -188,7 +229,7 @@ def train(
             board_height=BOARD_HEIGHT,
             board_width=BOARD_WIDTH,
             board_channels=board_channels,
-            numeric_dim=full_numeric_dim,
+            numeric_dim=critic_numeric_dim,
             xdim_cnn_channels=xdim_cnn_channels,
             xdim_cnn_kernel_size=xdim_cnn_kernel_size,
             xdim_fusion_hidden_dim=xdim_critic_fusion_hidden_dim,
@@ -230,7 +271,7 @@ def train(
         print("  Critic weights loaded successfully.")
 
     agent = PolicyAgent(policy_model, model_type, device)
-    policy_optimizer = optim.Adam(policy_model.parameters(), lr=lr)
+    policy_optimizer = optim.Adam(policy_model.parameters(), lr=policy_lr)
     critic_optimizer = (
         optim.Adam(critic_model.parameters(), lr=critic_lr) if critic_model is not None else None
     )
@@ -282,6 +323,36 @@ def train(
     else:
         print("LR Scheduler: None (constant learning rate)")
 
+    resume_global_step = 0
+    resume_total_episodes = 0
+    resume_ppo_update_count = 0
+    resume_best_eval_win_rate = -float("inf")
+    resume_best_avg_reward = -float("inf")
+    resume_scheduler_steps_taken = 0
+    if resume_state is not None:
+        print("Resuming training in place from saved training state...")
+        policy_model.load_state_dict(resume_state["policy_model"])
+        if critic_model is not None and resume_state.get("critic_model") is not None:
+            critic_model.load_state_dict(resume_state["critic_model"])
+        if resume_state.get("policy_optimizer") is not None:
+            policy_optimizer.load_state_dict(resume_state["policy_optimizer"])
+        if critic_optimizer is not None and resume_state.get("critic_optimizer") is not None:
+            critic_optimizer.load_state_dict(resume_state["critic_optimizer"])
+        if scheduler is not None and resume_state.get("scheduler") is not None:
+            scheduler.load_state_dict(resume_state["scheduler"])
+        resume_global_step = int(resume_state.get("global_step", 0))
+        resume_total_episodes = int(resume_state.get("total_episodes", 0))
+        resume_ppo_update_count = int(resume_state.get("ppo_update_count", 0))
+        resume_best_eval_win_rate = float(
+            resume_state.get("best_eval_win_rate", -float("inf"))
+        )
+        resume_best_avg_reward = float(resume_state.get("best_avg_reward", -float("inf")))
+        resume_scheduler_steps_taken = int(resume_state.get("scheduler_steps_taken", 0))
+        print(
+            f"  Restored: global_step={resume_global_step:,}, "
+            f"updates={resume_ppo_update_count}, episodes={resume_total_episodes}"
+        )
+
     policy_model.eval()
     if critic_model is not None:
         critic_model.eval()
@@ -304,11 +375,13 @@ def train(
     pending_scheduler_steps = 0
     episode_rewards = deque(maxlen=metric_window)
     episode_lengths = deque(maxlen=metric_window)
-    best_eval_win_rate = -float("inf")
-    best_avg_reward = float("-inf")
-    global_step = 0
-    total_episodes = 0
-    ppo_update_count = 0
+    best_eval_win_rate = resume_best_eval_win_rate
+    best_avg_reward = resume_best_avg_reward
+    global_step = resume_global_step
+    total_episodes = resume_total_episodes
+    ppo_update_count = resume_ppo_update_count
+    scheduler_steps_taken = resume_scheduler_steps_taken
+    target_timesteps = global_step + total_timesteps
     eval_every_updates = max(0, int(eval_every_updates))
     save_every_updates = max(1, int(save_every_updates))
     if eval_every_updates > 0:
@@ -317,15 +390,19 @@ def train(
         print("Eval cadence: disabled")
     print(f"Save cadence: every {save_every_updates} update(s)")
     do_eval = eval_every_updates > 0 and (
-        eval_games_per_opponent > 0
+        fresh_eval_games_per_opponent > 0
         or (trend_eval_games_per_opponent is not None and trend_eval_games_per_opponent > 0)
     )
     trend_eval_games = (
-        eval_games_per_opponent
+        fresh_eval_games_per_opponent
         if trend_eval_games_per_opponent is None
         else max(1, trend_eval_games_per_opponent)
     )
-    raw_policy_argmax_buffer: list[np.ndarray] = []
+    played_action_buffer: list[np.ndarray] = []
+    played_action_type_steps: list[int] = []
+    played_action_type_history: dict[str, list[float]] = {
+        name: [] for name in action_type_names
+    }
 
     envs = make_puffer_vectorized_envs(
         reward_function=reward_function,
@@ -334,6 +411,7 @@ def train(
         num_envs=num_envs,
         vps_to_win=vps_to_win,
         discard_limit=discard_limit,
+        actor_observation_level=actor_observation_level,
     )
     driver_env = envs.driver_env
     if hasattr(driver_env, "env_single_observation_space"):
@@ -350,18 +428,47 @@ def train(
             obs_space=obs_space,
             obs_dtype=obs_dtype,
             actor_dim=actor_input_dim,
-            critic_dim=critic_input_dim if uses_privileged_critic else None,
+            critic_dim=full_critic_input_dim if uses_privileged_critic else None,
         )
+        if critic_batch is not None:
+            critic_batch = critic_batch[:, critic_observation_indices]
         return actor_batch, critic_batch, action_masks
 
     env_episode_rewards = np.zeros(num_envs)
     env_episode_lengths = np.zeros(num_envs, dtype=int)
 
+    def persist_training_state() -> None:
+        if not training_state_path:
+            return
+        payload = {
+            "algorithm": "sarl_ppo",
+            "global_step": global_step,
+            "total_episodes": total_episodes,
+            "ppo_update_count": ppo_update_count,
+            "best_eval_win_rate": best_eval_win_rate,
+            "best_avg_reward": best_avg_reward,
+            "scheduler_steps_taken": scheduler_steps_taken,
+            "policy_model": policy_model.state_dict(),
+            "critic_model": (
+                critic_model.state_dict() if critic_model is not None else None
+            ),
+            "policy_optimizer": policy_optimizer.state_dict(),
+            "critic_optimizer": (
+                critic_optimizer.state_dict() if critic_optimizer is not None else None
+            ),
+            "scheduler": scheduler.state_dict() if scheduler is not None else None,
+            "wandb_run_id": wandb.run.id if wandb.run is not None else None,
+        }
+        os.makedirs(os.path.dirname(training_state_path), exist_ok=True)
+        tmp_path = training_state_path + ".tmp"
+        torch.save(payload, tmp_path)
+        os.replace(tmp_path, training_state_path)
+
     print("\nStarting training...")
     observations, infos = envs.reset()
 
     with tqdm(total=total_timesteps, desc="Steps", unit="step", unit_scale=True) as pbar:
-        while global_step < total_timesteps:
+        while global_step < target_timesteps:
             states, critic_states, valid_action_masks = decode_observations(observations)
             states_t = torch.from_numpy(states).float().to(device)
             critic_states_t = (
@@ -369,11 +476,12 @@ def train(
                 if critic_states is not None
                 else None
             )
-            actions, log_probs, raw_argmax = agent.select_actions_batch(
+            actions, log_probs, _ = agent.select_actions_batch(
                 states_t,
                 valid_action_masks,
                 deterministic=deterministic_policy,
             )
+            played_action_buffer.append(actions)
             with torch.no_grad():
                 values = (
                     predict_values(states_t, critic_states_t)
@@ -382,8 +490,6 @@ def train(
                     .numpy()
                     .astype(np.float32, copy=False)
                 )
-            raw_policy_argmax_buffer.append(raw_argmax)
-
             next_observations, rewards, terminations, truncations, infos = envs.step(actions)
 
             dones = np.logical_or(terminations, truncations)
@@ -485,18 +591,32 @@ def train(
                     observations
                 )
 
-                # Log raw policy preference distribution (argmax before action-mask application).
-                if raw_policy_argmax_buffer:
-                    raw_policy_log = build_raw_policy_log_dict(
-                        raw_policy_argmax_buffer,
+                played_action_log: dict[str, Any] = {
+                    "train/rollout_steps_collected": float(buffer.steps_collected),
+                    "train/rollout_samples_collected": float(len(buffer)),
+                }
+                if played_action_buffer:
+                    played_actions = np.concatenate(played_action_buffer)
+                    played_action_type_dist, _ = compute_action_distributions(
+                        played_actions,
                         action_to_type_idx,
                         action_type_names,
                         action_space_size,
-                        rollout_steps_collected=int(buffer.steps_collected),
-                        rollout_samples_collected=int(len(buffer)),
                     )
-                    wandb.log(raw_policy_log, step=global_step)
-                    raw_policy_argmax_buffer.clear()
+                    played_action_type_steps.append(global_step)
+                    for name in action_type_names:
+                        ratio = played_action_type_dist.get(name, 0.0)
+                        played_action_type_history[name].append(ratio)
+                        played_action_log[f"rollout_played_action_type/{name}"] = ratio
+                    played_action_log["rollout/played_action_type_over_time"] = (
+                        build_action_type_time_series_chart(
+                            title="SARL PPO Played Action Type Over Time",
+                            x_values=played_action_type_steps,
+                            history_by_type=played_action_type_history,
+                        )
+                    )
+                    played_action_buffer.clear()
+                wandb.log(played_action_log, step=global_step)
 
                 metrics = run_ppo_update(
                     agent=agent,
@@ -508,7 +628,7 @@ def train(
                     value_coef=value_coef,
                     entropy_coef=entropy_coef,
                     activity_coef=activity_coef,
-                    n_epochs=n_epochs,
+                    train_epochs=train_epochs,
                     batch_size=batch_size,
                     device=device,
                     last_actor_states=bootstrap_actor_states,
@@ -579,34 +699,45 @@ def train(
                             save_path, f"critic_update_{ppo_update_count}.pt"
                         )
                         torch.save(critic_model.state_dict(), critic_snapshot_path)
+                    persist_training_state()
 
                 if do_eval and ppo_update_count % eval_every_updates == 0:
-                    policy_only = (
-                        policy_value_to_policy_only(policy_model)
-                        if isinstance(policy_model, PolicyValueNetworkWrapper)
-                        else policy_model
-                    )
-                    fresh_eval_metrics = eval_policy_against_baselines(
-                        policy_model=policy_only,
+                    eval_value_model = critic_model if critic_model is not None else policy_model
+                    fresh_eval_metrics = eval_policy_value_against_baselines(
+                        policy_model=policy_model,
+                        critic_model=eval_value_model,
                         model_type=model_type,
                         map_type=map_type,
-                        num_games=eval_games_per_opponent,
+                        eval_opponent_configs=opponent_configs,
+                        num_games=fresh_eval_games_per_opponent,
+                        gamma=gamma,
                         seed=random.randint(0, sys.maxsize),
                         vps_to_win=vps_to_win,
                         discard_limit=discard_limit,
+                        actor_observation_level=actor_observation_level,
+                        critic_observation_level=effective_critic_observation_level,
                         log_to_wandb=False,
                         global_step=global_step,
+                        device=str(device),
+                        num_envs=num_envs,
                     )
-                    trend_eval_metrics = eval_policy_against_baselines(
-                        policy_model=policy_only,
+                    trend_eval_metrics = eval_policy_value_against_baselines(
+                        policy_model=policy_model,
+                        critic_model=eval_value_model,
                         model_type=model_type,
                         map_type=map_type,
+                        eval_opponent_configs=opponent_configs,
                         num_games=trend_eval_games,
+                        gamma=gamma,
                         seed=trend_eval_seed if trend_eval_seed is not None else 0,
                         vps_to_win=vps_to_win,
                         discard_limit=discard_limit,
+                        actor_observation_level=actor_observation_level,
+                        critic_observation_level=effective_critic_observation_level,
                         log_to_wandb=False,
                         global_step=global_step,
+                        device=str(device),
+                        num_envs=num_envs,
                     )
                     fresh_log = {}
                     for key, value in fresh_eval_metrics.items():
@@ -631,7 +762,7 @@ def train(
                             eval_win_rate = float(
                                 trend_eval_metrics.get("eval/win_rate_vs_value", 0.0)
                             )
-                        elif eval_games_per_opponent is not None and eval_games_per_opponent > 0:
+                        elif fresh_eval_games_per_opponent is not None and fresh_eval_games_per_opponent > 0:
                             eval_win_rate = float(
                                 fresh_eval_metrics.get("eval/win_rate_vs_value", 0.0)
                             )
@@ -653,6 +784,7 @@ def train(
                             )
 
     envs.close()
+    persist_training_state()
     if do_eval and best_eval_win_rate > -float("inf"):
         print(
             f"\nTraining complete. {global_step:,} steps, {total_episodes} episodes. "
@@ -663,4 +795,4 @@ def train(
             f"\nTraining complete. {global_step:,} steps, {total_episodes} episodes. "
             f"Best avg training reward: {best_avg_reward:.3f}"
         )
-    return policy_model
+    return policy_model, critic_model

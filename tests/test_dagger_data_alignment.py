@@ -5,16 +5,20 @@ from __future__ import annotations
 import numpy as np
 from pufferlib.emulation import nativize
 
-from catanrl.algorithms.imitation_learning.dataset import AggregatedDataset
-from catanrl.envs.gym.rewards import WinReward
+from catanrl.envs.puffer.rewards import WinReward
 from catanrl.envs.puffer.common import create_expert, create_opponents
 from catanrl.envs.puffer.single_agent_env import SingleAgentCatanatronPufferEnv
 from catanrl.envs.puffer.rollout_utils import flatten_puffer_observation, get_action_mask_from_obs
-from catanrl.features.catanatron_utils import full_game_to_features, game_to_features
+from catanrl.features.catanatron_utils import (
+    full_game_to_features,
+    game_to_features,
+)
 from catanrl.utils.catanatron_action_space import to_action_space
 
 
-def _make_debug_env() -> SingleAgentCatanatronPufferEnv:
+def _make_debug_env(
+    actor_observation_level: str = "private",
+) -> SingleAgentCatanatronPufferEnv:
     return SingleAgentCatanatronPufferEnv(
         config={
             "map_type": "BASE",
@@ -24,6 +28,7 @@ def _make_debug_env() -> SingleAgentCatanatronPufferEnv:
             "reward_function": WinReward(),
             "shared_critic": True,
             "expert_player": create_expert("F"),
+            "actor_observation_level": actor_observation_level,
         }
     )
 
@@ -56,7 +61,9 @@ def _snapshot_state(env: SingleAgentCatanatronPufferEnv, observation: np.ndarray
         "map_type": env.map_type,
         "p0_color": env.p0.color,
         "action_space_size": env.action_space_size,
+        "actor_dim": env.actor_numeric_dim + env.board_tensor_shape[0] * 21 * 11,
         "critic_dim": env.critic_vector_dim,
+        "actor_observation_level": env.actor_observation_level,
     }
 
 
@@ -87,13 +94,6 @@ def _collect_structured_states(
 def test_actor_and_critic_features_match_runtime_helpers():
     env, states = _collect_structured_states()
     try:
-        dataset = AggregatedDataset(
-            critic_dim=states[0]["critic_dim"],
-            num_players=states[0]["num_players"],
-            map_type=states[0]["map_type"],
-            max_size=8,
-        )
-
         for state in states:
             observation = state["observation"]
             actor_vec, critic_vec = flatten_puffer_observation(observation)
@@ -111,7 +111,6 @@ def test_actor_and_critic_features_match_runtime_helpers():
 
             assert np.array_equal(actor_vec, expected_actor)
             assert np.array_equal(critic_vec, expected_critic)
-            assert np.array_equal(critic_vec[dataset.actor_indices], expected_actor)
     finally:
         env.close()
 

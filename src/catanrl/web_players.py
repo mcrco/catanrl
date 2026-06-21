@@ -11,7 +11,7 @@ import torch
 import yaml
 from catanatron.models.player import Color, Player
 
-from catanrl.algorithms.common.backbone_builder import build_backbone_config
+from catanrl.models.backbone_builder import build_backbone_config
 from catanrl.envs.puffer.common import BOARD_HEIGHT, BOARD_WIDTH, compute_single_agent_dims
 from catanrl.features.catanatron_utils import game_to_features
 from catanrl.models.models import build_flat_policy_network, build_hierarchical_policy_network

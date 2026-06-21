@@ -5,34 +5,6 @@ from typing import Tuple
 import numpy as np
 
 
-def compute_gae(
-    rewards: np.ndarray,
-    values: np.ndarray,
-    dones: np.ndarray,
-    next_value: float,
-    gamma: float = 0.99,
-    gae_lambda: float = 0.95,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Generalized Advantage Estimation shared between SARL and MARL trainers.
-    """
-    advantages = np.zeros_like(rewards)
-    last_gae = 0.0
-
-    for t in reversed(range(len(rewards))):
-        if t == len(rewards) - 1:
-            next_value_t = 0.0 if dones[t] else next_value
-        else:
-            next_value_t = values[t + 1]
-
-        delta = rewards[t] + gamma * next_value_t - values[t]
-        last_gae = delta + gamma * gae_lambda * (1 - dones[t]) * last_gae
-        advantages[t] = last_gae
-
-    returns = advantages + values
-    return advantages, returns
-
-
 def compute_gae_batched(
     rewards: np.ndarray,
     values: np.ndarray,
@@ -44,11 +16,17 @@ def compute_gae_batched(
     """
     Batched Generalized Advantage Estimation for vectorized envs.
 
+    ``dones[t]`` marks that the episode terminated (or was truncated) *at* step
+    ``t``; because the vectorized envs auto-reset, ``values[t + 1]`` is the value
+    of the *next* episode's first state. The next-step bootstrap must therefore be
+    zeroed at episode boundaries, otherwise a terminal step's advantage leaks the
+    value of an unrelated freshly-reset state.
+
     Args:
         rewards: [T, E] rewards
         values: [T, E] value estimates
-        dones: [T, E] episode done flags
-        next_values: [E] bootstrap values for final timestep
+        dones: [T, E] episode done flags (terminated or truncated at step t)
+        next_values: [E] bootstrap values for the state following the last step
     Returns:
         advantages: [T, E]
         returns: [T, E]
@@ -63,12 +41,10 @@ def compute_gae_batched(
     last_gae = np.zeros(num_envs, dtype=np.float32)
 
     for t in reversed(range(time_steps)):
-        if t == time_steps - 1:
-            next_value_t = np.where(dones[t], 0.0, next_values)
-        else:
-            next_value_t = values[t + 1]
-        delta = rewards[t] + gamma * next_value_t - values[t]
-        last_gae = delta + gamma * gae_lambda * (~dones[t]) * last_gae
+        next_nonterminal = (~dones[t]).astype(np.float32)
+        next_value_t = next_values if t == time_steps - 1 else values[t + 1]
+        delta = rewards[t] + gamma * next_nonterminal * next_value_t - values[t]
+        last_gae = delta + gamma * gae_lambda * next_nonterminal * last_gae
         advantages[t] = last_gae
 
     returns = advantages + values

@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
+from typing import Any, Callable, Dict, List, Literal, Optional
 
 import numpy as np
-import pufferlib
 import pufferlib.vector as puffer_vector
 from gymnasium import spaces
 from pufferlib.emulation import emulate, emulate_action_space, emulate_observation_space, nativize
@@ -24,12 +23,12 @@ from catanrl.envs.puffer.common import (
     compute_multiagent_input_dim,
     normalize_reset_seed,
 )
-from catanrl.envs.zoo.rewards import ShapedReward, WinReward
+from catanrl.envs.puffer.rewards import ShapedReward, WinReward
 from catanrl.features.catanatron_utils import (
+    ActorObservationLevel,
     full_game_to_features,
+    get_actor_indices_from_full,
     get_full_numeric_feature_names,
-    get_numeric_feature_names,
-    game_to_features,
 )
 from catanrl.utils.catanatron_action_space import (
     from_action_space,
@@ -51,6 +50,7 @@ class MultiAgentCatanatronEnvConfig:
     discard_limit: int = 7
     shared_critic: bool = False
     reward_function: Literal["shaped", "win"] = "shaped"
+    actor_observation_level: ActorObservationLevel = "private"
 
 
 class ParallelCatanatronPufferEnv(PufferEnv):
@@ -65,6 +65,7 @@ class ParallelCatanatronPufferEnv(PufferEnv):
         self.vps_to_win = int(self.config.vps_to_win)
         self.discard_limit = int(self.config.discard_limit)
         self.shared_critic = bool(self.config.shared_critic)
+        self.actor_observation_level = self.config.actor_observation_level
 
         self.possible_agents = [f"player_{idx}" for idx in range(self.num_players)]
         self.colors_order = list(COLOR_ORDER[: self.num_players])
@@ -82,18 +83,27 @@ class ParallelCatanatronPufferEnv(PufferEnv):
         else:
             raise ValueError(f"Invalid reward function: {self.config.reward_function}")
 
-        actor_dim, board_shape, numeric_dim = compute_multiagent_input_dim(
+        actor_dim, board_shape, actor_numeric_dim = compute_multiagent_input_dim(
             self.num_players,
             self.map_type,
+            actor_observation_level=self.actor_observation_level,
         )
         self.vector_dim = actor_dim
         self.board_tensor_shape = board_shape
-        self.numeric_dim = numeric_dim
+        self.actor_numeric_dim = actor_numeric_dim
+        self.numeric_dim = self.actor_numeric_dim
         full_numeric_dim = len(get_full_numeric_feature_names(self.num_players, self.map_type))
-        self.critic_vector_dim = self.vector_dim + (full_numeric_dim - self.numeric_dim)
+        self.critic_vector_dim = self.vector_dim + (full_numeric_dim - self.actor_numeric_dim)
+        self.critic_numeric_dim = full_numeric_dim
+        self.actor_observation_indices = get_actor_indices_from_full(
+            self.num_players,
+            self.map_type,
+            level=self.actor_observation_level,
+        )
+        self.actor_numeric_indices = self.actor_observation_indices[: self.actor_numeric_dim]
 
         self.env_single_observation_space = build_shared_critic_observation_space(
-            numeric_dim=self.numeric_dim,
+            numeric_dim=self.actor_numeric_dim,
             board_tensor_shape=self.board_tensor_shape,
             critic_dim=self.critic_vector_dim,
             action_space_size=self.action_space_size,
@@ -132,8 +142,13 @@ class ParallelCatanatronPufferEnv(PufferEnv):
 
     def _actor_observation(self, color: Color) -> LocalObservation:
         assert self.game is not None
-        vector = game_to_features(self.game, color, self.num_players, self.map_type)
-        numeric = vector[: self.numeric_dim]
+        full_vector = full_game_to_features(
+            self.game,
+            self.num_players,
+            self.map_type,
+            base_color=color,
+        )
+        numeric = full_vector[self.actor_numeric_indices]
         board = create_board_tensor(self.game, color, channels_first=True).astype(
             np.float32,
             copy=False,
@@ -189,6 +204,20 @@ class ParallelCatanatronPufferEnv(PufferEnv):
                 base_color=color,
             )
         return info
+
+    def _winner_info(self) -> Dict[str, Any]:
+        assert self.game is not None
+        winning_color = self.game.winning_color()
+        winner_agent = self.color_to_agent_name.get(winning_color) if winning_color else None
+        winner_agent_index = (
+            self.possible_agents.index(winner_agent) if winner_agent in self.possible_agents else -1
+        )
+        return {
+            "winning_color": winning_color.value if winning_color is not None else None,
+            "winner_agent": winner_agent,
+            "winner_agent_index": winner_agent_index,
+            "player_0_won": winner_agent == "player_0",
+        }
 
     def reset(self, seed=None):
         seed = normalize_reset_seed(seed)
@@ -289,7 +318,9 @@ class ParallelCatanatronPufferEnv(PufferEnv):
         truncateds = {agent: False for agent in self.agents}
 
         winning_color = self.game.winning_color()
+        terminal_winner_info: Dict[str, Any] = {}
         if winning_color is not None:
+            terminal_winner_info = self._winner_info()
             for agent in self.agents:
                 dones[agent] = True
             self.agents = []
@@ -328,7 +359,10 @@ class ParallelCatanatronPufferEnv(PufferEnv):
         self._all_done = all(dones.values()) or all(truncateds.values())
         info_list: List[Dict[str, Any]] = []
         for agent in self.possible_agents:
-            info_list.append(infos.get(agent, {}))
+            info = infos.get(agent, {})
+            if terminal_winner_info:
+                info = {**info, **terminal_winner_info}
+            info_list.append(info)
         return self.observations, self.rewards, self.terminals, self.truncations, info_list
 
     def close(self):
@@ -342,6 +376,7 @@ def _make_parallel_env(
     discard_limit: int,
     shared_critic: bool,
     reward_function: Literal["shaped", "win"],
+    actor_observation_level: ActorObservationLevel = "private",
 ) -> Callable[..., ParallelCatanatronPufferEnv]:
     def _config() -> MultiAgentCatanatronEnvConfig:
         return MultiAgentCatanatronEnvConfig(
@@ -351,6 +386,7 @@ def _make_parallel_env(
             discard_limit=discard_limit,
             shared_critic=shared_critic,
             reward_function=reward_function,
+            actor_observation_level=actor_observation_level,
         )
 
     return lambda **kwargs: ParallelCatanatronPufferEnv(config=_config(), **kwargs)
@@ -364,6 +400,7 @@ def make_vectorized_envs(
     shared_critic: bool,
     reward_function: Literal["shaped", "win"],
     num_envs: int,
+    actor_observation_level: ActorObservationLevel = "private",
 ):
     return puffer_vector.make(
         _make_parallel_env(
@@ -373,6 +410,7 @@ def make_vectorized_envs(
             discard_limit,
             shared_critic,
             reward_function,
+            actor_observation_level,
         ),
         num_envs=num_envs,
         backend=puffer_vector.Multiprocessing,

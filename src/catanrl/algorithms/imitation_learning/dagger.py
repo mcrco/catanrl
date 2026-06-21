@@ -20,20 +20,40 @@ from tqdm import tqdm
 
 import wandb
 
-from catanrl.algorithms.common import PolicyAgent, build_backbone_config, mask_action_logits
+from catanrl.algorithms.common import PolicyAgent, mask_action_logits
+from catanrl.models.backbone_builder import build_backbone_config
 from ...envs import decode_puffer_batch, extract_expert_actions_from_infos
 from ...envs.puffer.single_agent_env import compute_single_agent_dims, make_puffer_vectorized_envs
 from ...eval.training_eval import eval_policy_value_against_baselines
 from ...models.models import (
     build_flat_policy_network,
+    build_flat_policy_value_network,
     build_hierarchical_policy_network,
+    build_hierarchical_policy_value_network,
     build_value_network,
 )
-from ...models.wrappers import PolicyNetworkWrapper, ValueNetworkWrapper
-from ...features.catanatron_utils import get_actor_indices_from_critic
+from ...models.inference_utils import forward_policy_value
+from ...models.wrappers import PolicyNetworkWrapper, PolicyValueNetworkWrapper, ValueNetworkWrapper
+from ...features.catanatron_utils import (
+    ActorObservationLevel,
+    CriticObservationLevel,
+    get_actor_indices_from_full,
+    get_observation_indices_from_full,
+)
 from ...utils.catanatron_action_space import get_action_array, get_action_space_size
 from ...utils.seeding import derive_seed
 from .dataset import AggregatedDataset, EvictionStrategy
+
+
+def _predict_critic_values(
+    critic_model: ValueNetworkWrapper | PolicyValueNetworkWrapper,
+    critic_features: torch.Tensor,
+    model_type: str,
+) -> torch.Tensor:
+    if isinstance(critic_model, PolicyValueNetworkWrapper):
+        _, values = forward_policy_value(critic_model, None, critic_features, model_type)
+        return values
+    return critic_model(critic_features).squeeze(-1)
 
 
 def _assert_actions_are_unmasked(
@@ -80,17 +100,18 @@ class DAggerCollectStats:
 class DAggerRolloutBatch:
     """Flattened on-policy batch from the latest collection phase (for agreement metrics)."""
 
-    critic_states: np.ndarray
+    full_states: np.ndarray
     expert_actions: np.ndarray
+    played_actions: np.ndarray
     action_masks: np.ndarray
 
 
 def _policy_expert_agreement(
     policy_agent: PolicyAgent,
-    critic_states: np.ndarray,
+    full_states: np.ndarray,
     expert_actions: np.ndarray,
     action_masks: np.ndarray,
-    actor_indices: np.ndarray,
+    actor_observation_indices: np.ndarray,
     device: torch.device,
     batch_size: int = 512,
 ) -> float:
@@ -105,7 +126,7 @@ def _policy_expert_agreement(
         with torch.no_grad():
             for start in range(0, n, batch_size):
                 end = min(start + batch_size, n)
-                actor = critic_states[start:end][:, actor_indices]
+                actor = full_states[start:end][:, actor_observation_indices]
                 actor_t = torch.from_numpy(actor).float().to(device)
                 masks = action_masks[start:end]
                 expert = expert_actions[start:end]
@@ -153,14 +174,15 @@ def _build_action_type_time_series_chart(
 def _collect_dagger_rollouts_vectorized(
     envs: Any,
     policy_agent: PolicyAgent,
-    critic_model: ValueNetworkWrapper,
+    critic_model: ValueNetworkWrapper | PolicyValueNetworkWrapper,
     dataset: AggregatedDataset,
     num_steps: int,
     beta: float,
     gamma: float,
     device: torch.device,
     actor_dim: int,
-    critic_dim: int,
+    full_state_dim: int,
+    critic_observation_indices: np.ndarray,
     progress_callback: Optional[Callable[[int], None]] = None,
     seed: int | None = None,
 ) -> Tuple[DAggerCollectStats, DAggerRolloutBatch]:
@@ -183,8 +205,9 @@ def _collect_dagger_rollouts_vectorized(
         obs_dtype = np.float32
 
     # Preallocated buffers for the full collection phase (time x env)
-    critic_states_tmj = np.zeros((num_steps, num_envs, critic_dim), dtype=np.float32)
+    full_states_tmj = np.zeros((num_steps, num_envs, full_state_dim), dtype=np.float32)
     expert_actions_tmj = np.zeros((num_steps, num_envs), dtype=np.int64)
+    played_actions_tmj = np.zeros((num_steps, num_envs), dtype=np.int64)
     rewards_tmj = np.zeros((num_steps, num_envs), dtype=np.float32)
     is_single_action_tmj = np.zeros((num_steps, num_envs), dtype=np.bool_)
     action_masks_tmj = np.zeros((num_steps, num_envs, action_space_size), dtype=np.bool_)
@@ -215,7 +238,7 @@ def _collect_dagger_rollouts_vectorized(
             obs_space=obs_space,
             obs_dtype=obs_dtype,
             actor_dim=actor_dim,
-            critic_dim=critic_dim,
+            critic_dim=full_state_dim,
         )
         if critic_batch is None:
             raise RuntimeError("Expected critic observations while collecting DAgger rollouts.")
@@ -250,8 +273,9 @@ def _collect_dagger_rollouts_vectorized(
         total_actions += batch_size
 
         # Store experience in time-major buffers
-        critic_states_tmj[step_idx] = critic_batch
+        full_states_tmj[step_idx] = critic_batch
         expert_actions_tmj[step_idx] = expert_actions
+        played_actions_tmj[step_idx] = actions_to_play
         is_single_action_tmj[step_idx] = is_single_action_batch
         action_masks_tmj[step_idx] = action_masks
 
@@ -282,14 +306,18 @@ def _collect_dagger_rollouts_vectorized(
         obs_space=obs_space,
         obs_dtype=obs_dtype,
         actor_dim=actor_dim,
-        critic_dim=critic_dim,
+        critic_dim=full_state_dim,
     )
     if last_critic_states is None:
         raise RuntimeError("Expected critic observations when bootstrapping DAgger returns.")
 
     with torch.no_grad():
-        last_critic_tensor = torch.from_numpy(last_critic_states).float().to(device)
-        bootstrap_values = critic_model(last_critic_tensor).squeeze(-1).cpu().numpy()
+        last_critic_tensor = torch.from_numpy(
+            last_critic_states[:, critic_observation_indices]
+        ).float().to(device)
+        bootstrap_values = _predict_critic_values(
+            critic_model, last_critic_tensor, policy_agent.model_type
+        ).cpu().numpy()
     bootstrap_values = bootstrap_values.astype(np.float32, copy=False)
     bootstrap_values = np.where(dones_tmj[-1], 0.0, bootstrap_values)
     if was_training:
@@ -304,7 +332,7 @@ def _collect_dagger_rollouts_vectorized(
         running_returns = np.where(dones_tmj[step_idx], 0.0, running_returns)
 
     dataset.add_samples(
-        critic_states=critic_states_tmj.reshape(-1, critic_dim),
+        full_states=full_states_tmj.reshape(-1, full_state_dim),
         expert_actions=expert_actions_tmj.reshape(-1),
         returns=returns_tmj.reshape(-1),
         is_single_action=is_single_action_tmj.reshape(-1),
@@ -321,8 +349,9 @@ def _collect_dagger_rollouts_vectorized(
         dataset_size=len(dataset),
     )
     rollout = DAggerRolloutBatch(
-        critic_states=critic_states_tmj.reshape(-1, critic_dim),
+        full_states=full_states_tmj.reshape(-1, full_state_dim),
         expert_actions=expert_actions_tmj.reshape(-1),
+        played_actions=played_actions_tmj.reshape(-1),
         action_masks=action_masks_tmj.reshape(-1, action_space_size),
     )
     return stats, rollout
@@ -331,18 +360,21 @@ def _collect_dagger_rollouts_vectorized(
 def _train_on_dataset(
     dataset: AggregatedDataset,
     policy_agent: PolicyAgent,
-    critic_model: ValueNetworkWrapper,
+    critic_model: ValueNetworkWrapper | PolicyValueNetworkWrapper,
     policy_optimizer: torch.optim.Optimizer,
-    critic_optimizer: torch.optim.Optimizer,
+    critic_optimizer: torch.optim.Optimizer | None,
     epochs: int,
     batch_size: int,
     device: torch.device,
     num_players: int,
     map_type: Literal["BASE", "MINI", "TOURNAMENT"],
-    max_grad_norm: float = 5.0,
+    max_grad_norm: float = 1.0,
     progress_desc: str = "Train",
+    *,
+    model_type: str = "flat",
+    uses_shared_network: bool = False,
 ) -> Dict[str, Any]:
-    """Run supervised updates on the aggregated dataset with separate policy/critic."""
+    """Run behavioral-cloning updates on the aggregated dataset."""
     if len(dataset) == 0 or epochs <= 0:
         return {
             "total_loss": 0.0,
@@ -399,37 +431,67 @@ def _train_on_dataset(
                         f"Encountered {invalid_count} masked expert actions during training."
                     )
 
-                # Policy update (only on non-single-action steps since end-turn steps dominate otherwise)
-                policy_optimizer.zero_grad()
-                policy_logits = policy_agent.policy_logits(actor_features)
-                masked_policy_logits, _ = mask_action_logits(
-                    policy_logits,
-                    action_masks.detach().cpu().numpy(),
-                    clamp_range=(-100.0, 100.0),
-                )
                 non_single_mask = ~is_single_action
-                if non_single_mask.any():
-                    # Compute loss only for non-single-action steps
-                    policy_loss_per_sample = F.cross_entropy(
-                        masked_policy_logits, actions, reduction="none"
+                if uses_shared_network:
+                    policy_optimizer.zero_grad()
+                    policy_logits = policy_agent.policy_logits(actor_features)
+                    masked_policy_logits, _ = mask_action_logits(
+                        policy_logits,
+                        action_masks.detach().cpu().numpy(),
+                        clamp_range=(-100.0, 100.0),
                     )
-                    policy_loss = policy_loss_per_sample[non_single_mask].mean()
-                    policy_loss.backward()
+                    if non_single_mask.any():
+                        policy_loss_per_sample = F.cross_entropy(
+                            masked_policy_logits, actions, reduction="none"
+                        )
+                        policy_loss = policy_loss_per_sample[non_single_mask].mean()
+                    else:
+                        policy_loss = torch.tensor(0.0, device=device)
+
+                    _, value_pred = forward_policy_value(
+                        policy_agent.model,
+                        None,
+                        actor_features,
+                        model_type,
+                    )
+                    value_loss = F.mse_loss(value_pred, returns)
+                    (policy_loss + value_loss).backward()
                     torch.nn.utils.clip_grad_norm_(
                         policy_agent.model.parameters(), max_norm=max_grad_norm
                     )
                     policy_optimizer.step()
                 else:
-                    # All samples are single-action steps, skip policy update
-                    policy_loss = torch.tensor(0.0, device=device)
+                    assert critic_optimizer is not None
+                    policy_optimizer.zero_grad()
+                    policy_logits = policy_agent.policy_logits(actor_features)
+                    masked_policy_logits, _ = mask_action_logits(
+                        policy_logits,
+                        action_masks.detach().cpu().numpy(),
+                        clamp_range=(-100.0, 100.0),
+                    )
+                    if non_single_mask.any():
+                        policy_loss_per_sample = F.cross_entropy(
+                            masked_policy_logits, actions, reduction="none"
+                        )
+                        policy_loss = policy_loss_per_sample[non_single_mask].mean()
+                        policy_loss.backward()
+                        torch.nn.utils.clip_grad_norm_(
+                            policy_agent.model.parameters(), max_norm=max_grad_norm
+                        )
+                        policy_optimizer.step()
+                    else:
+                        policy_loss = torch.tensor(0.0, device=device)
 
-                # Critic update
-                critic_optimizer.zero_grad()
-                value_pred = critic_model(critic_features).squeeze(-1)
-                value_loss = F.mse_loss(value_pred, returns)
-                value_loss.backward()
-                torch.nn.utils.clip_grad_norm_(critic_model.parameters(), max_norm=max_grad_norm)
-                critic_optimizer.step()
+                    critic_optimizer.zero_grad()
+                    value_pred = _predict_critic_values(
+                        critic_model, critic_features, model_type
+                    )
+                    value_loss = F.mse_loss(value_pred, returns)
+                    value_loss.backward()
+                    torch.nn.utils.clip_grad_norm_(
+                        critic_model.parameters(), max_norm=max_grad_norm
+                    )
+                    critic_optimizer.step()
 
                 # Metrics
                 batch_total_loss = policy_loss + value_loss
@@ -489,6 +551,9 @@ def train(
     expert_config: str = "AB:2",
     opponent_configs: Optional[Sequence[str]] = None,
     map_type: Literal["BASE", "MINI", "TOURNAMENT"] = "BASE",
+    actor_observation_level: ActorObservationLevel = "private",
+    critic_observation_level: CriticObservationLevel = "full",
+    network_mode: str = "separate",
     vps_to_win: int = 15,
     discard_limit: int = 9,
     beta_init: float = 1.0,
@@ -499,16 +564,18 @@ def train(
     save_path: Optional[str] = None,
     device: Optional[str] = None,
     wandb_config: Optional[Dict[str, Any]] = None,
-    eval_games_per_opponent: int = 250,
+    fresh_eval_games_per_opponent: int = 250,
     eval_compare_to_expert: bool = True,
     eval_expert_config: Optional[str] = None,
     eval_every_iterations: int = 1,
-    save_every_iterations: int = 1,
+    save_every_updates: int = 1,
     seed: int = 42,
     num_envs: int = 4,
     reward_function: Literal["shaped", "win"] = "shaped",
-    max_grad_norm: float = 5.0,
-) -> Tuple[PolicyNetworkWrapper, ValueNetworkWrapper]:
+    max_grad_norm: float = 1.0,
+    resume_state: Optional[Dict[str, Any]] = None,
+    training_state_path: Optional[str] = None,
+) -> Tuple[PolicyNetworkWrapper | PolicyValueNetworkWrapper, ValueNetworkWrapper | None]:
     """
     Train separate policy and critic networks with DAgger using vectorized environments.
 
@@ -547,11 +614,11 @@ def train(
         save_path: Directory to save checkpoints
         device: Torch device ("cuda" or "cpu")
         wandb_config: W&B initialization config
-        eval_games_per_opponent: Number of games to play against each baseline opponent
+        fresh_eval_games_per_opponent: Number of games to play against each baseline opponent
         eval_compare_to_expert: Whether to compute expert-accuracy/F1 during eval
         eval_expert_config: Expert config to use for eval labels (defaults to expert_config)
         eval_every_iterations: Run eval every N DAgger iterations (always evals on final iteration)
-        save_every_iterations: Save periodic checkpoints every N iterations
+        save_every_updates: Save periodic checkpoints every N iterations
         seed: Random seed
         num_envs: Number of parallel environments
         reward_function: Reward function type ("shaped" or "win")
@@ -580,18 +647,18 @@ def train(
 
     if eval_every_iterations < 1:
         raise ValueError("eval_every_iterations must be >= 1")
-    if save_every_iterations < 1:
-        raise ValueError("save_every_iterations must be >= 1")
+    if save_every_updates < 1:
+        raise ValueError("save_every_updates must be >= 1")
 
     update_every_iterations = 1
-    if save_every_iterations % update_every_iterations != 0:
+    if save_every_updates % update_every_iterations != 0:
         raise ValueError(
-            "save_every_iterations must be a multiple of update frequency "
+            "save_every_updates must be a multiple of update frequency "
             f"({update_every_iterations})"
         )
-    if save_every_iterations % eval_every_iterations != 0:
+    if save_every_updates % eval_every_iterations != 0:
         raise ValueError(
-            "save_every_iterations must be a multiple of eval_every_iterations "
+            "save_every_updates must be a multiple of eval_every_iterations "
             f"({eval_every_iterations})"
         )
 
@@ -600,34 +667,72 @@ def train(
     if not xdim_cnn_channels:
         raise ValueError("xdim_cnn_channels cannot be empty")
 
+    if network_mode == "shared" and actor_observation_level != critic_observation_level:
+        raise ValueError(
+            f"network_mode='shared' requires policy and critic information levels to match, "
+            f"but got actor_observation_level={actor_observation_level!r} and "
+            f"critic_observation_level={critic_observation_level!r}. "
+            f"Either set both to the same level (e.g. 'private') or use network_mode='separate'."
+        )
+    uses_shared_network = network_mode == "shared"
+
     # Compute dimensions
     num_players = len(opponent_configs) + 1
     action_space_size = num_actions or get_action_space_size(num_players, map_type)
     action_array = get_action_array(num_players, map_type)
     action_type_names = list(dict.fromkeys(action[0].name for action in action_array))
-    dims = compute_single_agent_dims(num_players, map_type)
+    dims = compute_single_agent_dims(
+        num_players,
+        map_type,
+        actor_observation_level=actor_observation_level,
+        critic_observation_level=critic_observation_level,
+    )
+    full_dims = compute_single_agent_dims(
+        num_players,
+        map_type,
+        actor_observation_level=actor_observation_level,
+        critic_observation_level="full",
+    )
     actor_dim = dims["actor_dim"]
     critic_dim = dims["critic_dim"]
-    actor_indices = get_actor_indices_from_critic(num_players, map_type)
-    numeric_dim = dims["numeric_dim"]
-    full_numeric_dim = dims["full_numeric_dim"]
+    full_state_dim = full_dims["critic_dim"]
+    actor_numeric_dim = dims["actor_numeric_dim"]
+    critic_numeric_dim = dims["critic_numeric_dim"]
     board_channels = dims["board_channels"]
+    actor_observation_indices = get_actor_indices_from_full(
+        num_players,
+        map_type,
+        level=actor_observation_level,
+    )
+    critic_observation_indices = get_observation_indices_from_full(
+        num_players,
+        map_type,
+        level=critic_observation_level,
+    )
 
     # Board shape for xdim backbone (C, W, H)
     BOARD_WIDTH = 21
     BOARD_HEIGHT = 11
 
     print(f"\n{'=' * 60}")
-    print("DAgger Training with Separate Policy/Critic Networks")
+    print(
+        "DAgger Training with "
+        f"{'Shared Policy-Value' if uses_shared_network else 'Separate Policy/Critic'} Networks"
+    )
     print(f"{'=' * 60}")
     print(f"Device: {device}")
     print(f"Map type: {map_type} | Players: {num_players}")
     print(f"Game params: vps_to_win={vps_to_win}, discard_limit={discard_limit}")
-    print(f"Backbone: {backbone_type} | Model type: {model_type}")
+    print(
+        f"Backbone: {backbone_type} | Model type: {model_type} | "
+        f"Actor observation: {actor_observation_level} | "
+        f"Critic observation: {critic_observation_level}"
+    )
     print(f"Actor input dim: {actor_dim} | Critic input dim: {critic_dim}")
     if backbone_type in ("xdim", "xdim_res"):
         print(
-            f"Board shape (C, W, H): ({board_channels}, {BOARD_WIDTH}, {BOARD_HEIGHT}) | Numeric dim: {numeric_dim}"
+            f"Board shape (C, W, H): ({board_channels}, {BOARD_WIDTH}, {BOARD_HEIGHT}) | "
+            f"Actor numeric dim: {actor_numeric_dim} | Critic numeric dim: {critic_numeric_dim}"
         )
         print(
             f"XDim config: cnn_channels={xdim_cnn_channels}, kernel={xdim_cnn_kernel_size}, "
@@ -636,7 +741,7 @@ def train(
     print(f"Parallel environments: {num_envs}")
     print(f"Steps per iteration: {steps_per_iteration}")
     print(f"Eval cadence: every {eval_every_iterations} iteration(s)")
-    print(f"Save cadence: every {save_every_iterations} iteration(s)")
+    print(f"Save cadence: every {save_every_updates} iteration(s)")
 
     policy_backbone_config = build_backbone_config(
         backbone_type=backbone_type,
@@ -645,38 +750,53 @@ def train(
         board_height=BOARD_HEIGHT,
         board_width=BOARD_WIDTH,
         board_channels=board_channels,
-        numeric_dim=numeric_dim,
+        numeric_dim=actor_numeric_dim,
         xdim_cnn_channels=xdim_cnn_channels,
         xdim_cnn_kernel_size=xdim_cnn_kernel_size,
         xdim_fusion_hidden_dim=xdim_policy_fusion_hidden_dim,
     )
 
-    if model_type == "flat":
-        policy_model = build_flat_policy_network(
-            backbone_config=policy_backbone_config, num_actions=action_space_size
-        ).to(torch_device)
-    elif model_type == "hierarchical":
-        policy_model = build_hierarchical_policy_network(
-            backbone_config=policy_backbone_config,
-            num_players=num_players,
-            map_type=map_type,
-        ).to(torch_device)
+    if uses_shared_network:
+        if model_type == "flat":
+            policy_model = build_flat_policy_value_network(
+                backbone_config=policy_backbone_config, num_actions=action_space_size
+            ).to(torch_device)
+        elif model_type == "hierarchical":
+            policy_model = build_hierarchical_policy_value_network(
+                backbone_config=policy_backbone_config,
+                num_players=num_players,
+                map_type=map_type,
+            ).to(torch_device)
+        else:
+            raise ValueError(f"Unknown model_type '{model_type}'")
+        critic_model = None
     else:
-        raise ValueError(f"Unknown model_type '{model_type}'")
+        if model_type == "flat":
+            policy_model = build_flat_policy_network(
+                backbone_config=policy_backbone_config, num_actions=action_space_size
+            ).to(torch_device)
+        elif model_type == "hierarchical":
+            policy_model = build_hierarchical_policy_network(
+                backbone_config=policy_backbone_config,
+                num_players=num_players,
+                map_type=map_type,
+            ).to(torch_device)
+        else:
+            raise ValueError(f"Unknown model_type '{model_type}'")
 
-    critic_backbone_config = build_backbone_config(
-        backbone_type=backbone_type,
-        hidden_dims=critic_hidden_dims,
-        input_dim=critic_dim,
-        board_height=BOARD_HEIGHT,
-        board_width=BOARD_WIDTH,
-        board_channels=board_channels,
-        numeric_dim=full_numeric_dim,
-        xdim_cnn_channels=xdim_cnn_channels,
-        xdim_cnn_kernel_size=xdim_cnn_kernel_size,
-        xdim_fusion_hidden_dim=xdim_critic_fusion_hidden_dim,
-    )
-    critic_model = build_value_network(backbone_config=critic_backbone_config).to(torch_device)
+        critic_backbone_config = build_backbone_config(
+            backbone_type=backbone_type,
+            hidden_dims=critic_hidden_dims,
+            input_dim=critic_dim,
+            board_height=BOARD_HEIGHT,
+            board_width=BOARD_WIDTH,
+            board_channels=board_channels,
+            numeric_dim=critic_numeric_dim,
+            xdim_cnn_channels=xdim_cnn_channels,
+            xdim_cnn_kernel_size=xdim_cnn_kernel_size,
+            xdim_fusion_hidden_dim=xdim_critic_fusion_hidden_dim,
+        )
+        critic_model = build_value_network(backbone_config=critic_backbone_config).to(torch_device)
 
     # Load weights if provided
     if load_policy_weights and os.path.exists(load_policy_weights):
@@ -686,7 +806,7 @@ def train(
     elif load_policy_weights:
         print(f"[DAgger] Warning: policy weights file '{load_policy_weights}' not found.")
 
-    if load_critic_weights and os.path.exists(load_critic_weights):
+    if load_critic_weights and critic_model is not None and os.path.exists(load_critic_weights):
         state = torch.load(load_critic_weights, map_location=torch_device)
         critic_model.load_state_dict(state)
         print(f"[DAgger] Loaded critic weights from {load_critic_weights}")
@@ -694,8 +814,14 @@ def train(
         print(f"[DAgger] Warning: critic weights file '{load_critic_weights}' not found.")
 
     policy_optimizer = torch.optim.Adam(policy_model.parameters(), lr=policy_lr)
-    critic_optimizer = torch.optim.Adam(critic_model.parameters(), lr=critic_lr)
+    critic_optimizer = (
+        None
+        if uses_shared_network
+        else torch.optim.Adam(critic_model.parameters(), lr=critic_lr)
+    )
     policy_agent = PolicyAgent(policy_model, model_type, torch_device)
+    value_model = policy_model if uses_shared_network else critic_model
+    assert value_model is not None
 
     # Create vectorized environments with expert player embedded
     # Each env will compute expert actions and include them in info dict
@@ -707,15 +833,18 @@ def train(
         vps_to_win=vps_to_win,
         discard_limit=discard_limit,
         expert_config=expert_config,
+        actor_observation_level=actor_observation_level,
     )
 
     if max_dataset_size is None:
         max_dataset_size = 100_000_000
 
     dataset = AggregatedDataset(
-        critic_dim=critic_dim,
+        full_state_dim=full_state_dim,
         num_players=num_players,
         map_type=map_type,
+        actor_observation_level=actor_observation_level,
+        critic_observation_level=critic_observation_level,
         max_size=max_dataset_size,
         eviction_strategy=eviction_strategy,
     )
@@ -725,28 +854,78 @@ def train(
     best_eval_critic_mse = float("inf")
     total_steps = n_iterations * num_envs * steps_per_iteration
     global_step = 0
-    policy_pred_action_type_steps: List[int] = []
-    policy_pred_action_type_history: Dict[str, List[float]] = {
+    start_iteration = 0
+
+    if resume_state is not None:
+        print("[DAgger] Resuming training in place from saved training state...")
+        policy_model.load_state_dict(resume_state["policy_model"])
+        if critic_model is not None and resume_state.get("critic_model") is not None:
+            critic_model.load_state_dict(resume_state["critic_model"])
+        if resume_state.get("policy_optimizer") is not None:
+            policy_optimizer.load_state_dict(resume_state["policy_optimizer"])
+        if critic_optimizer is not None and resume_state.get("critic_optimizer") is not None:
+            critic_optimizer.load_state_dict(resume_state["critic_optimizer"])
+        global_step = int(resume_state.get("global_step", 0))
+        start_iteration = int(resume_state.get("iteration", 0))
+        beta = float(resume_state.get("beta", beta_init))
+        best_eval_win_rate = float(resume_state.get("best_eval_win_rate", float("-inf")))
+        best_eval_critic_mse = float(resume_state.get("best_eval_critic_mse", float("inf")))
+        print(
+            f"  Restored: global_step={global_step:,}, "
+            f"completed_iterations={start_iteration}, beta={beta:.3f}"
+        )
+
+    def persist_training_state(completed_iteration: int) -> None:
+        if not training_state_path:
+            return
+        payload = {
+            "algorithm": "dagger",
+            "global_step": global_step,
+            "iteration": completed_iteration,
+            "beta": beta,
+            "best_eval_win_rate": best_eval_win_rate,
+            "best_eval_critic_mse": best_eval_critic_mse,
+            "policy_model": policy_model.state_dict(),
+            "critic_model": (
+                critic_model.state_dict() if critic_model is not None else None
+            ),
+            "policy_optimizer": policy_optimizer.state_dict(),
+            "critic_optimizer": (
+                critic_optimizer.state_dict() if critic_optimizer is not None else None
+            ),
+            "wandb_run_id": wandb.run.id if wandb.run is not None else None,
+        }
+        os.makedirs(os.path.dirname(training_state_path), exist_ok=True)
+        tmp_path = training_state_path + ".tmp"
+        torch.save(payload, tmp_path)
+        os.replace(tmp_path, training_state_path)
+
+    played_action_type_steps: List[int] = []
+    played_action_type_history: Dict[str, List[float]] = {
         name: [] for name in action_type_names
     }
 
     try:
+        last_iteration = start_iteration + n_iterations
         with tqdm(total=total_steps, desc="DAgger", unit="step", unit_scale=True) as pbar:
-            for iteration in range(1, n_iterations + 1):
-                pbar.set_postfix({"iter": f"{iteration}/{n_iterations}", "beta": f"{beta:.2f}"})
+            for iteration in range(start_iteration + 1, last_iteration + 1):
+                pbar.set_postfix(
+                    {"iter": f"{iteration}/{last_iteration}", "beta": f"{beta:.2f}"}
+                )
                 collect_seed = derive_seed(seed, "dagger_collect", iteration)
 
                 collect_stats, rollout_batch = _collect_dagger_rollouts_vectorized(
                     envs=envs,
                     policy_agent=policy_agent,
-                    critic_model=critic_model,
+                    critic_model=value_model,
                     dataset=dataset,
                     num_steps=steps_per_iteration,
                     beta=beta,
                     gamma=gamma,
                     device=torch_device,
                     actor_dim=actor_dim,
-                    critic_dim=critic_dim,
+                    full_state_dim=full_state_dim,
+                    critic_observation_indices=critic_observation_indices,
                     progress_callback=pbar.update,
                     seed=collect_seed,
                 )
@@ -760,17 +939,17 @@ def train(
 
                 agreement_pre = _policy_expert_agreement(
                     policy_agent=policy_agent,
-                    critic_states=rollout_batch.critic_states,
+                    full_states=rollout_batch.full_states,
                     expert_actions=rollout_batch.expert_actions,
                     action_masks=rollout_batch.action_masks,
-                    actor_indices=actor_indices,
+                    actor_observation_indices=actor_observation_indices,
                     device=torch_device,
                 )
 
                 train_stats = _train_on_dataset(
                     dataset=dataset,
                     policy_agent=policy_agent,
-                    critic_model=critic_model,
+                    critic_model=value_model,
                     policy_optimizer=policy_optimizer,
                     critic_optimizer=critic_optimizer,
                     epochs=train_epochs,
@@ -779,55 +958,61 @@ def train(
                     num_players=num_players,
                     map_type=map_type,
                     max_grad_norm=max_grad_norm,
-                    progress_desc=f"Train {iteration}/{n_iterations}",
+                    progress_desc=f"Train {iteration}/{last_iteration}",
+                    model_type=model_type,
+                    uses_shared_network=uses_shared_network,
                 )
 
                 agreement_post = _policy_expert_agreement(
                     policy_agent=policy_agent,
-                    critic_states=rollout_batch.critic_states,
+                    full_states=rollout_batch.full_states,
                     expert_actions=rollout_batch.expert_actions,
                     action_masks=rollout_batch.action_masks,
-                    actor_indices=actor_indices,
+                    actor_observation_indices=actor_observation_indices,
                     device=torch_device,
                 )
 
-                should_eval = iteration % eval_every_iterations == 0 or iteration == n_iterations
+                should_eval = (
+                    iteration % eval_every_iterations == 0 or iteration == last_iteration
+                )
                 eval_metrics: Dict[str, float] = {}
                 eval_win_rate: Optional[float] = None
                 if should_eval:
                     # Evaluate policy against baselines and critic value predictions
                     policy_model.eval()
-                    critic_model.eval()
+                    value_model.eval()
                     eval_expert_cfg = (
                         eval_expert_config if eval_expert_config is not None else expert_config
                     )
                     with torch.no_grad():
                         eval_metrics = eval_policy_value_against_baselines(
                             policy_model=policy_model,
-                            critic_model=critic_model,
+                            critic_model=value_model,
                             model_type=model_type,
                             map_type=map_type,
                             eval_opponent_configs=opponent_configs,
-                            num_games=eval_games_per_opponent,
+                            num_games=fresh_eval_games_per_opponent,
                             gamma=gamma,
                             seed=random.randint(0, sys.maxsize),
                             vps_to_win=vps_to_win,
                             discard_limit=discard_limit,
+                            actor_observation_level=actor_observation_level,
+                            critic_observation_level=critic_observation_level,
                             log_to_wandb=False,
                             global_step=global_step,
                             device=device,
                             num_envs=num_envs,
                             compare_to_expert=eval_compare_to_expert,
                             expert_config=eval_expert_cfg,
-                            progress_desc=f"Eval {iteration}/{n_iterations}",
+                            progress_desc=f"Eval {iteration}/{last_iteration}",
                         )
                     policy_model.train()
-                    critic_model.train()
+                    value_model.train()
                     eval_win_rate = float(eval_metrics.get("eval/win_rate_vs_value", 0.0))
 
                 pbar.set_postfix(
                     {
-                        "iter": f"{iteration}/{n_iterations}",
+                        "iter": f"{iteration}/{last_iteration}",
                         "beta": f"{beta:.2f}",
                         "acc": f"{train_stats['accuracy'] * 100:.1f}%",
                         "wr_val": (
@@ -841,23 +1026,50 @@ def train(
                 if eval_win_rate is not None and eval_win_rate > best_eval_win_rate:
                     best_eval_win_rate = eval_win_rate
                     os.makedirs(save_path, exist_ok=True)
-                    policy_path = os.path.join(save_path, "policy_best.pt")
-                    torch.save(policy_model.state_dict(), policy_path)
+                    if uses_shared_network:
+                        torch.save(
+                            policy_model.state_dict(),
+                            os.path.join(save_path, "policy_value_best.pt"),
+                        )
+                    else:
+                        torch.save(
+                            policy_model.state_dict(),
+                            os.path.join(save_path, "policy_best.pt"),
+                        )
 
                 eval_critic_mse = eval_metrics.get("eval/value_mse", float("inf"))
                 if should_eval and eval_critic_mse < best_eval_critic_mse:
                     best_eval_critic_mse = eval_critic_mse
                     os.makedirs(save_path, exist_ok=True)
-                    critic_path = os.path.join(save_path, "critic_best.pt")
-                    torch.save(critic_model.state_dict(), critic_path)
+                    if uses_shared_network:
+                        torch.save(
+                            policy_model.state_dict(),
+                            os.path.join(save_path, "policy_value_best.pt"),
+                        )
+                    else:
+                        torch.save(
+                            critic_model.state_dict(),
+                            os.path.join(save_path, "critic_best.pt"),
+                        )
 
                 # Save periodic checkpoints aligned with eval/update cadence.
-                if iteration % save_every_iterations == 0:
+                if iteration % save_every_updates == 0:
                     os.makedirs(save_path, exist_ok=True)
-                    policy_path = os.path.join(save_path, f"policy_iter_{iteration}.pt")
-                    critic_path = os.path.join(save_path, f"critic_iter_{iteration}.pt")
-                    torch.save(policy_model.state_dict(), policy_path)
-                    torch.save(critic_model.state_dict(), critic_path)
+                    if uses_shared_network:
+                        torch.save(
+                            policy_model.state_dict(),
+                            os.path.join(save_path, f"policy_value_iter_{iteration}.pt"),
+                        )
+                    else:
+                        torch.save(
+                            policy_model.state_dict(),
+                            os.path.join(save_path, f"policy_iter_{iteration}.pt"),
+                        )
+                        torch.save(
+                            critic_model.state_dict(),
+                            os.path.join(save_path, f"critic_iter_{iteration}.pt"),
+                        )
+                    persist_training_state(iteration)
 
                 wandb_log: Dict[str, Any] = {
                     "dagger/dataset_size": len(dataset),
@@ -881,23 +1093,28 @@ def train(
                         "dagger/expert_action_type", expert_action_type_counts
                     )
                 )
-                policy_pred_action_type_steps.append(global_step)
-                normalized_pred_action_type_counts = _normalize_action_type_counts(
-                    action_type_names, train_stats["pred_action_type_counts"]
+                played_action_type_counts: Counter[str] = Counter()
+                for played_action in rollout_batch.played_actions.tolist():
+                    played_action_type_counts[action_array[int(played_action)][0].name] += 1
+                normalized_played_action_type_counts = _normalize_action_type_counts(
+                    action_type_names, dict(played_action_type_counts)
                 )
-                for action_type_name, normalized_count in normalized_pred_action_type_counts.items():
-                    policy_pred_action_type_history[action_type_name].append(normalized_count)
-                wandb_log["dagger/policy_pred_action_type_over_time"] = (
+                played_action_type_steps.append(global_step)
+                for action_type_name, normalized_count in normalized_played_action_type_counts.items():
+                    played_action_type_history[action_type_name].append(normalized_count)
+                    wandb_log[f"dagger/played_action_type/{action_type_name}"] = normalized_count
+                wandb_log["dagger/played_action_type_over_time"] = (
                     _build_action_type_time_series_chart(
-                        title="DAgger Policy Predicted Action Type Over Time",
-                        x_values=policy_pred_action_type_steps,
-                        history_by_type=policy_pred_action_type_history,
+                        title="DAgger Played Action Type Over Time",
+                        x_values=played_action_type_steps,
+                        history_by_type=played_action_type_history,
                     )
                 )
                 wandb.log(wandb_log, step=global_step)
 
                 beta = max(beta * beta_decay, beta_min)
 
+            persist_training_state(last_iteration)
     finally:
         envs.close()
 

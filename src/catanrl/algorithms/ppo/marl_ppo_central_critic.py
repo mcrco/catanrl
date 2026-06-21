@@ -4,7 +4,7 @@ import os
 import random
 import sys
 from collections import deque
-from typing import Dict, Literal, Optional, Sequence, Tuple
+from typing import Any, Dict, Literal, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -13,24 +13,27 @@ from tqdm import tqdm
 
 import wandb
 
-from ...envs import compute_multiagent_input_dim, decode_puffer_batch
+from ...envs import compute_multiagent_input_dim, compute_single_agent_dims, decode_puffer_batch
 from ...envs.puffer.multi_agent_env import make_vectorized_envs as make_marl_vectorized_envs
 from ...eval.training_eval import eval_policy_against_champion, eval_policy_value_against_baselines
 from ...features.catanatron_utils import (
-    get_full_numeric_feature_names,
-    get_numeric_feature_names,
+    ActorObservationLevel,
+    CriticObservationLevel,
+    get_observation_indices_from_full,
 )
 from ...models.models import (
     build_flat_policy_network,
+    build_flat_policy_value_network,
     build_hierarchical_policy_network,
+    build_hierarchical_policy_value_network,
     build_value_network,
 )
 from ...models.wrappers import PolicyNetworkWrapper, ValueNetworkWrapper
 from ...utils.catanatron_action_space import build_action_type_metadata, get_action_space_size
 from ...utils.seeding import set_global_seeds
-from .action_stats import build_raw_policy_log_dict
-from .agent import PolicyAgent
-from .backbone_builder import build_backbone_config
+from ...models.backbone_builder import build_backbone_config
+from ..common import PolicyAgent
+from .action_stats import build_action_type_time_series_chart, compute_action_distributions
 from .buffers import CentralCriticExperienceBuffer
 from .ppo_update import run_ppo_update
 
@@ -38,6 +41,9 @@ from .ppo_update import run_ppo_update
 def train(
     num_players: int = 2,
     map_type: Literal["BASE", "TOURNAMENT", "MINI"] = "BASE",
+    actor_observation_level: ActorObservationLevel = "private",
+    critic_observation_level: CriticObservationLevel = "full",
+    network_mode: Literal["separate", "shared"] = "separate",
     model_type: str = "flat",
     backbone_type: str = "mlp",
     xdim_cnn_channels: Sequence[int] = (64, 128, 128),
@@ -54,7 +60,7 @@ def train(
     value_coef: float = 0.5,
     entropy_coef: float = 0.01,
     activity_coef: float = 0.0,
-    ppo_epochs: int = 4,
+    train_epochs: int = 4,
     batch_size: int = 256,
     policy_hidden_dims: Sequence[int] = (512, 512),
     critic_hidden_dims: Sequence[int] = (512, 512),
@@ -63,11 +69,12 @@ def train(
     load_critic_weights: Optional[str] = None,
     wandb_config: Optional[Dict] = None,
     seed: Optional[int] = 42,
-    max_grad_norm: float = 0.5,
+    device: str | torch.device | None = None,
+    max_grad_norm: float = 1.0,
     deterministic_policy: bool = False,
-    eval_games_per_opponent: int = 250,
+    fresh_eval_games_per_opponent: int = 250,
     trend_eval_games_per_opponent: Optional[int] = None,
-    trend_eval_seed: Optional[int] = 42,
+    trend_eval_seed: Optional[int] = 43,
     h2h_eval_games: int = 0,
     h2h_eval_seed: Optional[int] = 123,
     eval_every_updates: int = 1,
@@ -75,29 +82,67 @@ def train(
     target_kl: Optional[float] = None,
     num_envs: int = 2,
     reward_function: Literal["shaped", "win"] = "shaped",
-    vps_to_win: int = 10,
-    discard_limit: int = 7,
+    vps_to_win: int = 15,
+    discard_limit: int = 9,
     metric_window: int = 200,
+    resume_state: Optional[Dict] = None,
+    training_state_path: Optional[str] = None,
 ) -> Tuple[PolicyNetworkWrapper, ValueNetworkWrapper]:
-    """Train a shared policy with a centralized critic using PPO."""
+    """Train a shared policy with a centralized critic using PPO.
+
+    When ``resume_state`` is provided the run continues in place (weights,
+    optimizers and step counters are restored, and ``total_timesteps`` is treated
+    as *additional* steps). When ``training_state_path`` is set, full training
+    state is persisted there at every checkpoint save.
+    """
 
     assert 2 <= num_players <= 4, "num_players must be between 2 and 4"
     assert num_envs >= 1, "num_envs must be >= 1"
     assert backbone_type in ("mlp", "xdim", "xdim_res"), f"Unknown backbone_type '{backbone_type}'"
+    if network_mode not in ("separate", "shared"):
+        raise ValueError(f"Unknown network_mode '{network_mode}'")
+    uses_shared_network = network_mode == "shared"
+    if uses_shared_network and actor_observation_level != critic_observation_level:
+        raise ValueError(
+            "network_mode='shared' requires actor and critic observation levels to match, "
+            f"but got actor={actor_observation_level!r} and critic={critic_observation_level!r}. "
+            "A shared backbone consumes a single observation; use network_mode='separate' for "
+            "asymmetric (e.g. privileged-critic) levels."
+        )
     xdim_cnn_channels = list(xdim_cnn_channels)
     if not xdim_cnn_channels:
         raise ValueError("xdim_cnn_channels cannot be empty")
 
     set_global_seeds(seed)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     action_space_size = get_action_space_size(num_players, map_type)
     _, action_to_type_idx, action_type_names = build_action_type_metadata(num_players, map_type)
 
-    actor_input_dim, board_shape, numeric_dim = compute_multiagent_input_dim(num_players, map_type)
-    numeric_dim = numeric_dim or len(get_numeric_feature_names(num_players, map_type))
-    board_dim = actor_input_dim - numeric_dim
-    full_numeric_len = len(get_full_numeric_feature_names(num_players, map_type))
-    critic_input_dim = full_numeric_len + board_dim
+    actor_input_dim, board_shape, actor_numeric_dim = compute_multiagent_input_dim(
+        num_players,
+        map_type,
+        actor_observation_level=actor_observation_level,
+    )
+    dims = compute_single_agent_dims(
+        num_players,
+        map_type,
+        actor_observation_level=actor_observation_level,
+        critic_observation_level=critic_observation_level,
+    )
+    full_dims = compute_single_agent_dims(
+        num_players,
+        map_type,
+        actor_observation_level=actor_observation_level,
+        critic_observation_level="full",
+    )
+    critic_input_dim = dims["critic_dim"]
+    full_critic_input_dim = full_dims["critic_dim"]
+    critic_numeric_dim = dims["critic_numeric_dim"]
+    critic_observation_indices = get_observation_indices_from_full(
+        num_players,
+        map_type,
+        level=critic_observation_level,
+    )
 
     print(f"\n{'=' * 60}")
     print("Centralized Critic Multi-Agent PPO Training")
@@ -105,10 +150,15 @@ def train(
     print(f"Device: {device}")
     print(f"Map type: {map_type} | Players: {num_players}")
     print(f"Game config: vps_to_win={vps_to_win} | discard_limit={discard_limit}")
-    print(f"Backbone: {backbone_type} | Model type: {model_type}")
+    print(
+        f"Backbone: {backbone_type} | Model type: {model_type} | "
+        f"Network mode: {network_mode} | "
+        f"Actor observation: {actor_observation_level} | "
+        f"Critic observation: {critic_observation_level}"
+    )
     print(f"Actor input dim: {actor_input_dim} | Critic input dim: {critic_input_dim}")
     if backbone_type in ("xdim", "xdim_res"):
-        print(f"Board shape (C, W, H): {board_shape} | Numeric dim: {numeric_dim}")
+        print(f"Board shape (C, W, H): {board_shape} | Actor numeric dim: {actor_numeric_dim}")
         print(
             f"XDim config: cnn_channels={xdim_cnn_channels}, kernel={xdim_cnn_kernel_size}, "
             f"policy_fusion={xdim_policy_fusion_hidden_dim}, critic_fusion={xdim_critic_fusion_hidden_dim}"
@@ -135,56 +185,82 @@ def train(
         board_height=board_height,
         board_width=board_width,
         board_channels=board_channels,
-        numeric_dim=numeric_dim,
+        numeric_dim=actor_numeric_dim,
         xdim_cnn_channels=xdim_cnn_channels,
         xdim_cnn_kernel_size=xdim_cnn_kernel_size,
         xdim_fusion_hidden_dim=xdim_policy_fusion_hidden_dim,
     )
 
-    if model_type == "flat":
-        policy_model = build_flat_policy_network(
-            backbone_config=policy_backbone_config, num_actions=action_space_size
-        ).to(device)
-    elif model_type == "hierarchical":
-        policy_model = build_hierarchical_policy_network(
-            backbone_config=policy_backbone_config,
-            num_players=num_players,
-            map_type=map_type,
-        ).to(device)
+    if uses_shared_network:
+        if model_type == "flat":
+            policy_model = build_flat_policy_value_network(
+                backbone_config=policy_backbone_config, num_actions=action_space_size
+            ).to(device)
+        elif model_type == "hierarchical":
+            policy_model = build_hierarchical_policy_value_network(
+                backbone_config=policy_backbone_config,
+                num_players=num_players,
+                map_type=map_type,
+            ).to(device)
+        else:
+            raise ValueError(f"Unknown model_type '{model_type}'")
+        critic_model = None
     else:
-        raise ValueError(f"Unknown model_type '{model_type}'")
+        if model_type == "flat":
+            policy_model = build_flat_policy_network(
+                backbone_config=policy_backbone_config, num_actions=action_space_size
+            ).to(device)
+        elif model_type == "hierarchical":
+            policy_model = build_hierarchical_policy_network(
+                backbone_config=policy_backbone_config,
+                num_players=num_players,
+                map_type=map_type,
+            ).to(device)
+        else:
+            raise ValueError(f"Unknown model_type '{model_type}'")
 
-    critic_backbone_config = build_backbone_config(
-        backbone_type=backbone_type,
-        hidden_dims=critic_hidden_dims,
-        input_dim=critic_input_dim,
-        board_height=board_height,
-        board_width=board_width,
-        board_channels=board_channels,
-        numeric_dim=full_numeric_len,
-        xdim_cnn_channels=xdim_cnn_channels,
-        xdim_cnn_kernel_size=xdim_cnn_kernel_size,
-        xdim_fusion_hidden_dim=xdim_critic_fusion_hidden_dim,
-    )
-    critic_model = build_value_network(backbone_config=critic_backbone_config).to(device)
+        critic_backbone_config = build_backbone_config(
+            backbone_type=backbone_type,
+            hidden_dims=critic_hidden_dims,
+            input_dim=critic_input_dim,
+            board_height=board_height,
+            board_width=board_width,
+            board_channels=board_channels,
+            numeric_dim=critic_numeric_dim,
+            xdim_cnn_channels=xdim_cnn_channels,
+            xdim_cnn_kernel_size=xdim_cnn_kernel_size,
+            xdim_fusion_hidden_dim=xdim_critic_fusion_hidden_dim,
+        )
+        critic_model = build_value_network(backbone_config=critic_backbone_config).to(device)
 
     if load_policy_weights and os.path.exists(load_policy_weights):
         print(f"Loading policy weights from {load_policy_weights}")
         policy_model.load_state_dict(torch.load(load_policy_weights, map_location=device))
-    if load_critic_weights and os.path.exists(load_critic_weights):
+    if critic_model is not None and load_critic_weights and os.path.exists(load_critic_weights):
         print(f"Loading critic weights from {load_critic_weights}")
         critic_model.load_state_dict(torch.load(load_critic_weights, map_location=device))
 
     policy_agent = PolicyAgent(policy_model, model_type, device)
     policy_optimizer = optim.Adam(policy_model.parameters(), lr=policy_lr)
-    critic_optimizer = optim.Adam(critic_model.parameters(), lr=critic_lr)
+    critic_optimizer = (
+        optim.Adam(critic_model.parameters(), lr=critic_lr) if critic_model is not None else None
+    )
+    # Value model for PPO updates: the shared policy-value net, or the separate critic.
+    value_model: torch.nn.Module = policy_model if uses_shared_network else critic_model
 
     def predict_values(
         actor_states: torch.Tensor,
         critic_states: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if uses_shared_network:
+            if model_type == "flat":
+                _, values = policy_model(actor_states)
+            else:
+                _, _, values = policy_model(actor_states)
+            return values.squeeze(-1)
         if critic_states is None:
             raise ValueError("critic_states must be provided for centralized critic updates.")
+        assert critic_model is not None
         return critic_model(critic_states).squeeze(-1)
 
     buffer = CentralCriticExperienceBuffer(
@@ -203,6 +279,7 @@ def train(
         shared_critic=True,
         reward_function=reward_function,
         num_envs=num_envs,
+        actor_observation_level=actor_observation_level,
     )
     driver_env = envs.driver_env
     obs_space = driver_env.env_single_observation_space
@@ -220,10 +297,11 @@ def train(
             obs_space=obs_space,
             obs_dtype=obs_dtype,
             actor_dim=actor_input_dim,
-            critic_dim=critic_input_dim,
+            critic_dim=full_critic_input_dim,
         )
         if critic_batch is None:
             raise RuntimeError("Expected critic observations for MARL centralized critic training.")
+        critic_batch = critic_batch[:, critic_observation_indices]
         return actor_batch, critic_batch, action_masks
 
     metric_window = max(1, metric_window)
@@ -241,7 +319,7 @@ def train(
     print(f"Eval cadence: every {eval_every_updates} update(s)")
     print(f"Save cadence: every {save_every_updates} update(s)")
     trend_eval_games = (
-        eval_games_per_opponent
+        fresh_eval_games_per_opponent
         if trend_eval_games_per_opponent is None
         else max(1, trend_eval_games_per_opponent)
     )
@@ -251,29 +329,55 @@ def train(
     global_step = 0
     total_episodes = 0
     ppo_update_count = 0
+
+    if resume_state is not None:
+        print("Resuming MARL training in place from saved training state...")
+        policy_model.load_state_dict(resume_state["policy_model"])
+        if critic_model is not None and resume_state.get("critic_model") is not None:
+            critic_model.load_state_dict(resume_state["critic_model"])
+        if resume_state.get("policy_optimizer") is not None:
+            policy_optimizer.load_state_dict(resume_state["policy_optimizer"])
+        if critic_optimizer is not None and resume_state.get("critic_optimizer") is not None:
+            critic_optimizer.load_state_dict(resume_state["critic_optimizer"])
+        global_step = int(resume_state.get("global_step", 0))
+        total_episodes = int(resume_state.get("total_episodes", 0))
+        ppo_update_count = int(resume_state.get("ppo_update_count", 0))
+        best_eval_win_rate = float(resume_state.get("best_eval_win_rate", -float("inf")))
+        best_eval_critic_mse = float(resume_state.get("best_eval_critic_mse", float("inf")))
+        print(
+            f"  Restored: global_step={global_step:,}, "
+            f"updates={ppo_update_count}, episodes={total_episodes}"
+        )
+    target_timesteps = global_step + total_timesteps
     episode_lengths: list[int] = [0 for _ in range(num_envs)]
     length_window = deque(maxlen=metric_window)
 
-    # Track raw policy preferences (argmax before masking) for diagnostics
-    raw_policy_argmax_buffer: list[np.ndarray] = []
+    played_action_buffer: list[np.ndarray] = []
+    played_action_type_steps: list[int] = []
+    played_action_type_history: dict[str, list[float]] = {
+        name: [] for name in action_type_names
+    }
 
     def run_and_log_evals() -> None:
         nonlocal best_eval_win_rate, best_eval_critic_mse
 
+        eval_value_model = policy_model if critic_model is None else critic_model
         policy_agent.model.eval()
-        critic_model.eval()
+        eval_value_model.eval()
         with torch.no_grad():
             fresh_eval_metrics = eval_policy_value_against_baselines(
                 policy_model=policy_model,
-                critic_model=critic_model,
+                critic_model=eval_value_model,
                 model_type=model_type,
                 map_type=map_type,
                 eval_opponent_configs=["random"] * (num_players - 1),
-                num_games=eval_games_per_opponent,
+                num_games=fresh_eval_games_per_opponent,
                 gamma=gamma,
                 seed=random.randint(0, sys.maxsize),
                 vps_to_win=vps_to_win,
                 discard_limit=discard_limit,
+                actor_observation_level=actor_observation_level,
+                critic_observation_level=critic_observation_level,
                 log_to_wandb=False,
                 global_step=global_step,
                 device=device,
@@ -281,7 +385,7 @@ def train(
             )
             trend_eval_metrics = eval_policy_value_against_baselines(
                 policy_model=policy_model,
-                critic_model=critic_model,
+                critic_model=eval_value_model,
                 model_type=model_type,
                 map_type=map_type,
                 eval_opponent_configs=["random"] * (num_players - 1),
@@ -290,6 +394,8 @@ def train(
                 seed=trend_eval_seed if trend_eval_seed is not None else 0,
                 vps_to_win=vps_to_win,
                 discard_limit=discard_limit,
+                actor_observation_level=actor_observation_level,
+                critic_observation_level=critic_observation_level,
                 log_to_wandb=False,
                 global_step=global_step,
                 device=device,
@@ -321,21 +427,34 @@ def train(
         wandb.log({**fresh_log, **trend_log, **h2h_log}, step=global_step)
 
         if champion_available and champion_policy_path is not None:
-            h2h_metrics = eval_policy_against_champion(
-                policy_model=policy_model,
-                model_type=model_type,
-                map_type=map_type,
-                num_players=num_players,
-                champion_policy_path=champion_policy_path,
-                num_games=h2h_eval_games,
-                seed=h2h_eval_seed if h2h_eval_seed is not None else 0,
-                vps_to_win=vps_to_win,
-                discard_limit=discard_limit,
-                log_to_wandb=False,
-                global_step=global_step,
-            )
-            if h2h_metrics:
-                wandb.log(h2h_metrics, step=global_step)
+            h2h_metrics_all: Dict[str, float] = {}
+            base_h2h_seed = h2h_eval_seed if h2h_eval_seed is not None else 0
+            for seat_mode in ("first", "second", "random"):
+                h2h_metrics = eval_policy_against_champion(
+                    policy_model=policy_model,
+                    model_type=model_type,
+                    map_type=map_type,
+                    num_players=num_players,
+                    champion_policy_path=champion_policy_path,
+                    num_games=h2h_eval_games,
+                    seed=base_h2h_seed,
+                    vps_to_win=vps_to_win,
+                    discard_limit=discard_limit,
+                    log_to_wandb=False,
+                    global_step=global_step,
+                    num_envs=num_envs,
+                    device=device,
+                    nn_seat=seat_mode,
+                    actor_observation_level=actor_observation_level,
+                )
+                prefix = f"eval_h2h_{seat_mode}"
+                for key, value in h2h_metrics.items():
+                    suffix = key.split("/", 1)[1] if "/" in key else key
+                    h2h_metrics_all[f"{prefix}/{suffix}"] = value
+                h2h_metrics_all[f"{prefix}/seed"] = base_h2h_seed
+                h2h_metrics_all[f"{prefix}/games"] = float(h2h_eval_games)
+            if h2h_metrics_all:
+                wandb.log(h2h_metrics_all, step=global_step)
         elif h2h_eval_games > 0:
             print("  → Skipping H2H eval (no champion checkpoint available yet)")
 
@@ -343,7 +462,7 @@ def train(
             eval_win_rate = None
             if trend_eval_games_per_opponent is not None and trend_eval_games_per_opponent > 0:
                 eval_win_rate = float(trend_eval_metrics.get("eval/win_rate_vs_value", 0.0))
-            elif eval_games_per_opponent is not None and eval_games_per_opponent > 0:
+            elif fresh_eval_games_per_opponent is not None and fresh_eval_games_per_opponent > 0:
                 eval_win_rate = float(fresh_eval_metrics.get("eval/win_rate_vs_value", 0.0))
 
             if eval_win_rate is not None and eval_win_rate > best_eval_win_rate:
@@ -359,7 +478,7 @@ def train(
                 )
 
             eval_critic_mse = trend_eval_metrics.get("eval/value_mse", float("inf"))
-            if eval_critic_mse < best_eval_critic_mse:
+            if critic_model is not None and eval_critic_mse < best_eval_critic_mse:
                 best_eval_critic_mse = eval_critic_mse
                 save_dir = save_path
                 os.makedirs(save_dir, exist_ok=True)
@@ -369,25 +488,52 @@ def train(
                     wandb.run.summary["best_eval_critic_mse"] = best_eval_critic_mse
                 print(f"  → Saved best critic (eval MSE: {best_eval_critic_mse:.4f})")
 
-    print("Running step-0 baseline eval before PPO updates...")
-    run_and_log_evals()
+    def persist_training_state() -> None:
+        if not training_state_path:
+            return
+        payload = {
+            "algorithm": "marl_ppo_central_critic",
+            "global_step": global_step,
+            "total_episodes": total_episodes,
+            "ppo_update_count": ppo_update_count,
+            "best_eval_win_rate": best_eval_win_rate,
+            "best_eval_critic_mse": best_eval_critic_mse,
+            "policy_model": policy_model.state_dict(),
+            "critic_model": critic_model.state_dict() if critic_model is not None else None,
+            "policy_optimizer": policy_optimizer.state_dict(),
+            "critic_optimizer": (
+                critic_optimizer.state_dict() if critic_optimizer is not None else None
+            ),
+            "wandb_run_id": wandb.run.id if wandb.run is not None else None,
+        }
+        os.makedirs(os.path.dirname(training_state_path), exist_ok=True)
+        tmp_path = training_state_path + ".tmp"
+        torch.save(payload, tmp_path)
+        os.replace(tmp_path, training_state_path)
+
+    if resume_state is None:
+        print("Running step-0 baseline eval before PPO updates...")
+        run_and_log_evals()
     observations, infos = envs.reset()
 
     try:
         with tqdm(total=total_timesteps, desc="Steps", unit="step", unit_scale=True) as pbar:
-            while global_step < total_timesteps:
+            while global_step < target_timesteps:
                 actor_batch, critic_batch, valid_masks = decode_observations(observations)
                 actor_tensor = torch.from_numpy(actor_batch).float().to(device)
-                actions, log_probs, raw_argmax = policy_agent.select_actions_batch(
+                actions, log_probs, _ = policy_agent.select_actions_batch(
                     actor_tensor, valid_masks, deterministic=deterministic_policy
                 )
-                raw_policy_argmax_buffer.append(raw_argmax)
+                played_action_buffer.append(actions)
 
                 critic_inputs = torch.from_numpy(critic_batch).float().to(device)
-                critic_model.eval()
+                value_model.eval()
                 with torch.no_grad():
-                    values = critic_model(critic_inputs).squeeze(-1).detach().cpu().numpy()
-                critic_model.train()
+                    if uses_shared_network:
+                        values = predict_values(actor_tensor).detach().cpu().numpy()
+                    else:
+                        values = predict_values(actor_tensor, critic_inputs).detach().cpu().numpy()
+                value_model.train()
 
                 next_observations, rewards, terminations, truncations, infos = envs.step(actions)
                 rewards = rewards.astype(np.float32)
@@ -426,18 +572,32 @@ def train(
                 observations = next_observations
 
                 if buffer.steps_collected >= rollout_steps and len(buffer) >= batch_size * 2:
-                    # Log raw policy preference distribution (argmax before masking)
-                    # This reveals what the network inherently prefers, regardless of action validity
-                    raw_policy_log = build_raw_policy_log_dict(
-                        raw_policy_argmax_buffer,
-                        action_to_type_idx,
-                        action_type_names,
-                        action_space_size,
-                        rollout_steps_collected=int(buffer.steps_collected),
-                        rollout_samples_collected=int(len(buffer)),
-                    )
-                    wandb.log(raw_policy_log, step=global_step)
-                    raw_policy_argmax_buffer.clear()
+                    played_action_log: Dict[str, Any] = {
+                        "train/rollout_steps_collected": float(buffer.steps_collected),
+                        "train/rollout_samples_collected": float(len(buffer)),
+                    }
+                    if played_action_buffer:
+                        played_actions = np.concatenate(played_action_buffer)
+                        played_action_type_dist, _ = compute_action_distributions(
+                            played_actions,
+                            action_to_type_idx,
+                            action_type_names,
+                            action_space_size,
+                        )
+                        played_action_type_steps.append(global_step)
+                        for name in action_type_names:
+                            ratio = played_action_type_dist.get(name, 0.0)
+                            played_action_type_history[name].append(ratio)
+                            played_action_log[f"rollout_played_action_type/{name}"] = ratio
+                        played_action_log["rollout/played_action_type_over_time"] = (
+                            build_action_type_time_series_chart(
+                                title="MARL PPO Played Action Type Over Time",
+                                x_values=played_action_type_steps,
+                                history_by_type=played_action_type_history,
+                            )
+                        )
+                        played_action_buffer.clear()
+                    wandb.log(played_action_log, step=global_step)
 
                     bootstrap_actor_batch, bootstrap_critic_batch, _ = decode_observations(
                         observations
@@ -445,7 +605,7 @@ def train(
                     policy_agent.model.train()
                     metrics = run_ppo_update(
                         agent=policy_agent,
-                        value_model=critic_model,
+                        value_model=value_model,
                         predict_values=predict_values,
                         policy_optimizer=policy_optimizer,
                         critic_optimizer=critic_optimizer,
@@ -454,7 +614,7 @@ def train(
                         value_coef=value_coef,
                         entropy_coef=entropy_coef,
                         activity_coef=activity_coef,
-                        n_epochs=ppo_epochs,
+                        train_epochs=train_epochs,
                         batch_size=batch_size,
                         device=device,
                         last_actor_states=bootstrap_actor_batch,
@@ -466,7 +626,8 @@ def train(
                     )
                     buffer.clear()
                     policy_agent.model.eval()
-                    critic_model.eval()
+                    if critic_model is not None:
+                        critic_model.eval()
                     ppo_update_count += 1
 
                     wandb.log(
@@ -495,13 +656,16 @@ def train(
                             f"{os.path.splitext(snapshot_name)[0]}_critic.pt",
                         )
                         torch.save(policy_model.state_dict(), policy_path)
-                        torch.save(critic_model.state_dict(), critic_path)
+                        if critic_model is not None:
+                            torch.save(critic_model.state_dict(), critic_path)
+                        persist_training_state()
 
                     # Evaluate policy against catanatron bots and critic value predictions.
                     if ppo_update_count % eval_every_updates == 0:
                         run_and_log_evals()
 
     finally:
+        persist_training_state()
         envs.close()
 
     if best_eval_win_rate > -float("inf"):
