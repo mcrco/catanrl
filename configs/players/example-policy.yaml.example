@@ -1,0 +1,22 @@
+# Copy to configs/players/<name>.yaml and set experiment to a run under experiments/.
+id: example-policy
+label: "Example Policy Bot"
+description: "Raw policy player template"
+type: policy
+experiment: my-experiment-name
+checkpoint: best
+
+# type: mcts
+# experiment: my-experiment-name
+# checkpoint: best
+# mcts:
+#   num_simulations: 64
+#   c_puct: 1.5
+#   adversarial_policy: self
+
+# type: belief
+# experiment: my-full-info-experiment
+# checkpoint: best
+# belief:
+#   num_samples: 100
+#   sample: false

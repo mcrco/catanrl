@@ -95,6 +95,20 @@ def experiment_dir(name_or_path: str) -> str:
     return os.path.join(experiments_root(), name_or_path)
 
 
+def list_experiments(root: str | None = None) -> list[str]:
+    """Return sorted experiment names under ``experiments_root()`` with metadata.json."""
+    base = os.path.abspath(root) if root is not None else experiments_root()
+    if not os.path.isdir(base):
+        return []
+
+    names: list[str] = []
+    for entry in sorted(os.listdir(base)):
+        path = os.path.join(base, entry)
+        if os.path.isdir(path) and os.path.isfile(os.path.join(path, METADATA_FILENAME)):
+            names.append(entry)
+    return names
+
+
 # --------------------------------------------------------------------------- #
 # Backbone (de)serialization
 # --------------------------------------------------------------------------- #
@@ -1299,6 +1313,7 @@ __all__ = [
     "build_network",
     "experiments_root",
     "experiment_dir",
+    "list_experiments",
     "backbone_config_to_dict",
     "backbone_config_from_dict",
     "backbone_display_type",
