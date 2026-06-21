@@ -172,9 +172,18 @@ Training hparams:
 | eval games / opponent | 500 (250 first + 250 second; vs random + F) |
 
 ```bash
-DAGGER_HPARAMS="--iterations 40 --train-epochs 2 --steps-per-iter 8192 --num-envs 8 \
-  --max-dataset-size 1500000 --beta-decay 0.97 --beta-min 0.1 --seed 42 \
-  --eval-every-iterations 5 --fresh-eval-games-per-opponent 500"
+DAGGER_HPARAMS=(
+  --iterations 40
+  --train-epochs 2
+  --steps-per-iter 8192
+  --num-envs 8
+  --max-dataset-size 1500000
+  --beta-decay 0.97
+  --beta-min 0.1
+  --seed 42
+  --eval-every-iterations 5
+  --fresh-eval-games-per-opponent 500
+)
 ```
 
 ### Model size sweep (separate, public actor / full critic)
@@ -189,19 +198,19 @@ DAGGER_HPARAMS="--iterations 40 --train-epochs 2 --steps-per-iter 8192 --num-env
 ```bash
 uv run train-dagger --config configs/models/xdim-flat-2p-d-s.yaml \
   --experiment-name dagger-d-s --expert F --opponents F --wandb --wandb-group dagger \
-  $DAGGER_HPARAMS
+  "${DAGGER_HPARAMS[@]}"
 
 uv run train-dagger --config configs/models/xdim-flat-2p-d-m.yaml \
   --experiment-name dagger-d-m --expert F --opponents F --wandb --wandb-group dagger \
-  $DAGGER_HPARAMS
+  "${DAGGER_HPARAMS[@]}"
 
 uv run train-dagger --config configs/models/xdim-flat-2p-d-l.yaml \
   --experiment-name dagger-d-l --expert F --opponents F --wandb --wandb-group dagger \
-  $DAGGER_HPARAMS
+  "${DAGGER_HPARAMS[@]}"
 
 uv run train-dagger --config configs/models/xdim-flat-2p-d-xl.yaml \
   --experiment-name dagger-d-xl --expert F --opponents F --wandb --wandb-group dagger \
-  $DAGGER_HPARAMS
+  "${DAGGER_HPARAMS[@]}"
 ```
 
 ### Shared ≈ separate check (at the chosen size)
@@ -217,11 +226,11 @@ preset if it isn't D-M.
 ```bash
 uv run train-dagger --config configs/models/xdim-flat-2p-d-m.yaml \
   --experiment-name dagger-d-sep --expert F --opponents F --wandb --wandb-group dagger \
-  $DAGGER_HPARAMS
+  "${DAGGER_HPARAMS[@]}"
 
 uv run train-dagger --config configs/models/xdim-flat-2p-public-shared.yaml \
   --experiment-name dagger-d-shared --expert F --opponents F --wandb --wandb-group dagger \
-  $DAGGER_HPARAMS
+  "${DAGGER_HPARAMS[@]}"
 ```
 
 ### Eval (after each run)
