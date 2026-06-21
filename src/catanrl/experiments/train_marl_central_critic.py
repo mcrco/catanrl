@@ -20,6 +20,7 @@ from catanrl.algorithms.ppo.marl_ppo_central_critic import train
 from catanrl.experiment_store import (
     GameConfig,
     KIND_POLICY,
+    KIND_POLICY_VALUE,
     KIND_VALUE,
     add_load_from_experiment_arguments,
     add_resume_argument,
@@ -142,10 +143,11 @@ def main():
 
     arch = setup.arch
     warm_start = setup.warm_start
-    if arch.network_mode == "shared":
+    if arch.network_mode == "shared" and arch.actor_observation_level != arch.critic_observation_level:
         print(
-            "Error: MARL central critic training does not yet support network_mode='shared'. "
-            "Use a preset with network_mode='separate'."
+            "Error: network_mode='shared' requires policy and critic information levels to match "
+            f"(got policy={arch.actor_observation_level}, critic={arch.critic_observation_level}). "
+            "Use a preset with matching levels (e.g. public/public) or network_mode='separate'."
         )
         return
     if arch.num_players is None:
@@ -229,6 +231,7 @@ def main():
         map_type=arch.map_type,
         actor_observation_level=arch.actor_observation_level,
         critic_observation_level=arch.critic_observation_level,
+        network_mode=arch.network_mode,
         model_type=arch.model_type,
         backbone_type=arch.backbone_type,
         xdim_cnn_channels=arch.xdim_cnn_channels,
@@ -274,20 +277,30 @@ def main():
         training_state_path=training_state_path,
     )
 
-    networks = {
-        "policy": network_spec_from_model(
-            policy_model,
-            kind=KIND_POLICY,
-            model_type=arch.model_type,
-            observation_level=arch.actor_observation_level,
-        )
-    }
-    if critic_model is not None:
-        networks["critic"] = network_spec_from_model(
-            critic_model,
-            kind=KIND_VALUE,
-            observation_level=arch.critic_observation_level,
-        )
+    if arch.network_mode == "shared":
+        networks = {
+            "policy": network_spec_from_model(
+                policy_model,
+                kind=KIND_POLICY_VALUE,
+                model_type=arch.model_type,
+                observation_level=arch.actor_observation_level,
+            )
+        }
+    else:
+        networks = {
+            "policy": network_spec_from_model(
+                policy_model,
+                kind=KIND_POLICY,
+                model_type=arch.model_type,
+                observation_level=arch.actor_observation_level,
+            )
+        }
+        if critic_model is not None:
+            networks["critic"] = network_spec_from_model(
+                critic_model,
+                kind=KIND_VALUE,
+                observation_level=arch.critic_observation_level,
+            )
     exp_path = save_experiment(
         experiment_name,
         args.save_path,
@@ -308,8 +321,11 @@ def main():
     print("=" * 60)
     if args.save_path:
         print(f"Policy models saved under: {args.save_path}")
-        print("Best policy: policy_best.pt")
-        print("Best critic: critic_best.pt")
+        if arch.network_mode == "shared":
+            print("Best policy-value: policy_best.pt")
+        else:
+            print("Best policy: policy_best.pt")
+            print("Best critic: critic_best.pt")
     if exp_path:
         print(f"Experiment:  {exp_path}  (load via load_experiment('{experiment_name}'))")
 

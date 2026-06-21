@@ -23,7 +23,9 @@ from ...features.catanatron_utils import (
 )
 from ...models.models import (
     build_flat_policy_network,
+    build_flat_policy_value_network,
     build_hierarchical_policy_network,
+    build_hierarchical_policy_value_network,
     build_value_network,
 )
 from ...models.wrappers import PolicyNetworkWrapper, ValueNetworkWrapper
@@ -41,6 +43,7 @@ def train(
     map_type: Literal["BASE", "TOURNAMENT", "MINI"] = "BASE",
     actor_observation_level: ActorObservationLevel = "private",
     critic_observation_level: CriticObservationLevel = "full",
+    network_mode: Literal["separate", "shared"] = "separate",
     model_type: str = "flat",
     backbone_type: str = "mlp",
     xdim_cnn_channels: Sequence[int] = (64, 128, 128),
@@ -96,6 +99,16 @@ def train(
     assert 2 <= num_players <= 4, "num_players must be between 2 and 4"
     assert num_envs >= 1, "num_envs must be >= 1"
     assert backbone_type in ("mlp", "xdim", "xdim_res"), f"Unknown backbone_type '{backbone_type}'"
+    if network_mode not in ("separate", "shared"):
+        raise ValueError(f"Unknown network_mode '{network_mode}'")
+    uses_shared_network = network_mode == "shared"
+    if uses_shared_network and actor_observation_level != critic_observation_level:
+        raise ValueError(
+            "network_mode='shared' requires actor and critic observation levels to match, "
+            f"but got actor={actor_observation_level!r} and critic={critic_observation_level!r}. "
+            "A shared backbone consumes a single observation; use network_mode='separate' for "
+            "asymmetric (e.g. privileged-critic) levels."
+        )
     xdim_cnn_channels = list(xdim_cnn_channels)
     if not xdim_cnn_channels:
         raise ValueError("xdim_cnn_channels cannot be empty")
@@ -139,6 +152,7 @@ def train(
     print(f"Game config: vps_to_win={vps_to_win} | discard_limit={discard_limit}")
     print(
         f"Backbone: {backbone_type} | Model type: {model_type} | "
+        f"Network mode: {network_mode} | "
         f"Actor observation: {actor_observation_level} | "
         f"Critic observation: {critic_observation_level}"
     )
@@ -177,50 +191,76 @@ def train(
         xdim_fusion_hidden_dim=xdim_policy_fusion_hidden_dim,
     )
 
-    if model_type == "flat":
-        policy_model = build_flat_policy_network(
-            backbone_config=policy_backbone_config, num_actions=action_space_size
-        ).to(device)
-    elif model_type == "hierarchical":
-        policy_model = build_hierarchical_policy_network(
-            backbone_config=policy_backbone_config,
-            num_players=num_players,
-            map_type=map_type,
-        ).to(device)
+    if uses_shared_network:
+        if model_type == "flat":
+            policy_model = build_flat_policy_value_network(
+                backbone_config=policy_backbone_config, num_actions=action_space_size
+            ).to(device)
+        elif model_type == "hierarchical":
+            policy_model = build_hierarchical_policy_value_network(
+                backbone_config=policy_backbone_config,
+                num_players=num_players,
+                map_type=map_type,
+            ).to(device)
+        else:
+            raise ValueError(f"Unknown model_type '{model_type}'")
+        critic_model = None
     else:
-        raise ValueError(f"Unknown model_type '{model_type}'")
+        if model_type == "flat":
+            policy_model = build_flat_policy_network(
+                backbone_config=policy_backbone_config, num_actions=action_space_size
+            ).to(device)
+        elif model_type == "hierarchical":
+            policy_model = build_hierarchical_policy_network(
+                backbone_config=policy_backbone_config,
+                num_players=num_players,
+                map_type=map_type,
+            ).to(device)
+        else:
+            raise ValueError(f"Unknown model_type '{model_type}'")
 
-    critic_backbone_config = build_backbone_config(
-        backbone_type=backbone_type,
-        hidden_dims=critic_hidden_dims,
-        input_dim=critic_input_dim,
-        board_height=board_height,
-        board_width=board_width,
-        board_channels=board_channels,
-        numeric_dim=critic_numeric_dim,
-        xdim_cnn_channels=xdim_cnn_channels,
-        xdim_cnn_kernel_size=xdim_cnn_kernel_size,
-        xdim_fusion_hidden_dim=xdim_critic_fusion_hidden_dim,
-    )
-    critic_model = build_value_network(backbone_config=critic_backbone_config).to(device)
+        critic_backbone_config = build_backbone_config(
+            backbone_type=backbone_type,
+            hidden_dims=critic_hidden_dims,
+            input_dim=critic_input_dim,
+            board_height=board_height,
+            board_width=board_width,
+            board_channels=board_channels,
+            numeric_dim=critic_numeric_dim,
+            xdim_cnn_channels=xdim_cnn_channels,
+            xdim_cnn_kernel_size=xdim_cnn_kernel_size,
+            xdim_fusion_hidden_dim=xdim_critic_fusion_hidden_dim,
+        )
+        critic_model = build_value_network(backbone_config=critic_backbone_config).to(device)
 
     if load_policy_weights and os.path.exists(load_policy_weights):
         print(f"Loading policy weights from {load_policy_weights}")
         policy_model.load_state_dict(torch.load(load_policy_weights, map_location=device))
-    if load_critic_weights and os.path.exists(load_critic_weights):
+    if critic_model is not None and load_critic_weights and os.path.exists(load_critic_weights):
         print(f"Loading critic weights from {load_critic_weights}")
         critic_model.load_state_dict(torch.load(load_critic_weights, map_location=device))
 
     policy_agent = PolicyAgent(policy_model, model_type, device)
     policy_optimizer = optim.Adam(policy_model.parameters(), lr=policy_lr)
-    critic_optimizer = optim.Adam(critic_model.parameters(), lr=critic_lr)
+    critic_optimizer = (
+        optim.Adam(critic_model.parameters(), lr=critic_lr) if critic_model is not None else None
+    )
+    # Value model for PPO updates: the shared policy-value net, or the separate critic.
+    value_model: torch.nn.Module = policy_model if uses_shared_network else critic_model
 
     def predict_values(
         actor_states: torch.Tensor,
         critic_states: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if uses_shared_network:
+            if model_type == "flat":
+                _, values = policy_model(actor_states)
+            else:
+                _, _, values = policy_model(actor_states)
+            return values.squeeze(-1)
         if critic_states is None:
             raise ValueError("critic_states must be provided for centralized critic updates.")
+        assert critic_model is not None
         return critic_model(critic_states).squeeze(-1)
 
     buffer = CentralCriticExperienceBuffer(
@@ -293,11 +333,11 @@ def train(
     if resume_state is not None:
         print("Resuming MARL training in place from saved training state...")
         policy_model.load_state_dict(resume_state["policy_model"])
-        if resume_state.get("critic_model") is not None:
+        if critic_model is not None and resume_state.get("critic_model") is not None:
             critic_model.load_state_dict(resume_state["critic_model"])
         if resume_state.get("policy_optimizer") is not None:
             policy_optimizer.load_state_dict(resume_state["policy_optimizer"])
-        if resume_state.get("critic_optimizer") is not None:
+        if critic_optimizer is not None and resume_state.get("critic_optimizer") is not None:
             critic_optimizer.load_state_dict(resume_state["critic_optimizer"])
         global_step = int(resume_state.get("global_step", 0))
         total_episodes = int(resume_state.get("total_episodes", 0))
@@ -321,12 +361,13 @@ def train(
     def run_and_log_evals() -> None:
         nonlocal best_eval_win_rate, best_eval_critic_mse
 
+        eval_value_model = policy_model if critic_model is None else critic_model
         policy_agent.model.eval()
-        critic_model.eval()
+        eval_value_model.eval()
         with torch.no_grad():
             fresh_eval_metrics = eval_policy_value_against_baselines(
                 policy_model=policy_model,
-                critic_model=critic_model,
+                critic_model=eval_value_model,
                 model_type=model_type,
                 map_type=map_type,
                 eval_opponent_configs=["random"] * (num_players - 1),
@@ -344,7 +385,7 @@ def train(
             )
             trend_eval_metrics = eval_policy_value_against_baselines(
                 policy_model=policy_model,
-                critic_model=critic_model,
+                critic_model=eval_value_model,
                 model_type=model_type,
                 map_type=map_type,
                 eval_opponent_configs=["random"] * (num_players - 1),
@@ -437,7 +478,7 @@ def train(
                 )
 
             eval_critic_mse = trend_eval_metrics.get("eval/value_mse", float("inf"))
-            if eval_critic_mse < best_eval_critic_mse:
+            if critic_model is not None and eval_critic_mse < best_eval_critic_mse:
                 best_eval_critic_mse = eval_critic_mse
                 save_dir = save_path
                 os.makedirs(save_dir, exist_ok=True)
@@ -458,9 +499,11 @@ def train(
             "best_eval_win_rate": best_eval_win_rate,
             "best_eval_critic_mse": best_eval_critic_mse,
             "policy_model": policy_model.state_dict(),
-            "critic_model": critic_model.state_dict(),
+            "critic_model": critic_model.state_dict() if critic_model is not None else None,
             "policy_optimizer": policy_optimizer.state_dict(),
-            "critic_optimizer": critic_optimizer.state_dict(),
+            "critic_optimizer": (
+                critic_optimizer.state_dict() if critic_optimizer is not None else None
+            ),
             "wandb_run_id": wandb.run.id if wandb.run is not None else None,
         }
         os.makedirs(os.path.dirname(training_state_path), exist_ok=True)
@@ -484,10 +527,13 @@ def train(
                 played_action_buffer.append(actions)
 
                 critic_inputs = torch.from_numpy(critic_batch).float().to(device)
-                critic_model.eval()
+                value_model.eval()
                 with torch.no_grad():
-                    values = critic_model(critic_inputs).squeeze(-1).detach().cpu().numpy()
-                critic_model.train()
+                    if uses_shared_network:
+                        values = predict_values(actor_tensor).detach().cpu().numpy()
+                    else:
+                        values = predict_values(actor_tensor, critic_inputs).detach().cpu().numpy()
+                value_model.train()
 
                 next_observations, rewards, terminations, truncations, infos = envs.step(actions)
                 rewards = rewards.astype(np.float32)
@@ -559,7 +605,7 @@ def train(
                     policy_agent.model.train()
                     metrics = run_ppo_update(
                         agent=policy_agent,
-                        value_model=critic_model,
+                        value_model=value_model,
                         predict_values=predict_values,
                         policy_optimizer=policy_optimizer,
                         critic_optimizer=critic_optimizer,
@@ -580,7 +626,8 @@ def train(
                     )
                     buffer.clear()
                     policy_agent.model.eval()
-                    critic_model.eval()
+                    if critic_model is not None:
+                        critic_model.eval()
                     ppo_update_count += 1
 
                     wandb.log(
@@ -609,7 +656,8 @@ def train(
                             f"{os.path.splitext(snapshot_name)[0]}_critic.pt",
                         )
                         torch.save(policy_model.state_dict(), policy_path)
-                        torch.save(critic_model.state_dict(), critic_path)
+                        if critic_model is not None:
+                            torch.save(critic_model.state_dict(), critic_path)
                         persist_training_state()
 
                     # Evaluate policy against catanatron bots and critic value predictions.
