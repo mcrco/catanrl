@@ -24,13 +24,26 @@ from ..experiment_store import (
     KIND_POLICY_VALUE,
     KIND_VALUE,
     add_load_from_experiment_arguments,
+    add_resume_argument,
     default_checkpoints_dir,
     make_experiment_name,
     network_spec_from_model,
+    prepare_resume,
     resolve_training_architecture_and_warm_start,
     save_experiment,
+    training_state_file,
 )
 from ..utils.catanatron_action_space import get_action_space_size
+
+
+def _wandb_info(args: argparse.Namespace) -> dict:
+    """Experiment metadata W&B block, including the live run id when available."""
+    if not args.wandb:
+        return {}
+    info = {"project": args.wandb_project, "name": args.wandb_run_name}
+    if wandb.run is not None:
+        info["id"] = wandb.run.id
+    return info
 
 
 def main():
@@ -40,6 +53,7 @@ def main():
     )
     add_config_argument(parser)
     add_load_from_experiment_arguments(parser)
+    add_resume_argument(parser)
     parser.add_argument(
         "--iterations",
         type=int,
@@ -181,12 +195,26 @@ def main():
     arch = setup.arch
     warm_start = setup.warm_start
 
-    experiment_name = make_experiment_name("dagger", args.wandb_run_name, args.experiment_name)
-    if args.wandb and not args.wandb_run_name:
-        args.wandb_run_name = experiment_name
+    try:
+        resume = prepare_resume(args, warm_start)
+    except ValueError as exc:
+        print(f"Error: {exc}")
+        return
+
+    if resume.active:
+        experiment_name = resume.experiment_name
+        if args.wandb and not args.wandb_run_name:
+            args.wandb_run_name = resume.wandb_run_name or experiment_name
+    else:
+        experiment_name = make_experiment_name(
+            "dagger", args.wandb_run_name, args.experiment_name
+        )
+        if args.wandb and not args.wandb_run_name:
+            args.wandb_run_name = experiment_name
 
     args.save_path = default_checkpoints_dir(experiment_name)
     os.makedirs(args.save_path, exist_ok=True)
+    training_state_path = training_state_file(experiment_name)
 
     if not args.opponents:
         args.opponents = ["random"]
@@ -237,6 +265,9 @@ def main():
             "name": args.wandb_run_name,
             "config": train_config,
         }
+        if resume.active and resume.wandb_run_id:
+            wandb_config["id"] = resume.wandb_run_id
+            wandb_config["resume"] = "must"
 
     policy_model, critic_model = dagger_train(
         num_actions=action_space_size,
@@ -280,6 +311,8 @@ def main():
         num_envs=args.num_envs,
         reward_function=args.reward_function,
         max_grad_norm=args.max_grad_norm,
+        resume_state=resume.state,
+        training_state_path=training_state_path,
     )
 
     if arch.network_mode == "shared":
@@ -317,7 +350,7 @@ def main():
         ),
         networks=networks,
         train_config=train_config,
-        wandb_info={"project": args.wandb_project, "name": args.wandb_run_name} if args.wandb else {},
+        wandb_info=_wandb_info(args),
     )
 
     print("\n" + "=" * 60)

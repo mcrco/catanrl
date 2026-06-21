@@ -573,6 +573,8 @@ def train(
     num_envs: int = 4,
     reward_function: Literal["shaped", "win"] = "shaped",
     max_grad_norm: float = 1.0,
+    resume_state: Optional[Dict[str, Any]] = None,
+    training_state_path: Optional[str] = None,
 ) -> Tuple[PolicyNetworkWrapper | PolicyValueNetworkWrapper, ValueNetworkWrapper | None]:
     """
     Train separate policy and critic networks with DAgger using vectorized environments.
@@ -852,15 +854,64 @@ def train(
     best_eval_critic_mse = float("inf")
     total_steps = n_iterations * num_envs * steps_per_iteration
     global_step = 0
+    start_iteration = 0
+
+    if resume_state is not None:
+        print("[DAgger] Resuming training in place from saved training state...")
+        policy_model.load_state_dict(resume_state["policy_model"])
+        if critic_model is not None and resume_state.get("critic_model") is not None:
+            critic_model.load_state_dict(resume_state["critic_model"])
+        if resume_state.get("policy_optimizer") is not None:
+            policy_optimizer.load_state_dict(resume_state["policy_optimizer"])
+        if critic_optimizer is not None and resume_state.get("critic_optimizer") is not None:
+            critic_optimizer.load_state_dict(resume_state["critic_optimizer"])
+        global_step = int(resume_state.get("global_step", 0))
+        start_iteration = int(resume_state.get("iteration", 0))
+        beta = float(resume_state.get("beta", beta_init))
+        best_eval_win_rate = float(resume_state.get("best_eval_win_rate", float("-inf")))
+        best_eval_critic_mse = float(resume_state.get("best_eval_critic_mse", float("inf")))
+        print(
+            f"  Restored: global_step={global_step:,}, "
+            f"completed_iterations={start_iteration}, beta={beta:.3f}"
+        )
+
+    def persist_training_state(completed_iteration: int) -> None:
+        if not training_state_path:
+            return
+        payload = {
+            "algorithm": "dagger",
+            "global_step": global_step,
+            "iteration": completed_iteration,
+            "beta": beta,
+            "best_eval_win_rate": best_eval_win_rate,
+            "best_eval_critic_mse": best_eval_critic_mse,
+            "policy_model": policy_model.state_dict(),
+            "critic_model": (
+                critic_model.state_dict() if critic_model is not None else None
+            ),
+            "policy_optimizer": policy_optimizer.state_dict(),
+            "critic_optimizer": (
+                critic_optimizer.state_dict() if critic_optimizer is not None else None
+            ),
+            "wandb_run_id": wandb.run.id if wandb.run is not None else None,
+        }
+        os.makedirs(os.path.dirname(training_state_path), exist_ok=True)
+        tmp_path = training_state_path + ".tmp"
+        torch.save(payload, tmp_path)
+        os.replace(tmp_path, training_state_path)
+
     played_action_type_steps: List[int] = []
     played_action_type_history: Dict[str, List[float]] = {
         name: [] for name in action_type_names
     }
 
     try:
+        last_iteration = start_iteration + n_iterations
         with tqdm(total=total_steps, desc="DAgger", unit="step", unit_scale=True) as pbar:
-            for iteration in range(1, n_iterations + 1):
-                pbar.set_postfix({"iter": f"{iteration}/{n_iterations}", "beta": f"{beta:.2f}"})
+            for iteration in range(start_iteration + 1, last_iteration + 1):
+                pbar.set_postfix(
+                    {"iter": f"{iteration}/{last_iteration}", "beta": f"{beta:.2f}"}
+                )
                 collect_seed = derive_seed(seed, "dagger_collect", iteration)
 
                 collect_stats, rollout_batch = _collect_dagger_rollouts_vectorized(
@@ -907,7 +958,7 @@ def train(
                     num_players=num_players,
                     map_type=map_type,
                     max_grad_norm=max_grad_norm,
-                    progress_desc=f"Train {iteration}/{n_iterations}",
+                    progress_desc=f"Train {iteration}/{last_iteration}",
                     model_type=model_type,
                     uses_shared_network=uses_shared_network,
                 )
@@ -921,7 +972,9 @@ def train(
                     device=torch_device,
                 )
 
-                should_eval = iteration % eval_every_iterations == 0 or iteration == n_iterations
+                should_eval = (
+                    iteration % eval_every_iterations == 0 or iteration == last_iteration
+                )
                 eval_metrics: Dict[str, float] = {}
                 eval_win_rate: Optional[float] = None
                 if should_eval:
@@ -951,7 +1004,7 @@ def train(
                             num_envs=num_envs,
                             compare_to_expert=eval_compare_to_expert,
                             expert_config=eval_expert_cfg,
-                            progress_desc=f"Eval {iteration}/{n_iterations}",
+                            progress_desc=f"Eval {iteration}/{last_iteration}",
                         )
                     policy_model.train()
                     value_model.train()
@@ -959,7 +1012,7 @@ def train(
 
                 pbar.set_postfix(
                     {
-                        "iter": f"{iteration}/{n_iterations}",
+                        "iter": f"{iteration}/{last_iteration}",
                         "beta": f"{beta:.2f}",
                         "acc": f"{train_stats['accuracy'] * 100:.1f}%",
                         "wr_val": (
@@ -1016,6 +1069,7 @@ def train(
                             critic_model.state_dict(),
                             os.path.join(save_path, f"critic_iter_{iteration}.pt"),
                         )
+                    persist_training_state(iteration)
 
                 wandb_log: Dict[str, Any] = {
                     "dagger/dataset_size": len(dataset),
@@ -1060,6 +1114,7 @@ def train(
 
                 beta = max(beta * beta_decay, beta_min)
 
+            persist_training_state(last_iteration)
     finally:
         envs.close()
 

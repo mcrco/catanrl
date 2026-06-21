@@ -96,8 +96,17 @@ def train(
     deterministic_policy: bool = False,
     max_grad_norm: float = 1.0,
     target_kl: float | None = None,
+    resume_state: dict | None = None,
+    training_state_path: str | None = None,
 ):
-    """Train SARL PPO with optional privileged critic."""
+    """Train SARL PPO with optional privileged critic.
+
+    When ``resume_state`` is provided the run continues in place: model weights,
+    optimizer/scheduler state and step counters are restored, and
+    ``total_timesteps`` is interpreted as *additional* steps to run. When
+    ``training_state_path`` is set, the full training state is persisted there at
+    every checkpoint save so the run can be resumed later.
+    """
     if total_timesteps <= 0:
         raise ValueError("total_timesteps must be > 0")
     if num_envs <= 0:
@@ -314,6 +323,36 @@ def train(
     else:
         print("LR Scheduler: None (constant learning rate)")
 
+    resume_global_step = 0
+    resume_total_episodes = 0
+    resume_ppo_update_count = 0
+    resume_best_eval_win_rate = -float("inf")
+    resume_best_avg_reward = -float("inf")
+    resume_scheduler_steps_taken = 0
+    if resume_state is not None:
+        print("Resuming training in place from saved training state...")
+        policy_model.load_state_dict(resume_state["policy_model"])
+        if critic_model is not None and resume_state.get("critic_model") is not None:
+            critic_model.load_state_dict(resume_state["critic_model"])
+        if resume_state.get("policy_optimizer") is not None:
+            policy_optimizer.load_state_dict(resume_state["policy_optimizer"])
+        if critic_optimizer is not None and resume_state.get("critic_optimizer") is not None:
+            critic_optimizer.load_state_dict(resume_state["critic_optimizer"])
+        if scheduler is not None and resume_state.get("scheduler") is not None:
+            scheduler.load_state_dict(resume_state["scheduler"])
+        resume_global_step = int(resume_state.get("global_step", 0))
+        resume_total_episodes = int(resume_state.get("total_episodes", 0))
+        resume_ppo_update_count = int(resume_state.get("ppo_update_count", 0))
+        resume_best_eval_win_rate = float(
+            resume_state.get("best_eval_win_rate", -float("inf"))
+        )
+        resume_best_avg_reward = float(resume_state.get("best_avg_reward", -float("inf")))
+        resume_scheduler_steps_taken = int(resume_state.get("scheduler_steps_taken", 0))
+        print(
+            f"  Restored: global_step={resume_global_step:,}, "
+            f"updates={resume_ppo_update_count}, episodes={resume_total_episodes}"
+        )
+
     policy_model.eval()
     if critic_model is not None:
         critic_model.eval()
@@ -336,11 +375,13 @@ def train(
     pending_scheduler_steps = 0
     episode_rewards = deque(maxlen=metric_window)
     episode_lengths = deque(maxlen=metric_window)
-    best_eval_win_rate = -float("inf")
-    best_avg_reward = float("-inf")
-    global_step = 0
-    total_episodes = 0
-    ppo_update_count = 0
+    best_eval_win_rate = resume_best_eval_win_rate
+    best_avg_reward = resume_best_avg_reward
+    global_step = resume_global_step
+    total_episodes = resume_total_episodes
+    ppo_update_count = resume_ppo_update_count
+    scheduler_steps_taken = resume_scheduler_steps_taken
+    target_timesteps = global_step + total_timesteps
     eval_every_updates = max(0, int(eval_every_updates))
     save_every_updates = max(1, int(save_every_updates))
     if eval_every_updates > 0:
@@ -396,11 +437,38 @@ def train(
     env_episode_rewards = np.zeros(num_envs)
     env_episode_lengths = np.zeros(num_envs, dtype=int)
 
+    def persist_training_state() -> None:
+        if not training_state_path:
+            return
+        payload = {
+            "algorithm": "sarl_ppo",
+            "global_step": global_step,
+            "total_episodes": total_episodes,
+            "ppo_update_count": ppo_update_count,
+            "best_eval_win_rate": best_eval_win_rate,
+            "best_avg_reward": best_avg_reward,
+            "scheduler_steps_taken": scheduler_steps_taken,
+            "policy_model": policy_model.state_dict(),
+            "critic_model": (
+                critic_model.state_dict() if critic_model is not None else None
+            ),
+            "policy_optimizer": policy_optimizer.state_dict(),
+            "critic_optimizer": (
+                critic_optimizer.state_dict() if critic_optimizer is not None else None
+            ),
+            "scheduler": scheduler.state_dict() if scheduler is not None else None,
+            "wandb_run_id": wandb.run.id if wandb.run is not None else None,
+        }
+        os.makedirs(os.path.dirname(training_state_path), exist_ok=True)
+        tmp_path = training_state_path + ".tmp"
+        torch.save(payload, tmp_path)
+        os.replace(tmp_path, training_state_path)
+
     print("\nStarting training...")
     observations, infos = envs.reset()
 
     with tqdm(total=total_timesteps, desc="Steps", unit="step", unit_scale=True) as pbar:
-        while global_step < total_timesteps:
+        while global_step < target_timesteps:
             states, critic_states, valid_action_masks = decode_observations(observations)
             states_t = torch.from_numpy(states).float().to(device)
             critic_states_t = (
@@ -631,6 +699,7 @@ def train(
                             save_path, f"critic_update_{ppo_update_count}.pt"
                         )
                         torch.save(critic_model.state_dict(), critic_snapshot_path)
+                    persist_training_state()
 
                 if do_eval and ppo_update_count % eval_every_updates == 0:
                     eval_value_model = critic_model if critic_model is not None else policy_model
@@ -715,6 +784,7 @@ def train(
                             )
 
     envs.close()
+    persist_training_state()
     if do_eval and best_eval_win_rate > -float("inf"):
         print(
             f"\nTraining complete. {global_step:,} steps, {total_episodes} episodes. "

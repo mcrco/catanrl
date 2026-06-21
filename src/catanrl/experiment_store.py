@@ -56,6 +56,11 @@ SCHEMA_VERSION = 1
 METADATA_FILENAME = "metadata.json"
 CHECKPOINTS_FILENAME = "checkpoints.json"
 CHECKPOINTS_DIRNAME = "checkpoints"
+# Sidecar holding the full mutable training state (optimizer/scheduler/step
+# counters/model weights/W&B run id) needed to *continue* a run in place.
+# Deliberately NOT a ``*.pt`` under ``checkpoints/`` so checkpoint discovery
+# never mistakes it for a network weight file.
+TRAINING_STATE_FILENAME = "training_state.pt"
 
 # Network "kind": what heads the saved state_dict actually contains.
 KIND_POLICY = "policy"
@@ -657,6 +662,123 @@ def add_load_from_experiment_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def add_resume_argument(parser: argparse.ArgumentParser) -> None:
+    """Register ``--resume`` which turns ``--load-from-experiment`` into a true continuation.
+
+    Without ``--resume`` the existing behaviour is unchanged: ``--load-from-experiment``
+    warm-starts a brand-new run (fresh optimizer/scheduler/step, new W&B run).
+    With ``--resume`` the run continues *in place*: same experiment directory, same
+    W&B run id, restored optimizer/scheduler/global-step, and the training budget
+    (e.g. ``--total-timesteps`` / ``--iterations``) is treated as *additional* work.
+    """
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        dest="resume",
+        help=(
+            "Continue the --load-from-experiment run in place (same experiment dir, "
+            "same W&B run, restored optimizer/scheduler/step). The training budget is "
+            "interpreted as ADDITIONAL work on top of what was already done."
+        ),
+    )
+
+
+def training_state_file(name_or_path: str) -> str:
+    """Absolute path of the training-state sidecar for an experiment."""
+    return os.path.join(experiment_dir(name_or_path), TRAINING_STATE_FILENAME)
+
+
+def save_training_state(
+    name_or_path: str,
+    state: Dict[str, Any],
+    *,
+    exp_dir: Optional[str] = None,
+) -> str:
+    """Persist mutable training state next to an experiment's metadata.
+
+    ``exp_dir`` may be passed directly (e.g. when the experiment folder does not
+    yet contain ``metadata.json``); otherwise it is resolved from ``name_or_path``.
+    """
+    path = exp_dir or experiment_dir(name_or_path)
+    os.makedirs(path, exist_ok=True)
+    out = os.path.join(path, TRAINING_STATE_FILENAME)
+    payload: Dict[str, Any] = dict(state)
+    payload.setdefault("schema_version", SCHEMA_VERSION)
+    payload.setdefault("saved_at", datetime.now(timezone.utc).isoformat())
+    torch.save(payload, out)
+    return out
+
+
+def load_training_state(
+    name_or_path: str,
+    *,
+    map_location: Union[str, torch.device] = "cpu",
+) -> Optional[Dict[str, Any]]:
+    """Load the training-state sidecar for an experiment, or ``None`` if absent."""
+    path = os.path.join(experiment_dir(name_or_path), TRAINING_STATE_FILENAME)
+    if not os.path.exists(path):
+        return None
+    return torch.load(path, map_location=map_location, weights_only=False)
+
+
+@dataclass
+class ResumeContext:
+    """Resolved information for continuing a run in place (``--resume``)."""
+
+    active: bool
+    experiment_name: Optional[str] = None
+    exp_dir: Optional[str] = None
+    training_state_path: Optional[str] = None
+    state: Optional[Dict[str, Any]] = None
+    wandb_run_id: Optional[str] = None
+    wandb_run_name: Optional[str] = None
+
+
+def prepare_resume(
+    args: argparse.Namespace,
+    warm_start: Optional[TrainingWarmStart],
+) -> ResumeContext:
+    """Resolve resume context from ``--resume`` + ``--load-from-experiment``.
+
+    Returns an inactive context when ``--resume`` was not passed. Raises when
+    ``--resume`` is set without a source experiment to continue.
+    """
+    if not getattr(args, "resume", False):
+        return ResumeContext(active=False)
+    if warm_start is None:
+        raise ValueError(
+            "--resume requires --load-from-experiment (the run to continue in place)."
+        )
+    exp = warm_start.experiment
+    exp_dir = exp.path
+    state = load_training_state(exp_dir)
+    wandb_run_id: Optional[str] = None
+    if state is not None:
+        wandb_run_id = state.get("wandb_run_id")
+    if wandb_run_id is None:
+        wandb_run_id = exp.metadata.wandb.get("id")
+    wandb_run_name = exp.metadata.wandb.get("name") or exp.metadata.name
+    if state is None:
+        print(
+            f"--resume: no {TRAINING_STATE_FILENAME} found for '{exp.metadata.name}'. "
+            "Will continue from saved weights but with a fresh optimizer/step counter."
+        )
+    else:
+        print(
+            f"--resume: continuing '{exp.metadata.name}' in place "
+            f"(global_step={state.get('global_step')}, wandb_run_id={wandb_run_id})."
+        )
+    return ResumeContext(
+        active=True,
+        experiment_name=exp.metadata.name,
+        exp_dir=exp_dir,
+        training_state_path=os.path.join(exp_dir, TRAINING_STATE_FILENAME),
+        state=state,
+        wandb_run_id=wandb_run_id,
+        wandb_run_name=wandb_run_name,
+    )
+
+
 def _assert_config_matches_experiment_architecture(
     config_arch: "ArchitecturePreset", exp: Experiment
 ) -> None:
@@ -1110,6 +1232,12 @@ __all__ = [
     "resolve_training_checkpoints",
     "resolve_training_checkpoints_from_experiment",
     "add_load_from_experiment_arguments",
+    "add_resume_argument",
+    "training_state_file",
+    "save_training_state",
+    "load_training_state",
+    "ResumeContext",
+    "prepare_resume",
     "prepare_training_warm_start",
     "build_network",
     "experiments_root",

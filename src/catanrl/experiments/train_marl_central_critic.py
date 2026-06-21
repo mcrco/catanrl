@@ -22,12 +22,25 @@ from catanrl.experiment_store import (
     KIND_POLICY,
     KIND_VALUE,
     add_load_from_experiment_arguments,
+    add_resume_argument,
     default_checkpoints_dir,
     make_experiment_name,
     network_spec_from_model,
+    prepare_resume,
     resolve_training_architecture_and_warm_start,
     save_experiment,
+    training_state_file,
 )
+
+
+def _wandb_info(args: argparse.Namespace) -> dict:
+    """Experiment metadata W&B block, including the live run id when available."""
+    if not args.wandb:
+        return {}
+    info = {"project": args.wandb_project, "name": args.wandb_run_name}
+    if wandb.run is not None:
+        info["id"] = wandb.run.id
+    return info
 
 
 def main():
@@ -37,6 +50,7 @@ def main():
     )
     add_config_argument(parser)
     add_load_from_experiment_arguments(parser)
+    add_resume_argument(parser)
     parser.add_argument(
         "--total-timesteps",
         type=int,
@@ -135,11 +149,25 @@ def main():
         print("Error: MARL training requires game.num_players in the architecture preset.")
         return
 
-    experiment_name = make_experiment_name("marl-cc", args.wandb_run_name, args.experiment_name)
-    if args.wandb and not args.wandb_run_name:
-        args.wandb_run_name = experiment_name
+    try:
+        resume = prepare_resume(args, warm_start)
+    except ValueError as exc:
+        print(f"Error: {exc}")
+        return
+
+    if resume.active:
+        experiment_name = resume.experiment_name
+        if args.wandb and not args.wandb_run_name:
+            args.wandb_run_name = resume.wandb_run_name or experiment_name
+    else:
+        experiment_name = make_experiment_name(
+            "marl-cc", args.wandb_run_name, args.experiment_name
+        )
+        if args.wandb and not args.wandb_run_name:
+            args.wandb_run_name = experiment_name
     args.save_path = default_checkpoints_dir(experiment_name)
     os.makedirs(args.save_path, exist_ok=True)
+    training_state_path = training_state_file(experiment_name)
     print(f"Architecture: {setup.architecture_source}")
 
     config_dict = {
@@ -181,6 +209,9 @@ def main():
             "name": args.wandb_run_name,
             "config": config_dict,
         }
+        if resume.active and resume.wandb_run_id:
+            wandb_config["id"] = resume.wandb_run_id
+            wandb_config["resume"] = "must"
     else:
         wandb_config = {"mode": "disabled", "config": config_dict}
 
@@ -230,6 +261,8 @@ def main():
         vps_to_win=arch.vps_to_win,
         discard_limit=arch.discard_limit,
         metric_window=args.metric_window,
+        resume_state=resume.state,
+        training_state_path=training_state_path,
     )
 
     networks = {
@@ -258,7 +291,7 @@ def main():
         ),
         networks=networks,
         train_config=config_dict,
-        wandb_info={"project": args.wandb_project, "name": args.wandb_run_name} if args.wandb else {},
+        wandb_info=_wandb_info(args),
     )
 
     print("\n" + "=" * 60)

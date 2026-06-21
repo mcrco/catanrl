@@ -43,13 +43,17 @@ from catanrl.experiment_store import (
     KIND_POLICY,
     KIND_POLICY_VALUE,
     KIND_VALUE,
+    ResumeContext,
     TrainingWarmStart,
     add_load_from_experiment_arguments,
+    add_resume_argument,
     default_checkpoints_dir,
     make_experiment_name,
     network_spec_from_model,
+    prepare_resume,
     resolve_training_architecture_and_warm_start,
     save_experiment,
+    training_state_file,
 )
 
 
@@ -161,6 +165,7 @@ def parse_args() -> argparse.Namespace:
         help="Directory for periodic checkpoints (defaults to save-path directory)",
     )
     add_load_from_experiment_arguments(parser)
+    add_resume_argument(parser)
 
     add_experiment_name_argument(parser)
     add_wandb_arguments(parser)
@@ -243,17 +248,88 @@ def build_train_config(
     }
 
 
-def init_wandb(args: argparse.Namespace, train_config: Dict[str, object]) -> bool:
+def _wandb_info(args: argparse.Namespace) -> dict:
+    """Experiment metadata W&B block, including the live run id when available."""
+    if not args.wandb:
+        return {}
+    info = {"project": args.wandb_project, "name": args.wandb_run_name}
+    if wandb.run is not None:
+        info["id"] = wandb.run.id
+    return info
+
+
+def init_wandb(
+    args: argparse.Namespace,
+    train_config: Dict[str, object],
+    resume: Optional[ResumeContext] = None,
+) -> bool:
     if args.wandb:
-        wandb.init(
+        init_kwargs: Dict[str, object] = dict(
             project=args.wandb_project,
             name=args.wandb_run_name,
             entity=args.wandb_entity,
             config=train_config,
         )
+        if resume is not None and resume.active and resume.wandb_run_id:
+            init_kwargs["id"] = resume.wandb_run_id
+            init_kwargs["resume"] = "must"
+        wandb.init(**init_kwargs)
         return True
     wandb.init(mode="disabled")
     return False
+
+
+def _persist_az_training_state(
+    trainer: AlphaZeroTrainer,
+    training_state_path: Optional[str],
+    *,
+    global_step: int,
+    iteration: int,
+    best_loss: float,
+) -> None:
+    """Persist AlphaZero training state (weights/optimizer/counters) for --resume."""
+    if not training_state_path:
+        return
+    payload: Dict[str, object] = {
+        "algorithm": "alphazero",
+        "global_step": global_step,
+        "iteration": iteration,
+        "best_loss": best_loss,
+        "policy_model": trainer.policy_model.state_dict(),
+        "critic_model": (
+            trainer.critic_model.state_dict()
+            if trainer.critic_model is not None
+            else None
+        ),
+        "optimizer": trainer.optimizer.state_dict(),
+        "wandb_run_id": wandb.run.id if wandb.run is not None else None,
+    }
+    os.makedirs(os.path.dirname(training_state_path), exist_ok=True)
+    tmp_path = training_state_path + ".tmp"
+    torch.save(payload, tmp_path)
+    os.replace(tmp_path, training_state_path)
+
+
+def restore_az_training_state(
+    trainer: AlphaZeroTrainer, resume: ResumeContext
+) -> tuple[int, int, float]:
+    """Apply a resume context to the trainer. Returns (global_step, completed_iterations, best_loss)."""
+    state = resume.state
+    if state is None:
+        return 0, 0, float("inf")
+    trainer.policy_model.load_state_dict(state["policy_model"])
+    if trainer.critic_model is not None and state.get("critic_model") is not None:
+        trainer.critic_model.load_state_dict(state["critic_model"])
+    if state.get("optimizer") is not None:
+        trainer.optimizer.load_state_dict(state["optimizer"])
+    global_step = int(state.get("global_step", 0))
+    completed_iterations = int(state.get("iteration", 0))
+    best_loss = float(state.get("best_loss", float("inf")))
+    print(
+        f"  Restored: global_step={global_step:,}, "
+        f"completed_iterations={completed_iterations}, best_loss={best_loss:.4f}"
+    )
+    return global_step, completed_iterations, best_loss
 
 
 def log_self_play_stats(stats: Dict[str, float], trainer: AlphaZeroTrainer) -> None:
@@ -290,15 +366,23 @@ def _close_trainer_if_needed(trainer: AlphaZeroTrainer) -> None:
         close_fn()
 
 
-def run_training(args: argparse.Namespace, trainer: AlphaZeroTrainer, wandb_enabled: bool) -> None:
+def run_training(
+    args: argparse.Namespace,
+    trainer: AlphaZeroTrainer,
+    wandb_enabled: bool,
+    *,
+    start_iteration: int = 0,
+    global_step: int = 0,
+    best_loss: float = float("inf"),
+    training_state_path: Optional[str] = None,
+) -> None:
     checkpoint_dir = args.checkpoint_dir or args.save_path
-    best_loss = float("inf")
-    global_step = 0
+    last_iteration = start_iteration + args.iterations
 
     try:
-        for iteration in range(1, args.iterations + 1):
+        for iteration in range(start_iteration + 1, last_iteration + 1):
             print("\n" + "=" * 80)
-            print(f"Iteration {iteration}/{args.iterations}")
+            print(f"Iteration {iteration}/{last_iteration}")
             stats = trainer.self_play(args.games_per_iteration)
             log_self_play_stats(stats, trainer)
             wandb.log(
@@ -373,6 +457,13 @@ def run_training(args: argparse.Namespace, trainer: AlphaZeroTrainer, wandb_enab
                     )
                     if wandb_enabled:
                         wandb.run.summary["best_loss"] = best_loss
+                    _persist_az_training_state(
+                        trainer,
+                        training_state_path,
+                        global_step=global_step,
+                        iteration=iteration,
+                        best_loss=best_loss,
+                    )
             else:
                 print("  No optimizer metrics collected this iteration.")
 
@@ -381,6 +472,13 @@ def run_training(args: argparse.Namespace, trainer: AlphaZeroTrainer, wandb_enab
                 print(
                     f"  → Saved checkpoint to {checkpoint_dir} "
                     f"({trainer.uses_shared_network and f'policy_value_iter_{iteration}.pt' or f'policy_iter_{iteration}.pt, critic_iter_{iteration}.pt'})"
+                )
+                _persist_az_training_state(
+                    trainer,
+                    training_state_path,
+                    global_step=global_step,
+                    iteration=iteration,
+                    best_loss=best_loss,
                 )
 
             value_eval_stats = trainer.evaluate_against(
@@ -416,6 +514,13 @@ def run_training(args: argparse.Namespace, trainer: AlphaZeroTrainer, wandb_enab
             )
         else:
             print(f"\nBest loss achieved: {best_loss:.4f}")
+        _persist_az_training_state(
+            trainer,
+            training_state_path,
+            global_step=global_step,
+            iteration=last_iteration,
+            best_loss=best_loss,
+        )
     finally:
         _close_trainer_if_needed(trainer)
 
@@ -442,11 +547,25 @@ def main() -> None:
         critic_observation_level=arch.critic_observation_level,
     )
 
-    experiment_name = make_experiment_name("alphazero", args.wandb_run_name, args.experiment_name)
-    if args.wandb and not args.wandb_run_name:
-        args.wandb_run_name = experiment_name
+    try:
+        resume = prepare_resume(args, warm_start)
+    except ValueError as exc:
+        print(f"Error: {exc}")
+        return
+
+    if resume.active:
+        experiment_name = resume.experiment_name
+        if args.wandb and not args.wandb_run_name:
+            args.wandb_run_name = resume.wandb_run_name or experiment_name
+    else:
+        experiment_name = make_experiment_name(
+            "alphazero", args.wandb_run_name, args.experiment_name
+        )
+        if args.wandb and not args.wandb_run_name:
+            args.wandb_run_name = experiment_name
     args.save_path = default_checkpoints_dir(experiment_name)
     os.makedirs(args.save_path, exist_ok=True)
+    training_state_path = training_state_file(experiment_name)
     print(f"Architecture: {setup.architecture_source}")
 
     config = AlphaZeroConfig(
@@ -525,10 +644,19 @@ def main() -> None:
         )
 
     trainer = AlphaZeroTrainer(config=config, policy_model=policy_model, critic_model=critic_model)
-    maybe_load_from_experiment(trainer, warm_start)
+    resume_global_step = 0
+    resume_start_iteration = 0
+    resume_best_loss = float("inf")
+    if resume.active:
+        print("Resuming AlphaZero training in place from saved training state...")
+        resume_global_step, resume_start_iteration, resume_best_loss = (
+            restore_az_training_state(trainer, resume)
+        )
+    else:
+        maybe_load_from_experiment(trainer, warm_start)
 
     train_config = build_train_config(args, config, arch, device)
-    wandb_enabled = init_wandb(args, train_config)
+    wandb_enabled = init_wandb(args, train_config, resume)
     print("\nStarting AlphaZero training...")
     print(f"  Device: {trainer.device}")
     print(f"  Backbone: {arch.backbone_type} | model: {config.model_type}")
@@ -537,7 +665,15 @@ def main() -> None:
     print(f"  Checkpoints: {args.save_path}")
     print(f"  Network mode: {arch.network_mode}")
 
-    run_training(args, trainer, wandb_enabled)
+    run_training(
+        args,
+        trainer,
+        wandb_enabled,
+        start_iteration=resume_start_iteration,
+        global_step=resume_global_step,
+        best_loss=resume_best_loss,
+        training_state_path=training_state_path,
+    )
 
     print(f"  Game workers: {args.num_workers}")
 
@@ -576,7 +712,7 @@ def main() -> None:
         ),
         networks=networks,
         train_config=train_config,
-        wandb_info={"project": args.wandb_project, "name": args.wandb_run_name} if args.wandb else {},
+        wandb_info=_wandb_info(args),
     )
 
     print("\n" + "=" * 80)

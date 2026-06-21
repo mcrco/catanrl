@@ -82,8 +82,16 @@ def train(
     vps_to_win: int = 15,
     discard_limit: int = 9,
     metric_window: int = 200,
+    resume_state: Optional[Dict] = None,
+    training_state_path: Optional[str] = None,
 ) -> Tuple[PolicyNetworkWrapper, ValueNetworkWrapper]:
-    """Train a shared policy with a centralized critic using PPO."""
+    """Train a shared policy with a centralized critic using PPO.
+
+    When ``resume_state`` is provided the run continues in place (weights,
+    optimizers and step counters are restored, and ``total_timesteps`` is treated
+    as *additional* steps). When ``training_state_path`` is set, full training
+    state is persisted there at every checkpoint save.
+    """
 
     assert 2 <= num_players <= 4, "num_players must be between 2 and 4"
     assert num_envs >= 1, "num_envs must be >= 1"
@@ -281,6 +289,26 @@ def train(
     global_step = 0
     total_episodes = 0
     ppo_update_count = 0
+
+    if resume_state is not None:
+        print("Resuming MARL training in place from saved training state...")
+        policy_model.load_state_dict(resume_state["policy_model"])
+        if resume_state.get("critic_model") is not None:
+            critic_model.load_state_dict(resume_state["critic_model"])
+        if resume_state.get("policy_optimizer") is not None:
+            policy_optimizer.load_state_dict(resume_state["policy_optimizer"])
+        if resume_state.get("critic_optimizer") is not None:
+            critic_optimizer.load_state_dict(resume_state["critic_optimizer"])
+        global_step = int(resume_state.get("global_step", 0))
+        total_episodes = int(resume_state.get("total_episodes", 0))
+        ppo_update_count = int(resume_state.get("ppo_update_count", 0))
+        best_eval_win_rate = float(resume_state.get("best_eval_win_rate", -float("inf")))
+        best_eval_critic_mse = float(resume_state.get("best_eval_critic_mse", float("inf")))
+        print(
+            f"  Restored: global_step={global_step:,}, "
+            f"updates={ppo_update_count}, episodes={total_episodes}"
+        )
+    target_timesteps = global_step + total_timesteps
     episode_lengths: list[int] = [0 for _ in range(num_envs)]
     length_window = deque(maxlen=metric_window)
 
@@ -419,13 +447,35 @@ def train(
                     wandb.run.summary["best_eval_critic_mse"] = best_eval_critic_mse
                 print(f"  → Saved best critic (eval MSE: {best_eval_critic_mse:.4f})")
 
-    print("Running step-0 baseline eval before PPO updates...")
-    run_and_log_evals()
+    def persist_training_state() -> None:
+        if not training_state_path:
+            return
+        payload = {
+            "algorithm": "marl_ppo_central_critic",
+            "global_step": global_step,
+            "total_episodes": total_episodes,
+            "ppo_update_count": ppo_update_count,
+            "best_eval_win_rate": best_eval_win_rate,
+            "best_eval_critic_mse": best_eval_critic_mse,
+            "policy_model": policy_model.state_dict(),
+            "critic_model": critic_model.state_dict(),
+            "policy_optimizer": policy_optimizer.state_dict(),
+            "critic_optimizer": critic_optimizer.state_dict(),
+            "wandb_run_id": wandb.run.id if wandb.run is not None else None,
+        }
+        os.makedirs(os.path.dirname(training_state_path), exist_ok=True)
+        tmp_path = training_state_path + ".tmp"
+        torch.save(payload, tmp_path)
+        os.replace(tmp_path, training_state_path)
+
+    if resume_state is None:
+        print("Running step-0 baseline eval before PPO updates...")
+        run_and_log_evals()
     observations, infos = envs.reset()
 
     try:
         with tqdm(total=total_timesteps, desc="Steps", unit="step", unit_scale=True) as pbar:
-            while global_step < total_timesteps:
+            while global_step < target_timesteps:
                 actor_batch, critic_batch, valid_masks = decode_observations(observations)
                 actor_tensor = torch.from_numpy(actor_batch).float().to(device)
                 actions, log_probs, _ = policy_agent.select_actions_batch(
@@ -560,12 +610,14 @@ def train(
                         )
                         torch.save(policy_model.state_dict(), policy_path)
                         torch.save(critic_model.state_dict(), critic_path)
+                        persist_training_state()
 
                     # Evaluate policy against catanatron bots and critic value predictions.
                     if ppo_update_count % eval_every_updates == 0:
                         run_and_log_evals()
 
     finally:
+        persist_training_state()
         envs.close()
 
     if best_eval_win_rate > -float("inf"):
