@@ -3,19 +3,15 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from catanatron.game import Game
+from catanatron.models.enums import KNIGHT
 from catanatron.models.player import Color, RandomPlayer
 from catanatron.state_functions import player_key
 
+import catanrl.players.nn_mcts_player as nn_mcts_player
 from catanrl.utils.catanatron_action_space import get_action_space_size
 from catanrl.utils.catanatron_game import force_player_order
 from catanrl.utils.catanatron_map import build_catan_map
-
-# The MCTS player pulls in the full model/env stack (torch, pufferlib). Skip the
-# whole module if those aren't importable in this environment.
-nn_mcts_player = pytest.importorskip("catanrl.players.nn_mcts_player")
-
-from catanatron.game import Game  # noqa: E402
-from catanatron.models.enums import KNIGHT  # noqa: E402
 
 
 class _UniformBackend(nn_mcts_player._NNMCTSInferenceBackend):

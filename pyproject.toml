@@ -15,12 +15,12 @@ dependencies = [
     "gymnasium==0.29.1",
     "scikit-learn>=1.7.2",
     "catanatron",
+    "pufferlib>=2.0.6",
     "pyyaml>=6.0.0",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=7.0.0",
     "black>=23.0.0",
     "ruff>=0.0.260",
 ]
@@ -51,6 +51,8 @@ target-version = "py311"
 
 [tool.pytest.ini_options]
 pythonpath = [".", "tests"]
+testpaths = ["tests"]
+norecursedirs = ["third_party", "catanatron", "build", ".venv", "wandb"]
 
 [tool.uv.sources]
 torch = [
@@ -72,4 +74,5 @@ explicit = true
 [dependency-groups]
 dev = [
     "pyright>=1.1.408",
+    "pytest>=7.0.0",
 ]
