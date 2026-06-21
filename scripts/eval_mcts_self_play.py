@@ -31,6 +31,7 @@ from catanrl.experiment_store import (
     backbone_hidden_dims,
     load_experiment,
 )
+from catanrl.experiments.network_config import resolve_observation_network_args
 from catanrl.features.catanatron_utils import (
     ActorObservationLevel,
     COLOR_ORDER,
@@ -182,9 +183,9 @@ def build_self_play_players(
     num_simulations: int,
     c_puct: float,
     prunning: bool,
-    critic_mode: str,
     actor_observation_level: ActorObservationLevel,
     critic_observation_level: CriticObservationLevel,
+    ismcts_determinizations: int = 1,
     num_search_workers: int = 1,
     inference_batch_size: int = 32,
     inference_wait_ms: float = 1.0,
@@ -199,10 +200,10 @@ def build_self_play_players(
             critic_model=critic_model,
             map_type=map_type,
             num_simulations=num_simulations,
+            ismcts_determinizations=ismcts_determinizations,
             c_puct=c_puct,
             prunning=prunning,
             opponent_policy="self",
-            critic_mode=critic_mode,
             actor_observation_level=actor_observation_level,
             critic_observation_level=critic_observation_level,
             num_search_workers=num_search_workers,
@@ -373,9 +374,9 @@ def _self_play_worker_main(
             num_simulations=int(args_dict["num_simulations"]),
             c_puct=float(args_dict["c_puct"]),
             prunning=bool(args_dict["prunning"]),
-            critic_mode=str(args_dict["critic_mode"]),
             actor_observation_level=args_dict["actor_observation_level"],
             critic_observation_level=args_dict["critic_observation_level"],
+            ismcts_determinizations=int(args_dict["ismcts_determinizations"]),
             num_search_workers=int(args_dict["num_search_workers"]),
             inference_batch_size=int(args_dict["inference_batch_size"]),
             inference_wait_ms=float(args_dict["inference_wait_ms"]),
@@ -425,11 +426,11 @@ def run_parallel_self_play_eval(
     virtual_loss: float,
     c_puct: float,
     prunning: bool,
-    critic_mode: str,
     actor_observation_level: ActorObservationLevel,
     critic_observation_level: CriticObservationLevel,
     num_game_workers: int,
     device: torch.device,
+    ismcts_determinizations: int = 1,
     show_tqdm: bool = True,
 ) -> tuple[dict[Color, PlayerStats], list[int]]:
     if num_games <= 0:
@@ -466,9 +467,9 @@ def run_parallel_self_play_eval(
         "virtual_loss": virtual_loss,
         "c_puct": c_puct,
         "prunning": prunning,
-        "critic_mode": critic_mode,
         "actor_observation_level": actor_observation_level,
         "critic_observation_level": critic_observation_level,
+        "ismcts_determinizations": ismcts_determinizations,
         "seed": seed,
         "vps_to_win": vps_to_win,
         "discard_limit": discard_limit,
@@ -649,6 +650,18 @@ def main():
         help="MCTS simulations per move",
     )
     parser.add_argument(
+        "--ismcts-determinizations",
+        "--is-mcts-determinizations",
+        dest="ismcts_determinizations",
+        type=int,
+        default=1,
+        help=(
+            "Information-Set MCTS: number of belief determinizations of opponents' "
+            "hidden dev cards searched per move. 1 disables IS-MCTS (plain search); "
+            ">1 requires actor/critic observation public (1v1) or full."
+        ),
+    )
+    parser.add_argument(
         "--num-search-workers",
         type=int,
         default=1,
@@ -685,16 +698,6 @@ def main():
         "--prunning",
         action="store_true",
         help="Enable catanatron action prunning heuristics",
-    )
-    parser.add_argument(
-        "--critic-mode",
-        type=str,
-        default="full",
-        choices=["full", "guess"],
-        help=(
-            "Critic observation mode. 'full' uses privileged critic features; "
-            "'guess' samples hidden opponent dev cards before scoring."
-        ),
     )
     parser.add_argument(
         "--num-games",
@@ -815,8 +818,8 @@ def main():
     print(f"Critic hidden dims: {args.critic_hidden_dims}")
     print(f"Policy weights: {args.policy_weights}")
     print(f"Critic weights: {args.critic_weights}")
-    print(f"Critic mode: {args.critic_mode}")
     print(f"MCTS simulations: {args.num_simulations} | c_puct: {args.c_puct}")
+    print(f"IS-MCTS determinizations: {args.ismcts_determinizations}")
     print(
         "MCTS workers: "
         f"{args.num_search_workers} | inference batch: {args.inference_batch_size} "
@@ -871,6 +874,12 @@ def main():
         print(f"Loaded policy weights from {args.policy_weights}")
         print(f"Loaded critic weights from {args.critic_weights}")
 
+    resolve_observation_network_args(
+        args,
+        policy_mode_default=args.actor_observation_level,
+        critic_mode_default=args.critic_observation_level,
+    )
+
     print(f"\nRunning {args.num_games} self-play games...")
     if args.num_game_workers <= 1:
         players = build_self_play_players(
@@ -882,9 +891,9 @@ def main():
             num_simulations=args.num_simulations,
             c_puct=args.c_puct,
             prunning=args.prunning,
-            critic_mode=args.critic_mode,
             actor_observation_level=args.actor_observation_level,
             critic_observation_level=args.critic_observation_level,
+            ismcts_determinizations=args.ismcts_determinizations,
             num_search_workers=args.num_search_workers,
             inference_batch_size=args.inference_batch_size,
             inference_wait_ms=args.inference_wait_ms,
@@ -917,9 +926,9 @@ def main():
             virtual_loss=args.virtual_loss,
             c_puct=args.c_puct,
             prunning=args.prunning,
-            critic_mode=args.critic_mode,
             actor_observation_level=args.actor_observation_level,
             critic_observation_level=args.critic_observation_level,
+            ismcts_determinizations=args.ismcts_determinizations,
             num_game_workers=args.num_game_workers,
             device=device,
             show_tqdm=True,

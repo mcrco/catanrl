@@ -21,6 +21,7 @@ from catanrl.experiment_store import (
     backbone_hidden_dims,
     load_experiment,
 )
+from catanrl.experiments.network_config import resolve_observation_network_args
 from catanrl.features.catanatron_utils import (
     ActorObservationLevel,
     COLOR_ORDER,
@@ -290,6 +291,18 @@ def main():
         help="MCTS simulations per move",
     )
     parser.add_argument(
+        "--ismcts-determinizations",
+        "--is-mcts-determinizations",
+        dest="ismcts_determinizations",
+        type=int,
+        default=1,
+        help=(
+            "Information-Set MCTS: number of belief determinizations of opponents' "
+            "hidden dev cards searched per move. 1 disables IS-MCTS (plain search); "
+            ">1 requires actor/critic observation public (1v1) or full."
+        ),
+    )
+    parser.add_argument(
         "--num-search-workers",
         type=int,
         default=1,
@@ -333,16 +346,6 @@ def main():
             "Opponent policy used inside NNMCTS tree expansion for non-agent turns. "
             "'self' uses the NN policy/value for all players; other options delegate "
             "opponent turns to the selected Catanatron bot policy."
-        ),
-    )
-    parser.add_argument(
-        "--critic-mode",
-        type=str,
-        default="full",
-        choices=["full", "guess"],
-        help=(
-            "Critic observation mode. 'full' uses privileged critic features; "
-            "'guess' samples hidden opponent dev cards before scoring."
         ),
     )
     parser.add_argument(
@@ -467,8 +470,8 @@ def main():
     print(f"Critic hidden dims: {args.critic_hidden_dims}")
     print(f"Policy weights: {args.policy_weights}")
     print(f"Critic weights: {args.critic_weights}")
-    print(f"Critic mode: {args.critic_mode}")
     print(f"MCTS simulations: {args.num_simulations} | c_puct: {args.c_puct}")
+    print(f"IS-MCTS determinizations: {args.ismcts_determinizations}")
     print(
         "MCTS workers: "
         f"{args.num_search_workers} | inference batch: {args.inference_batch_size} "
@@ -522,6 +525,12 @@ def main():
         print(f"Loaded policy weights from {args.policy_weights}")
         print(f"Loaded critic weights from {args.critic_weights}")
 
+    resolve_observation_network_args(
+        args,
+        policy_mode_default=args.actor_observation_level,
+        critic_mode_default=args.critic_observation_level,
+    )
+
     nn_mcts_player = NNMCTSPlayer(
         color=COLOR_ORDER[0],
         model_type=args.model_type,
@@ -529,10 +538,10 @@ def main():
         critic_model=critic_model,
         map_type=args.map_type,
         num_simulations=args.num_simulations,
+        ismcts_determinizations=args.ismcts_determinizations,
         c_puct=args.c_puct,
         prunning=args.prunning,
         opponent_policy=args.adversarial_policy,
-        critic_mode=args.critic_mode,
         actor_observation_level=args.actor_observation_level,
         critic_observation_level=args.critic_observation_level,
         num_search_workers=args.num_search_workers,

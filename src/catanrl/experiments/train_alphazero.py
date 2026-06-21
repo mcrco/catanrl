@@ -31,6 +31,7 @@ from catanrl.experiments.common_args import (
     add_save_every_updates_argument,
     add_wandb_arguments,
 )
+from catanrl.experiments.network_config import validate_ismcts_observation_levels
 from catanrl.models.model_builders import (
     build_critic_model,
     build_policy_model,
@@ -96,6 +97,18 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument("--simulations", type=int, default=64, help="MCTS simulations per move")
+    parser.add_argument(
+        "--ismcts-determinizations",
+        "--is-mcts-determinizations",
+        dest="ismcts_determinizations",
+        type=int,
+        default=1,
+        help=(
+            "Information-Set MCTS: number of belief determinizations of opponents' "
+            "hidden dev cards searched per move. 1 disables IS-MCTS (plain search); "
+            ">1 requires actor/critic observation public (1v1) or full."
+        ),
+    )
     parser.add_argument("--c-puct", type=float, default=1.5, help="PUCT exploration constant")
     parser.add_argument(
         "--temperature", type=float, default=1.0, help="Sampling temperature for early moves"
@@ -204,8 +217,8 @@ def build_train_config(
         "inference_batch_size": args.inference_batch_size,
         "inference_wait_ms": args.inference_wait_ms,
         "num_players": config.num_players,
-        "critic_hidden_mode": config.critic_hidden_mode,
         "simulations": config.simulations,
+        "ismcts_determinizations": config.ismcts_determinizations,
         "c_puct": config.c_puct,
         "prunning": config.prunning,
         "temperature": config.temperature,
@@ -422,6 +435,13 @@ def main() -> None:
         print("Error: AlphaZero training requires game.num_players in the architecture preset.")
         return
 
+    validate_ismcts_observation_levels(
+        ismcts_determinizations=args.ismcts_determinizations,
+        num_players=arch.num_players,
+        actor_observation_level=arch.actor_observation_level,
+        critic_observation_level=arch.critic_observation_level,
+    )
+
     experiment_name = make_experiment_name("alphazero", args.wandb_run_name, args.experiment_name)
     if args.wandb and not args.wandb_run_name:
         args.wandb_run_name = experiment_name
@@ -434,12 +454,12 @@ def main() -> None:
         map_type=arch.map_type,
         actor_observation_level=arch.actor_observation_level,
         critic_observation_level=arch.critic_observation_level,
-        critic_hidden_mode=arch.critic_hidden_mode or "full",
         network_mode=arch.network_mode,
         model_type=arch.model_type,
         vps_to_win=arch.vps_to_win,
         discard_limit=arch.discard_limit,
         simulations=args.simulations,
+        ismcts_determinizations=args.ismcts_determinizations,
         c_puct=args.c_puct,
         prunning=args.prunning,
         temperature=args.temperature,

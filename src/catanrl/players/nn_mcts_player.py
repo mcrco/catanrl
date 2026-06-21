@@ -6,17 +6,14 @@ import queue
 import random
 import threading
 import time
-from collections import Counter, defaultdict
+from collections import defaultdict
 from concurrent.futures import Future
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable, Literal, Sequence, Tuple
 
 import numpy as np
 import torch
-from catanatron.features import create_sample
 from catanatron.game import Game
-from catanatron.models.decks import starting_devcard_bank
-from catanatron.models.enums import DEVELOPMENT_CARDS
 from catanatron.models.player import Color, Player, RandomPlayer
 from catanatron.players.mcts import MCTSPlayer
 from catanatron.players.minimax import AlphaBetaPlayer, SameTurnAlphaBetaPlayer
@@ -26,24 +23,20 @@ from catanatron.players.tree_search_utils import execute_spectrum, list_prunned_
 from catanatron.players.value import ValueFunctionPlayer
 from catanatron.players.weighted_random import WeightedRandomPlayer
 
+from catanrl.beliefs.dev_card_belief import DevCardBelief
+from catanrl.beliefs.determinize import determinize_game
 from catanrl.features.catanatron_utils import (
     ActorObservationLevel,
     CriticObservationLevel,
     full_game_to_features,
-    get_full_numeric_feature_names,
     get_observation_indices_from_full,
 )
+from catanrl.experiments.network_config import validate_ismcts_observation_levels
 from catanrl.models import PolicyNetworkWrapper, PolicyValueNetworkWrapper, ValueNetworkWrapper
 from catanrl.models.inference_utils import forward_policy_value
 from catanrl.utils.catanatron_action_space import get_action_space_size, to_action_space
 
 EPSILON = 1e-8
-CRITIC_MODE_ALIASES = {
-    "full": "full",
-    "guess": "guessed_dev_cards",
-    "guessed": "guessed_dev_cards",
-    "guessed_dev_cards": "guessed_dev_cards",
-}
 
 # Populated in the parent immediately before fork-based within-tree workers start.
 _FORK_SEARCH_CTX: dict[str, object] = {}
@@ -434,7 +427,6 @@ class NNMCTSPlayer(Player):
         prunning: bool = False,
         opponent_policy: str = "self",
         opponent_factory: Callable[[Color], Player] | None = None,
-        critic_mode: Literal["full", "guessed_dev_cards"] = "full",
         actor_observation_level: ActorObservationLevel = "private",
         critic_observation_level: CriticObservationLevel = "full",
         num_search_workers: int = 1,
@@ -443,6 +435,7 @@ class NNMCTSPlayer(Player):
         virtual_loss: float = 1.0,
         dirichlet_alpha: float = 0.3,
         dirichlet_frac: float = 0.25,
+        ismcts_determinizations: int = 1,
         device: str | torch.device | None = None,
         inference_backend: _NNMCTSInferenceBackend | None = None,
         **kwargs,
@@ -457,7 +450,6 @@ class NNMCTSPlayer(Player):
         self.prunning = bool(prunning)
         self.opponent_policy = opponent_policy.lower()
         self.opponent_factory = opponent_factory
-        self.critic_mode = self._normalize_critic_mode(critic_mode)
         self.actor_observation_level = actor_observation_level
         self.critic_observation_level = critic_observation_level
         self.num_search_workers = max(1, int(num_search_workers))
@@ -469,10 +461,20 @@ class NNMCTSPlayer(Player):
         # decide() ignores them).
         self.dirichlet_alpha = float(dirichlet_alpha)
         self.dirichlet_frac = float(dirichlet_frac)
+        # Information-Set MCTS via determinization (PIMC): run an independent
+        # search per sampled/enumerated determinization of opponents' hidden dev
+        # cards and aggregate root visit counts weighted by belief probability.
+        # A single determinization (the default) means plain perfect-info search.
+        self.ismcts_determinizations = max(1, int(ismcts_determinizations))
+        self.ismcts = self.ismcts_determinizations > 1
+        validate_ismcts_observation_levels(
+            ismcts_determinizations=self.ismcts_determinizations,
+            num_players=None,
+            actor_observation_level=actor_observation_level,
+            critic_observation_level=critic_observation_level,
+        )
         self._opponents_by_color: dict[Color, Player] = {}
-        self._critic_index_cache: dict[int, dict[str, int]] = {}
         self._observation_index_cache: dict[tuple[int, str], np.ndarray] = {}
-        self._starting_dev_counter = Counter(starting_devcard_bank())
 
         if self.opponent_factory is None and self.opponent_policy != "self":
             self.opponent_factory = self._build_opponent_factory(self.opponent_policy)
@@ -507,6 +509,20 @@ class NNMCTSPlayer(Player):
         if len(playable_actions) == 1:
             return playable_actions[0]
 
+        num_players = len(game.state.colors)
+        game_colors = tuple(game.state.colors)
+
+        if self.ismcts:
+            agg_visits = self._ismcts_aggregate_visits(game, add_noise=False)
+            indices = [
+                to_action_space(action, num_players, self.map_type, game_colors)
+                for action in playable_actions
+            ]
+            playable_visits = agg_visits[indices]
+            if playable_visits.sum() <= 0:
+                return playable_actions[0]
+            return playable_actions[int(playable_visits.argmax())]
+
         root = self._search_root(game, add_noise=False)
         if not root.children:
             return playable_actions[0]
@@ -516,7 +532,7 @@ class NNMCTSPlayer(Player):
             key=lambda action: sum(child.visits for child, _ in root.children[action]),
         )
         return self._resolve_root_action(
-            best_action, playable_actions, len(game.state.colors), tuple(game.state.colors)
+            best_action, playable_actions, num_players, game_colors
         )
 
     def _search_root(self, game, add_noise: bool = False) -> _Node:
@@ -546,6 +562,105 @@ class NNMCTSPlayer(Player):
         for action, noise_val in zip(actions, noise):
             priors[action] = priors[action] * (1.0 - frac) + float(noise_val) * frac
 
+    def _determinizations(self, game) -> list[tuple[Game, float]]:
+        """Belief-weighted determinizations of opponents' hidden dev cards.
+
+        The belief is taken from the current mover's perspective (the player about
+        to act). In 1v1 the belief is enumerated exactly and (optionally)
+        subsampled to ``num_determinizations``; otherwise it is sampled.
+        """
+        perspective = game.state.current_color()
+        belief = DevCardBelief(game, perspective)
+        if belief.num_players == 2:
+            hypotheses = belief.enumerate_hypotheses()
+            if len(hypotheses) > self.ismcts_determinizations:
+                hypotheses = self._subsample_hypotheses(
+                    hypotheses, self.ismcts_determinizations
+                )
+        else:
+            hypotheses = belief.sample_hypotheses(self.ismcts_determinizations, random)
+        return [
+            (determinize_game(belief, hyp, rng=random), hyp.weight)
+            for hyp in hypotheses
+        ]
+
+    @staticmethod
+    def _subsample_hypotheses(hypotheses, k: int):
+        """Sample ``k`` hypotheses without replacement by weight and renormalize."""
+        weights = np.array([h.weight for h in hypotheses], dtype=np.float64)
+        weights = weights / weights.sum()
+        chosen_idx = np.random.choice(
+            len(hypotheses), size=k, replace=False, p=weights
+        )
+        chosen = [hypotheses[i] for i in chosen_idx]
+        total = sum(hypotheses[i].weight for i in chosen_idx)
+        if total <= 0:
+            total = 1.0
+        return [replace(h, weight=h.weight / total) for h in chosen]
+
+    def _ismcts_aggregate_visits(self, game, add_noise: bool) -> np.ndarray:
+        """Run one search per determinization and aggregate belief-weighted visits.
+
+        Returns visit counts over the flat action space (indexed by
+        ``to_action_space``), summed across determinizations and weighted by each
+        determinization's belief probability.
+        """
+        num_players = len(game.state.colors)
+        game_colors = tuple(game.state.colors)
+        action_space_size = get_action_space_size(num_players, self.map_type)
+        aggregate = np.zeros(action_space_size, dtype=np.float64)
+
+        for det_game, weight in self._determinizations(game):
+            root = self._search_root(det_game, add_noise=add_noise)
+            if not root.children:
+                continue
+            for action, kids in root.children.items():
+                idx = to_action_space(action, num_players, self.map_type, game_colors)
+                aggregate[idx] += weight * sum(child.visits for child, _ in kids)
+        return aggregate
+
+    def _ismcts_search_policy(
+        self,
+        game,
+        temperature: float,
+        add_noise: bool,
+        playable_actions: list,
+    ) -> Tuple[np.ndarray, object]:
+        num_players = len(game.state.colors)
+        game_colors = tuple(game.state.colors)
+        action_space_size = get_action_space_size(num_players, self.map_type)
+        policy = np.zeros(action_space_size, dtype=np.float32)
+
+        aggregate = self._ismcts_aggregate_visits(game, add_noise=add_noise)
+        indices = [
+            to_action_space(action, num_players, self.map_type, game_colors)
+            for action in playable_actions
+        ]
+        visits = aggregate[indices].astype(np.float64)
+
+        if visits.sum() <= 0:
+            uniform = 1.0 / len(playable_actions)
+            for idx in indices:
+                policy[idx] = uniform
+            return policy, random.choice(playable_actions)
+
+        if temperature <= 1e-3:
+            best = int(visits.argmax())
+            policy[indices[best]] = 1.0
+            return policy, playable_actions[best]
+
+        adjusted = visits ** (1.0 / temperature)
+        total = adjusted.sum()
+        adjusted = (
+            adjusted / total
+            if total > 0
+            else np.ones_like(adjusted) / len(adjusted)
+        )
+        for idx, prob in zip(indices, adjusted):
+            policy[idx] = prob
+        chosen = playable_actions[int(np.random.choice(len(playable_actions), p=adjusted))]
+        return policy, chosen
+
     def run_search_policy(
         self,
         game,
@@ -564,6 +679,11 @@ class NNMCTSPlayer(Player):
             only = playable_actions[0]
             policy[to_action_space(only, num_players, self.map_type, game_colors)] = 1.0
             return policy, only
+
+        if self.ismcts:
+            return self._ismcts_search_policy(
+                game, temperature, add_noise, playable_actions
+            )
 
         root = self._search_root(game, add_noise=add_noise)
         if not root.children:
@@ -849,14 +969,6 @@ class NNMCTSPlayer(Player):
             "sameturnalphabeta, mcts, playouts."
         )
 
-    @staticmethod
-    def _normalize_critic_mode(critic_mode: str) -> str:
-        normalized = CRITIC_MODE_ALIASES.get(critic_mode.lower())
-        if normalized is None:
-            valid_modes = ", ".join(sorted(CRITIC_MODE_ALIASES))
-            raise ValueError(f"Unknown critic_mode '{critic_mode}'. Use one of: {valid_modes}.")
-        return normalized
-
     def _select(self, node: _Node) -> _Node:
         lock = self._tree_process_lock
         if lock is not None:
@@ -933,19 +1045,11 @@ class NNMCTSPlayer(Player):
         )
         # Evaluate the position from the mover's (to_play) perspective so the
         # returned value is correctly oriented for N-player backprop.
-        if self.critic_mode == "full":
-            critic_features = self._observation_features(
-                game,
-                current_color,
-                self.critic_observation_level,
-            )
-        else:
-            full_guess = self._guessed_dev_cards_features(game, current_color)
-            critic_features = self._select_observation_features(
-                full_guess,
-                len(game.state.colors),
-                self.critic_observation_level,
-            )
+        critic_features = self._observation_features(
+            game,
+            current_color,
+            self.critic_observation_level,
+        )
         return inference_backend.evaluate_leaf(actor_features, critic_features)
 
     def _observation_features(
@@ -971,78 +1075,6 @@ class NNMCTSPlayer(Player):
     ) -> np.ndarray:
         indices = self._get_observation_indices(num_players, level)
         return full_features[indices].astype(np.float32, copy=False)
-
-    def _guessed_dev_cards_features(self, game, base_color: Color | None = None) -> np.ndarray:
-        base_color = base_color if base_color is not None else self.color
-        num_players = len(game.state.colors)
-        features = full_game_to_features(
-            game,
-            num_players,
-            self.map_type,
-            base_color=base_color,
-        ).astype(np.float32, copy=True)
-        sample = create_sample(game, base_color)
-        dev_guess = self._sample_opponent_dev_cards(sample, num_players)
-        numeric_name_to_index = self._get_full_numeric_index(num_players)
-
-        for player_idx, card_counter in dev_guess.items():
-            vp_feature = f"P{player_idx}_VICTORY_POINT_IN_HAND"
-            old_vp = float(features[numeric_name_to_index[vp_feature]])
-            new_vp = float(card_counter.get("VICTORY_POINT", 0))
-            features[numeric_name_to_index[vp_feature]] = new_vp
-            for dev_card in DEVELOPMENT_CARDS:
-                feature_name = f"P{player_idx}_{dev_card}_IN_HAND"
-                features[numeric_name_to_index[feature_name]] = float(card_counter.get(dev_card, 0))
-            actual_vps_feature = f"P{player_idx}_ACTUAL_VPS"
-            if actual_vps_feature in numeric_name_to_index:
-                features[numeric_name_to_index[actual_vps_feature]] += new_vp - old_vp
-        return features
-
-    def _sample_opponent_dev_cards(self, sample, num_players: int) -> dict[int, Counter]:
-        known_cards = Counter()
-        for dev_card in DEVELOPMENT_CARDS:
-            known_cards[dev_card] += int(sample.get(f"P0_{dev_card}_IN_HAND", 0))
-            for player_idx in range(num_players):
-                known_cards[dev_card] += int(sample.get(f"P{player_idx}_{dev_card}_PLAYED", 0))
-
-        unseen = self._starting_dev_counter - known_cards
-        unseen_cards = [card for card, count in unseen.items() for _ in range(max(0, int(count)))]
-        random.shuffle(unseen_cards)
-
-        opponent_card_counts = {
-            player_idx: int(sample.get(f"P{player_idx}_NUM_DEVS_IN_HAND", 0))
-            for player_idx in range(1, num_players)
-        }
-        guessed: dict[int, Counter] = {}
-        cursor = 0
-        for player_idx in range(1, num_players):
-            num_cards = max(0, opponent_card_counts[player_idx])
-            draw = unseen_cards[cursor : cursor + num_cards]
-            cursor += num_cards
-            hand_counter = Counter(draw)
-            if len(draw) < num_cards:
-                self._fill_missing_dev_cards(hand_counter, num_cards - len(draw), unseen)
-            guessed[player_idx] = hand_counter
-        return guessed
-
-    @staticmethod
-    def _fill_missing_dev_cards(hand_counter: Counter, missing: int, unseen: Counter) -> None:
-        if missing <= 0:
-            return
-        fallback_pool = [card for card, count in unseen.items() for _ in range(max(0, int(count)))]
-        if not fallback_pool:
-            fallback_pool = ["KNIGHT"]
-        for _ in range(missing):
-            hand_counter[random.choice(fallback_pool)] += 1
-
-    def _get_full_numeric_index(self, num_players: int) -> dict[str, int]:
-        index = self._critic_index_cache.get(num_players)
-        if index is not None:
-            return index
-        numeric_names = get_full_numeric_feature_names(num_players, self.map_type)
-        index = {name: idx for idx, name in enumerate(numeric_names)}
-        self._critic_index_cache[num_players] = index
-        return index
 
     def _get_observation_indices(
         self,
@@ -1074,12 +1106,16 @@ class NNMCTSPlayer(Player):
         return super().__repr__().replace("Player", "NNMCTSPlayer")
 
 
-class NNMCTSGuessedDevCardsPlayer(NNMCTSPlayer):
+class NNMCTSInformationSetPlayer(NNMCTSPlayer):
     """
-    NNMCTS player that hides exact opponent dev-card types from the critic.
+    NNMCTS player that runs Information-Set MCTS (PIMC) over the belief about
+    opponents' hidden development cards instead of searching the true state.
+
+    Defaults to a full-information policy, as required by IS-MCTS.
     """
 
     def __init__(self, *args, **kwargs):
-        kwargs.setdefault("critic_mode", "guessed_dev_cards")
+        kwargs.setdefault("ismcts_determinizations", 8)
+        kwargs.setdefault("actor_observation_level", "full")
         super().__init__(*args, **kwargs)
 

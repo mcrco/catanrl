@@ -39,7 +39,6 @@ class AlphaZeroConfig:
     map_type: str = "BASE"
     actor_observation_level: ActorObservationLevel = "private"
     critic_observation_level: CriticObservationLevel = "full"
-    critic_hidden_mode: str = "full"
     network_mode: str = "separate"
     model_type: str = "flat"
     vps_to_win: int = 10
@@ -47,6 +46,8 @@ class AlphaZeroConfig:
     simulations: int = 128
     c_puct: float = 1.5
     prunning: bool = False
+    # Information-Set MCTS: number of belief determinizations per move (1 = off).
+    ismcts_determinizations: int = 1
     temperature: float = 1.0
     final_temperature: float = 0.1
     temperature_drop_move: int = 30
@@ -152,9 +153,9 @@ class AlphaZeroTrainer:
             num_simulations=self.config.simulations,
             c_puct=self.config.c_puct,
             prunning=self.config.prunning,
-            critic_hidden_mode=self.config.critic_hidden_mode,
             actor_observation_level=self.config.actor_observation_level,
             critic_observation_level=self.config.critic_observation_level,
+            ismcts_determinizations=self.config.ismcts_determinizations,
             inference_batch_size=self.config.inference_batch_size,
             inference_wait_ms=self.config.inference_wait_ms,
             temperature=self.config.temperature,
@@ -284,9 +285,9 @@ class AlphaZeroTrainer:
             num_simulations=self.config.simulations,
             c_puct=self.config.c_puct,
             prunning=self.config.prunning,
-            critic_hidden_mode=self.config.critic_hidden_mode,
             actor_observation_level=self.config.actor_observation_level,
             critic_observation_level=self.config.critic_observation_level,
+            ismcts_determinizations=self.config.ismcts_determinizations,
             device=self.device,
         )
 
