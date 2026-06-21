@@ -104,6 +104,15 @@ def resolve_observation_network_args(
 
     assert_shared_network_obs_levels(network_mode, policy_mode, critic_mode)
 
+    ismcts_determinizations = getattr(args, "ismcts_determinizations", 1)
+    if ismcts_determinizations > 1:
+        validate_ismcts_observation_levels(
+            ismcts_determinizations=ismcts_determinizations,
+            num_players=getattr(args, "num_players", None),
+            actor_observation_level=policy_mode,
+            critic_observation_level=critic_mode,
+        )
+
 
 def assert_shared_network_obs_levels(
     network_mode: str,
@@ -119,3 +128,41 @@ def assert_shared_network_obs_levels(
             f"but got policy_mode={policy_mode!r} and critic_mode={critic_mode!r}. "
             f"Either set both to the same level (e.g. 'private') or use network_mode='separate'."
         )
+
+
+def validate_ismcts_observation_levels(
+    *,
+    ismcts_determinizations: int,
+    num_players: int | None,
+    actor_observation_level: ObservationLevel,
+    critic_observation_level: ObservationLevel,
+) -> None:
+    """Reject private observation levels when IS-MCTS determinization is enabled.
+
+    IS-MCTS samples concrete hidden worlds (opponent dev-card hands). Private
+    features discard that information, so running IS-MCTS with a private actor
+    or critic is inconsistent.
+
+    For 1v1, ``public`` or ``full`` are allowed. For 3–4 players only ``full``
+    is valid (``public`` is not defined outside 1v1).
+    """
+    if ismcts_determinizations <= 1:
+        return
+
+    if num_players is not None and num_players != 2:
+        allowed: tuple[ObservationLevel, ...] = ("full",)
+        allowed_label = "'full'"
+    else:
+        allowed = ("public", "full")
+        allowed_label = "'public' or 'full'"
+
+    for role, level in (
+        ("actor", actor_observation_level),
+        ("critic", critic_observation_level),
+    ):
+        if level not in allowed:
+            raise ValueError(
+                f"Information-Set MCTS (ismcts_determinizations > 1) requires "
+                f"{role}_observation_level to be {allowed_label}, not '{level}'. "
+                "Private features discard determinized hidden state."
+            )

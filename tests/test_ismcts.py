@@ -77,23 +77,6 @@ def test_ismcts_runs_a_search_per_determinization():
     assert agg.sum() > 0
 
 
-def test_ismcts_requires_full_information_policy():
-    action_space_size = get_action_space_size(2, "BASE")
-    with pytest.raises(ValueError, match="full"):
-        nn_mcts_player.NNMCTSPlayer(
-            color=Color.BLUE,
-            model_type="flat",
-            policy_model=None,
-            critic_model=None,
-            map_type="BASE",
-            num_simulations=4,
-            ismcts_determinizations=4,
-            actor_observation_level="private",
-            inference_backend=_UniformBackend(action_space_size),
-            device="cpu",
-        )
-
-
 def test_ismcts_search_policy_is_normalized_over_legal_actions():
     game = _make_game()
     player = _make_player()

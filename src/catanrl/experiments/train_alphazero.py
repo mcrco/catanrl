@@ -160,7 +160,7 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Information-Set MCTS: number of belief determinizations of opponents' "
             "hidden dev cards searched per move. 1 disables IS-MCTS (plain search); "
-            ">1 requires --policy-mode full."
+            ">1 requires actor/critic observation public (1v1) or full."
         ),
     )
     parser.add_argument("--c-puct", type=float, default=1.5, help="PUCT exploration constant")
@@ -537,13 +537,6 @@ def main() -> None:
     args = parse_args()
 
     resolve_observation_network_args(args)
-
-    if args.ismcts_determinizations > 1 and args.actor_observation_level != "full":
-        raise SystemExit(
-            "Information-Set MCTS (--ismcts-determinizations > 1) requires "
-            "--policy-mode full: it samples a full belief state, so privatizing the "
-            f"policy input again is inconsistent (got '{args.actor_observation_level}')."
-        )
 
     require_critic = args.network_mode == "separate"
     try:

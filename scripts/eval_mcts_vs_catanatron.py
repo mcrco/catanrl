@@ -21,6 +21,7 @@ from catanrl.experiment_store import (
     backbone_hidden_dims,
     load_experiment,
 )
+from catanrl.experiments.network_config import resolve_observation_network_args
 from catanrl.features.catanatron_utils import (
     ActorObservationLevel,
     COLOR_ORDER,
@@ -298,7 +299,7 @@ def main():
         help=(
             "Information-Set MCTS: number of belief determinizations of opponents' "
             "hidden dev cards searched per move. 1 disables IS-MCTS (plain search); "
-            ">1 requires --actor-observation-level full."
+            ">1 requires actor/critic observation public (1v1) or full."
         ),
     )
     parser.add_argument(
@@ -524,12 +525,11 @@ def main():
         print(f"Loaded policy weights from {args.policy_weights}")
         print(f"Loaded critic weights from {args.critic_weights}")
 
-    if args.ismcts_determinizations > 1 and args.actor_observation_level != "full":
-        parser.error(
-            "Information-Set MCTS (--ismcts-determinizations > 1) requires a "
-            f"full-information policy, but actor observation level is "
-            f"'{args.actor_observation_level}'."
-        )
+    resolve_observation_network_args(
+        args,
+        policy_mode_default=args.actor_observation_level,
+        critic_mode_default=args.critic_observation_level,
+    )
 
     nn_mcts_player = NNMCTSPlayer(
         color=COLOR_ORDER[0],

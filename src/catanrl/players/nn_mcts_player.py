@@ -31,6 +31,7 @@ from catanrl.features.catanatron_utils import (
     full_game_to_features,
     get_observation_indices_from_full,
 )
+from catanrl.experiments.network_config import validate_ismcts_observation_levels
 from catanrl.models import PolicyNetworkWrapper, PolicyValueNetworkWrapper, ValueNetworkWrapper
 from catanrl.models.inference_utils import forward_policy_value
 from catanrl.utils.catanatron_action_space import get_action_space_size, to_action_space
@@ -466,13 +467,12 @@ class NNMCTSPlayer(Player):
         # A single determinization (the default) means plain perfect-info search.
         self.ismcts_determinizations = max(1, int(ismcts_determinizations))
         self.ismcts = self.ismcts_determinizations > 1
-        if self.ismcts and actor_observation_level != "full":
-            raise ValueError(
-                "Information-Set MCTS (ismcts_determinizations > 1) requires "
-                "actor_observation_level='full': it samples a full belief state, so "
-                f"privatizing the policy input again is inconsistent (got "
-                f"'{actor_observation_level}')."
-            )
+        validate_ismcts_observation_levels(
+            ismcts_determinizations=self.ismcts_determinizations,
+            num_players=None,
+            actor_observation_level=actor_observation_level,
+            critic_observation_level=critic_observation_level,
+        )
         self._opponents_by_color: dict[Color, Player] = {}
         self._observation_index_cache: dict[tuple[int, str], np.ndarray] = {}
 
