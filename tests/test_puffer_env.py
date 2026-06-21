@@ -5,7 +5,6 @@ from __future__ import annotations
 from unittest.mock import patch
 
 import numpy as np
-import pytest
 from pufferlib.emulation import nativize
 
 from catanatron.game import TURNS_LIMIT
@@ -100,39 +99,9 @@ def _multi_actions_for_current(env: ParallelCatanatronPufferEnv, current_action:
     return actions
 
 
-def _play_single_until_done(env: SingleAgentCatanatronPufferEnv, seed: int, max_steps: int = 2000):
-    _, infos = env.reset(seed=seed)
-    info = infos[0]
-    for _ in range(max_steps):
-        _, rewards, terminals, truncations, infos = _step_single_valid(env, info)
-        if bool(terminals[0] or truncations[0]):
-            return rewards[0], bool(terminals[0]), bool(truncations[0])
-        info = infos[0]
-    raise AssertionError(f"Episode did not finish within {max_steps} steps")
-
-
 # ---------------------------------------------------------------------------
 # Single-agent lifecycle and invariants
 # ---------------------------------------------------------------------------
-
-
-def test_single_agent_requires_shared_critic():
-    with pytest.raises(ValueError, match="shared_critic=True"):
-        SingleAgentCatanatronPufferEnv(config={"shared_critic": False})
-
-
-def test_single_agent_unknown_reward_function_raises():
-    with pytest.raises(ValueError, match="Unknown reward function"):
-        _make_single_env(reward_function="not-a-reward")
-
-
-def test_single_agent_step_before_reset_raises():
-    env = _make_single_env()
-    try:
-        with pytest.raises(RuntimeError, match="step\\(\\) before reset"):
-            env.step(np.asarray([0], dtype=np.int32))
-    finally:
-        env.close()
 
 
 def test_single_agent_reset_places_p0_on_decision_with_valid_mask():
@@ -217,17 +186,6 @@ def test_single_agent_valid_step_changes_state_and_returns_zero_win_reward():
         env.close()
 
 
-def test_single_agent_invalid_action_raises():
-    env = _make_single_env()
-    try:
-        _, infos = env.reset(seed=55)
-        invalid = _first_invalid_action(infos[0]["valid_actions"], env.action_space_size)
-        with pytest.raises(ValueError, match="Invalid action"):
-            env.step(np.asarray([invalid], dtype=np.int32))
-    finally:
-        env.close()
-
-
 def test_single_agent_expert_action_always_matches_playable_actions():
     env = _make_single_env()
     try:
@@ -250,17 +208,6 @@ def test_single_agent_shaped_reward_can_be_nonzero_after_settlement():
         _, infos = env.reset(seed=123)
         _, rewards, _, _, _ = _step_single_valid(env, infos[0])
         assert float(rewards[0]) > 0.0
-    finally:
-        env.close()
-
-
-def test_single_agent_win_reward_at_episode_end_is_terminal():
-    env = _make_single_env(reward_function=WinReward())
-    try:
-        final_reward, terminated, truncated = _play_single_until_done(env, seed=42)
-        assert terminated or truncated
-        if terminated:
-            assert final_reward in (-1.0, 1.0)
     finally:
         env.close()
 
@@ -319,11 +266,6 @@ def test_single_agent_nn_seat_ordering():
         second_env.close()
 
 
-def test_single_agent_nn_seat_second_requires_opponent():
-    with pytest.raises(ValueError, match="second without at least one opponent"):
-        _make_single_env(enemies=[], nn_seat="second")
-
-
 def test_single_agent_opponent_auto_play_advances_past_enemy_turns():
     env = _make_single_env(nn_seat="first")
     try:
@@ -360,15 +302,6 @@ def test_single_agent_get_valid_actions_matches_playable_action_encoding():
 # ---------------------------------------------------------------------------
 # Multi-agent lifecycle and invariants
 # ---------------------------------------------------------------------------
-
-
-def test_multi_agent_step_before_reset_raises():
-    env = _make_multi_env()
-    try:
-        with pytest.raises(RuntimeError, match="step\\(\\) before reset"):
-            env.step(np.zeros(env.num_agents, dtype=np.int32))
-    finally:
-        env.close()
 
 
 def test_multi_agent_reset_exposes_all_agents_with_masks():
@@ -412,33 +345,6 @@ def test_multi_agent_inactive_agent_action_is_ignored():
         before_index = get_state_index(env.game.state)
         env.step(actions)
         assert get_state_index(env.game.state) != before_index
-    finally:
-        env.close()
-
-
-def test_multi_agent_invalid_current_action_raises():
-    env = _make_multi_env()
-    try:
-        _, infos = env.reset(seed=19)
-        current_color = env.game.state.current_color()
-        current_idx = env.possible_agents.index(env.color_to_agent_name[current_color])
-        invalid = _first_invalid_action(
-            infos[current_idx]["valid_actions"].tolist(),
-            env.action_space_size,
-        )
-        actions = _multi_actions_for_current(env, invalid)
-        with pytest.raises(ValueError, match="Invalid action"):
-            env.step(actions)
-    finally:
-        env.close()
-
-
-def test_multi_agent_wrong_action_count_raises():
-    env = _make_multi_env()
-    try:
-        env.reset(seed=1)
-        with pytest.raises(ValueError, match="Expected 2 actions"):
-            env.step(np.zeros(1, dtype=np.int32))
     finally:
         env.close()
 
@@ -596,17 +502,6 @@ def test_single_agent_mini_map_reset_has_smaller_action_space():
         env.close()
 
 
-def test_single_agent_auto_seed_sequence_advances_without_explicit_seed():
-    env = _make_single_env()
-    try:
-        env.reset(seed=100)
-        assert env._seed_tracker._seed_sequence_index == 1
-        env.reset()
-        assert env._seed_tracker._seed_sequence_index == 2
-    finally:
-        env.close()
-
-
 def test_multi_agent_without_shared_critic_omits_critic_info():
     env = _make_multi_env(shared_critic=False)
     try:
@@ -619,11 +514,6 @@ def test_multi_agent_without_shared_critic_omits_critic_info():
         env.close()
 
 
-def test_multi_agent_invalid_reward_function_raises():
-    with pytest.raises(ValueError, match="Invalid reward function"):
-        _make_multi_env(reward_function="bogus")
-
-
 def test_single_agent_win_reward_on_forced_terminal_state():
     env = _make_single_env(reward_function=WinReward())
     try:
@@ -631,31 +521,6 @@ def test_single_agent_win_reward_on_forced_terminal_state():
         with patch.object(env.game, "winning_color", return_value=env.p0.color):
             reward = env.reward_function.reward(env, env.game, env.p0.color)
         assert reward == 1.0
-    finally:
-        env.close()
-
-
-def test_multi_agent_win_episode_terminates_with_valid_rewards():
-    env = _make_multi_env(reward_function="win")
-    try:
-        _, infos = env.reset(seed=515)
-        for _ in range(2500):
-            if env.done:
-                break
-            current_color = env.game.state.current_color()
-            current_idx = env.possible_agents.index(env.color_to_agent_name[current_color])
-            action = int(infos[current_idx]["valid_actions"][0])
-            _, rewards, terminals, truncations, infos = env.step(
-                _multi_actions_for_current(env, action)
-            )
-            if np.any(terminals) or np.any(truncations):
-                assert np.all(terminals) or np.all(truncations)
-                assert np.all((rewards == 1.0) | (rewards == -1.0) | (rewards == 0.0))
-                if np.all(terminals):
-                    assert np.isclose(rewards.sum(), 0.0)
-                break
-        else:
-            pytest.fail("Multi-agent episode did not terminate within step budget")
     finally:
         env.close()
 

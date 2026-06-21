@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import Literal
 
 import numpy as np
-import torch
 from catanatron.models.player import Color
 
 from catanrl.features.catanatron_utils import COLOR_ORDER
@@ -51,24 +50,6 @@ class MockInferenceBackend(_NNMCTSInferenceBackend):
         )
 
 
-class FakePolicyModel(torch.nn.Module):
-    """Flat policy head mock: uniform logits for any actor feature batch."""
-
-    def __init__(self, num_actions: int) -> None:
-        super().__init__()
-        self.num_actions = num_actions
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return torch.zeros(x.size(0), self.num_actions, device=x.device, dtype=x.dtype)
-
-
-class FakeCriticModel(torch.nn.Module):
-    """Value head mock: constant zero value for any critic feature batch."""
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return torch.zeros(x.size(0), 1, device=x.device, dtype=x.dtype)
-
-
 def action_space_size(
     num_players: int,
     map_type: Literal["BASE", "MINI", "TOURNAMENT"],
@@ -97,11 +78,3 @@ def build_mock_player(
         critic_observation_level="full",
         inference_backend=backend,
     )
-
-
-def build_fake_torch_models(
-    num_players: int,
-    map_type: Literal["BASE", "MINI", "TOURNAMENT"],
-) -> tuple[FakePolicyModel, FakeCriticModel]:
-    num_actions = action_space_size(num_players, map_type)
-    return FakePolicyModel(num_actions), FakeCriticModel()

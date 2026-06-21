@@ -24,12 +24,21 @@ from catanrl.features.catanatron_utils import (
     full_game_to_features,
     get_full_numeric_feature_names,
 )
+from catanrl.utils.catanatron_action_space import get_player_colors
 from catanrl.utils.catanatron_game import force_player_order
 from catanrl.utils.catanatron_map import build_catan_map
 
 
 def make_1v1_game() -> Game:
     players = [RandomPlayer(Color.BLUE), RandomPlayer(Color.RED)]
+    game = Game(players, catan_map=build_catan_map("BASE"))
+    force_player_order(game, players)
+    return game
+
+
+def make_3p_game() -> Game:
+    colors = list(get_player_colors(3))
+    players = [RandomPlayer(c) for c in colors]
     game = Game(players, catan_map=build_catan_map("BASE"))
     force_player_order(game, players)
     return game
@@ -137,6 +146,49 @@ def test_enumeration_matches_monte_carlo():
     counts: Counter = Counter()
     n = 40000
     for h in belief.sample_hypotheses(n, rng):
+        counts[tuple(sorted(h.opponent_dev_hands[Color.RED].items()))] += 1
+    for key, weight in exact.items():
+        assert counts[key] / n == pytest.approx(weight, abs=0.02)
+
+
+def test_sample_hypotheses_respects_not_already_won_constraint():
+    # 3-player game: the Monte-Carlo path must enforce the same "opponent hasn't
+    # already won" pruning as the exact 1v1 enumeration. RED sits one VP short of
+    # winning, so no sampled hand may hand them a victory-point card.
+    game = make_3p_game()
+    game.vps_to_win = 10
+    perspective, opponent, third = game.state.colors
+
+    red_key = player_key(game.state, opponent)
+    game.state.player_state[f"{red_key}_VICTORY_POINTS"] = 9
+    set_player_dev_hand(game, opponent, KNIGHT=1)  # 1 hidden card, publicly known count
+    set_player_dev_hand(game, third, KNIGHT=2)
+
+    belief = DevCardBelief(game, perspective)
+    assert belief.unseen_pool.get(VICTORY_POINT, 0) > 0  # VP cards are available to draw
+
+    samples = belief.sample_hypotheses(500, random.Random(0))
+    assert len(samples) == 500
+    for h in samples:
+        assert h.opponent_dev_hands[opponent].get(VICTORY_POINT, 0) == 0
+        # Public counts must still be respected for every opponent.
+        assert sum(h.opponent_dev_hands[opponent].values()) == 1
+        assert sum(h.opponent_dev_hands[third].values()) == 2
+
+
+def test_sample_hypotheses_marginals_match_exact_enumeration_1v1():
+    # In 1v1 the sampler and the exact enumeration describe the same belief.
+    game = make_1v1_game()
+    set_player_dev_hand(game, Color.RED, KNIGHT=2)
+    belief = DevCardBelief(game, Color.BLUE)
+    exact = {
+        tuple(sorted(h.opponent_dev_hands[Color.RED].items())): h.weight
+        for h in belief.enumerate_hypotheses()
+    }
+
+    counts: Counter = Counter()
+    n = 40000
+    for h in belief.sample_hypotheses(n, random.Random(1)):
         counts[tuple(sorted(h.opponent_dev_hands[Color.RED].items()))] += 1
     for key, weight in exact.items():
         assert counts[key] / n == pytest.approx(weight, abs=0.02)

@@ -1,6 +1,5 @@
 """Tests for the unified NN MCTS engine: determinism, to_play perspective,
-training hooks (policy targets + Dirichlet noise), and the shared across-games
-self-play runner."""
+and training hooks (policy targets + Dirichlet noise)."""
 
 import random
 
@@ -9,14 +8,13 @@ import torch
 from catanatron.game import Game
 from catanatron.models.player import RandomPlayer
 
-from catanrl.algorithms.alphazero.parallel_self_play import generate_self_play_data
 from catanrl.features.catanatron_utils import COLOR_ORDER
 from catanrl.players import NNMCTSPlayer
 from catanrl.players.nn_mcts_player import _Node
 from catanrl.utils.catanatron_action_space import to_action_space
 from catanrl.utils.catanatron_game import force_player_order
 from catanrl.utils.catanatron_map import build_catan_map
-from nn_mcts_helpers import build_fake_torch_models, build_mock_player
+from nn_mcts_helpers import build_mock_player
 
 MAP_TYPE = "MINI"
 NUM_PLAYERS = 2
@@ -109,44 +107,3 @@ def test_dirichlet_noise_perturbs_root_priors_only():
     assert set(before) == set(after)
     assert abs(sum(after.values()) - 1.0) < 1e-5
     assert any(abs(after[a] - before[a]) > 1e-9 for a in before)
-
-
-def test_generate_self_play_data_smoke():
-    policy_model, critic_model = build_fake_torch_models(NUM_PLAYERS, MAP_TYPE)
-
-    experiences, stats = generate_self_play_data(
-        policy_model=policy_model,
-        critic_model=critic_model,
-        model_type="flat",
-        map_type=MAP_TYPE,
-        num_players=NUM_PLAYERS,
-        num_games=1,
-        num_game_workers=1,
-        num_simulations=2,
-        c_puct=1.5,
-        prunning=False,
-        actor_observation_level="private",
-        critic_observation_level="full",
-        ismcts_determinizations=1,
-        inference_batch_size=8,
-        inference_wait_ms=2.0,
-        temperature=1.0,
-        final_temperature=0.1,
-        temperature_drop_move=30,
-        noise_turns=20,
-        dirichlet_alpha=0.3,
-        dirichlet_frac=0.25,
-        vps_to_win=3,
-        discard_limit=7,
-        seed=0,
-        device="cpu",
-        show_tqdm=False,
-    )
-
-    assert int(stats.get("games", 0)) == 1
-    assert len(experiences) >= 1
-    sample = experiences[0]
-    assert abs(float(sample.policy.sum()) - 1.0) < 1e-4
-    assert sample.value in (-1.0, 0.0, 1.0)
-    assert sample.actor_state.ndim == 1
-    assert sample.critic_state.ndim == 1

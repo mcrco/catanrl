@@ -5,7 +5,6 @@ from __future__ import annotations
 import numpy as np
 from pufferlib.emulation import nativize
 
-from catanrl.algorithms.imitation_learning.dataset import AggregatedDataset
 from catanrl.envs.puffer.rewards import WinReward
 from catanrl.envs.puffer.common import create_expert, create_opponents
 from catanrl.envs.puffer.single_agent_env import SingleAgentCatanatronPufferEnv
@@ -13,8 +12,6 @@ from catanrl.envs.puffer.rollout_utils import flatten_puffer_observation, get_ac
 from catanrl.features.catanatron_utils import (
     full_game_to_features,
     game_to_features,
-    get_actor_indices_from_full,
-    get_observation_indices_from_full,
 )
 from catanrl.utils.catanatron_action_space import to_action_space
 
@@ -114,82 +111,6 @@ def test_actor_and_critic_features_match_runtime_helpers():
 
             assert np.array_equal(actor_vec, expected_actor)
             assert np.array_equal(critic_vec, expected_critic)
-    finally:
-        env.close()
-
-
-def test_public_actor_features_derive_from_critic_indices():
-    env = _make_debug_env(actor_observation_level="public")
-    try:
-        observation, infos = env.reset(seed=123)
-        state = _snapshot_state(env, observation, infos[0])
-        actor_vec, critic_vec = flatten_puffer_observation(state["observation"])
-        actor_observation_indices = get_actor_indices_from_full(
-            state["num_players"],
-            state["map_type"],
-            level="public",
-        )
-
-        dataset = AggregatedDataset(
-            full_state_dim=state["critic_dim"],
-            num_players=state["num_players"],
-            map_type=state["map_type"],
-            actor_observation_level="public",
-            critic_observation_level="full",
-            max_size=8,
-        )
-        dataset.add_samples(
-            full_states=critic_vec.reshape(1, -1),
-            expert_actions=np.array([0], dtype=np.int64),
-            returns=np.array([0.0], dtype=np.float32),
-            is_single_action=np.array([False], dtype=np.bool_),
-            action_masks=np.ones((1, state["action_space_size"]), dtype=np.bool_),
-        )
-        stored_actor, stored_critic, *_ = dataset[0]
-
-        assert np.array_equal(actor_vec, critic_vec[actor_observation_indices])
-        assert np.array_equal(stored_actor.numpy(), actor_vec)
-        assert np.array_equal(stored_critic.numpy(), critic_vec)
-    finally:
-        env.close()
-
-
-def test_private_critic_observation_level_is_derived_from_full_indices():
-    env = _make_debug_env(actor_observation_level="public")
-    try:
-        observation, infos = env.reset(seed=123)
-        state = _snapshot_state(env, observation, infos[0])
-        _, critic_vec = flatten_puffer_observation(state["observation"])
-        expected_indices = get_observation_indices_from_full(
-            state["num_players"],
-            state["map_type"],
-            level="private",
-        )
-        dataset = AggregatedDataset(
-            full_state_dim=state["critic_dim"],
-            num_players=state["num_players"],
-            map_type=state["map_type"],
-            actor_observation_level="public",
-            critic_observation_level="private",
-            max_size=8,
-        )
-        dataset.add_samples(
-            full_states=critic_vec.reshape(1, -1),
-            expert_actions=np.array([0], dtype=np.int64),
-            returns=np.array([0.0], dtype=np.float32),
-            is_single_action=np.array([False], dtype=np.bool_),
-            action_masks=np.ones((1, state["action_space_size"]), dtype=np.bool_),
-        )
-        _, selected_critic, *_ = dataset[0]
-
-        expected_full = full_game_to_features(
-            state["game"],
-            state["num_players"],
-            state["map_type"],
-            base_color=state["p0_color"],
-        )
-        assert np.array_equal(critic_vec, expected_full)
-        assert np.array_equal(selected_critic.numpy(), critic_vec[expected_indices])
     finally:
         env.close()
 

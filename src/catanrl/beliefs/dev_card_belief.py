@@ -207,22 +207,38 @@ class DevCardBelief:
             raise ValueError("num_samples must be positive")
         rng = rng or random.Random()
 
+        # Cap rejection retries per sample. A consistent (non-winning) assignment
+        # always exists since the real game is still ongoing, but pathological
+        # belief states could make valid deals rare; fall back to the last deal
+        # rather than spin forever.
+        max_attempts = 1000
+
+        base_pool = [
+            card
+            for card, count in self.unseen_pool.items()
+            for _ in range(int(count))
+        ]
+
         hypotheses: List[Hypothesis] = []
         weight = 1.0 / num_samples
         for _ in range(num_samples):
-            pool = [
-                card
-                for card, count in self.unseen_pool.items()
-                for _ in range(int(count))
-            ]
-            rng.shuffle(pool)
-            cursor = 0
             hands: Dict[Color, Counter] = {}
-            for color in self.opponents:
-                draws = self.opponent_num_devs[color]
-                hand = Counter(pool[cursor : cursor + draws])
-                cursor += draws
-                hands[color] = hand
+            for _attempt in range(max_attempts):
+                pool = list(base_pool)
+                rng.shuffle(pool)
+                cursor = 0
+                hands = {}
+                violated = False
+                for color in self.opponents:
+                    draws = self.opponent_num_devs[color]
+                    hand = Counter(pool[cursor : cursor + draws])
+                    cursor += draws
+                    hands[color] = hand
+                    if self._hand_violates_not_won(color, hand):
+                        violated = True
+                        break
+                if not violated:
+                    break
             hypotheses.append(Hypothesis(weight=weight, opponent_dev_hands=hands))
         return hypotheses
 
