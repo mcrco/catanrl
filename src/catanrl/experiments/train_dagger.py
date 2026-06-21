@@ -32,6 +32,7 @@ from ..experiment_store import (
     resolve_training_architecture_and_warm_start,
     save_experiment,
     training_state_file,
+    wandb_grouping_kwargs,
 )
 from ..utils.catanatron_action_space import get_action_space_size
 
@@ -43,6 +44,8 @@ def _wandb_info(args: argparse.Namespace) -> dict:
     info = {"project": args.wandb_project, "name": args.wandb_run_name}
     if wandb.run is not None:
         info["id"] = wandb.run.id
+        if wandb.run.tags:
+            info["tags"] = list(wandb.run.tags)
     return info
 
 
@@ -264,6 +267,12 @@ def main():
             "project": args.wandb_project,
             "name": args.wandb_run_name,
             "config": train_config,
+            **wandb_grouping_kwargs(
+                args,
+                group_default="dagger",
+                warm_start=warm_start,
+                resume=resume,
+            ),
         }
         if resume.active and resume.wandb_run_id:
             wandb_config["id"] = resume.wandb_run_id

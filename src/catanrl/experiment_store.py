@@ -683,6 +683,62 @@ def add_resume_argument(parser: argparse.ArgumentParser) -> None:
     )
 
 
+LINEAGE_TAG_PREFIX = "lineage:"
+WARMSTART_TAG_PREFIX = "warmstart:"
+
+
+def _parent_lineage_root(exp: "Experiment") -> str:
+    """Return the ``lineage:<root>`` tag a child should inherit from a parent.
+
+    Reuses the parent's own ``lineage:`` tag (so a whole chain shares one root);
+    falls back to the parent's name as the root when it has none.
+    """
+    for tag in exp.metadata.wandb.get("tags", []) or []:
+        if isinstance(tag, str) and tag.startswith(LINEAGE_TAG_PREFIX):
+            return tag
+    return f"{LINEAGE_TAG_PREFIX}{exp.metadata.name}"
+
+
+def wandb_grouping_kwargs(
+    args: argparse.Namespace,
+    *,
+    group_default: str,
+    warm_start: Optional["TrainingWarmStart"] = None,
+    resume: Optional["ResumeContext"] = None,
+) -> Dict[str, Any]:
+    """Build ``group``/``tags`` kwargs for ``wandb.init``.
+
+    ``group`` defaults to the algorithm family so all runs of one method
+    aggregate together.
+
+    Lineage tags are added automatically so a whole chain is filterable at once:
+      * ``warmstart:<immediate-parent>`` — the direct link to the source run.
+      * ``lineage:<root>`` — the chain root, propagated from the parent so
+        dagger -> ppo -> ppo-extended all share one ``lineage:`` tag.
+    In-place continuations (``--resume``) add a ``resume`` tag instead of a
+    self-referential warm-start link.
+    """
+    group = getattr(args, "wandb_group", None) or group_default
+    tags = list(getattr(args, "wandb_tags", None) or [])
+
+    def _add(tag: str) -> None:
+        if tag not in tags:
+            tags.append(tag)
+
+    is_resume = resume is not None and getattr(resume, "active", False)
+    if is_resume:
+        _add("resume")
+    if warm_start is not None and not is_resume:
+        parent = warm_start.experiment
+        _add(f"{WARMSTART_TAG_PREFIX}{parent.metadata.name}")
+        _add(_parent_lineage_root(parent))
+
+    out: Dict[str, Any] = {"group": group}
+    if tags:
+        out["tags"] = tags
+    return out
+
+
 def training_state_file(name_or_path: str) -> str:
     """Absolute path of the training-state sidecar for an experiment."""
     return os.path.join(experiment_dir(name_or_path), TRAINING_STATE_FILENAME)
@@ -1233,6 +1289,7 @@ __all__ = [
     "resolve_training_checkpoints_from_experiment",
     "add_load_from_experiment_arguments",
     "add_resume_argument",
+    "wandb_grouping_kwargs",
     "training_state_file",
     "save_training_state",
     "load_training_state",

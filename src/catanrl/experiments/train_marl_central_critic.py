@@ -30,6 +30,7 @@ from catanrl.experiment_store import (
     resolve_training_architecture_and_warm_start,
     save_experiment,
     training_state_file,
+    wandb_grouping_kwargs,
 )
 
 
@@ -40,6 +41,8 @@ def _wandb_info(args: argparse.Namespace) -> dict:
     info = {"project": args.wandb_project, "name": args.wandb_run_name}
     if wandb.run is not None:
         info["id"] = wandb.run.id
+        if wandb.run.tags:
+            info["tags"] = list(wandb.run.tags)
     return info
 
 
@@ -208,6 +211,12 @@ def main():
             "project": args.wandb_project,
             "name": args.wandb_run_name,
             "config": config_dict,
+            **wandb_grouping_kwargs(
+                args,
+                group_default="marl-ppo",
+                warm_start=warm_start,
+                resume=resume,
+            ),
         }
         if resume.active and resume.wandb_run_id:
             wandb_config["id"] = resume.wandb_run_id

@@ -54,6 +54,7 @@ from catanrl.experiment_store import (
     resolve_training_architecture_and_warm_start,
     save_experiment,
     training_state_file,
+    wandb_grouping_kwargs,
 )
 
 
@@ -255,6 +256,8 @@ def _wandb_info(args: argparse.Namespace) -> dict:
     info = {"project": args.wandb_project, "name": args.wandb_run_name}
     if wandb.run is not None:
         info["id"] = wandb.run.id
+        if wandb.run.tags:
+            info["tags"] = list(wandb.run.tags)
     return info
 
 
@@ -262,6 +265,7 @@ def init_wandb(
     args: argparse.Namespace,
     train_config: Dict[str, object],
     resume: Optional[ResumeContext] = None,
+    grouping: Optional[Dict[str, object]] = None,
 ) -> bool:
     if args.wandb:
         init_kwargs: Dict[str, object] = dict(
@@ -270,6 +274,8 @@ def init_wandb(
             entity=args.wandb_entity,
             config=train_config,
         )
+        if grouping:
+            init_kwargs.update(grouping)
         if resume is not None and resume.active and resume.wandb_run_id:
             init_kwargs["id"] = resume.wandb_run_id
             init_kwargs["resume"] = "must"
@@ -656,7 +662,13 @@ def main() -> None:
         maybe_load_from_experiment(trainer, warm_start)
 
     train_config = build_train_config(args, config, arch, device)
-    wandb_enabled = init_wandb(args, train_config, resume)
+    grouping = wandb_grouping_kwargs(
+        args,
+        group_default="alphazero",
+        warm_start=warm_start,
+        resume=resume,
+    )
+    wandb_enabled = init_wandb(args, train_config, resume, grouping)
     print("\nStarting AlphaZero training...")
     print(f"  Device: {trainer.device}")
     print(f"  Backbone: {arch.backbone_type} | model: {config.model_type}")

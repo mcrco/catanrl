@@ -43,6 +43,23 @@ def add_wandb_arguments(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="Weights & Biases run name",
     )
+    parser.add_argument(
+        "--wandb-group",
+        type=str,
+        default=None,
+        help=(
+            "W&B group for this run. Defaults to the algorithm family "
+            "(e.g. dagger, sarl-ppo, marl-ppo, alphazero) so all runs of one "
+            "method aggregate together within the shared project."
+        ),
+    )
+    parser.add_argument(
+        "--wandb-tags",
+        type=str,
+        nargs="*",
+        default=None,
+        help="Extra W&B tags. Warm-start/resume lineage tags are added automatically.",
+    )
 
 
 def add_reward_function_argument(parser: argparse.ArgumentParser) -> None:
