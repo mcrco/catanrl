@@ -136,18 +136,19 @@ backbone ≈ separate backbone, then on SARL/MARL settle shared-vs-separate and
 full-vs-public info (no private — no reason to train it), and finally take the
 winning arch (expected: shared backbone, ~2x faster) into long AlphaZero runs.
 
-All win rates are vs the listed opponent over 1000 games at a fixed seed,
-`first / second` seat (`scripts/eval_vs_catanatron.py --experiment <name> --which best`). Status is `WIP` until a run is done, then fill in the numbers.
+Compare DAgger model-size runs via the linked W&B curves (train loss, F1,
+expert agreement, eval win rate vs F). Later phases can report win rate vs F
+from post-hoc eval when available. Status is `WIP` until a run is done.
 
 ## Decisions
 
 
-| Decision                     | Choice | Source run |
-| ---------------------------- | ------ | ---------- |
-| `xdim` model size            |        |            |
-| Shared vs separate backbone  |        |            |
-| Full vs public info          |        |            |
-| Arch for AlphaZero long runs |        |            |
+| Decision                     | Choice | Source run                                                                                           |
+| ---------------------------- | ------ | ---------------------------------------------------------------------------------------------------- |
+| `xdim` model size            | D-M    | [dagger-d-m](https://wandb.ai/myang2-california-institute-of-technology-caltech/catan/runs/vlvmghoj) |
+| Shared vs separate backbone  |        |                                                                                                      |
+| Full vs public info          |        |                                                                                                      |
+| Arch for AlphaZero long runs |        |                                                                                                      |
 
 
 ---
@@ -158,19 +159,21 @@ All win rates are vs the listed opponent over 1000 games at a fixed seed,
 
 Training hparams:
 
-| | |
-| --- | --- |
-| DAgger iterations | 40 |
-| train epochs / iter | 2 |
-| steps / iter | 8192 |
-| num envs | 8 |
-| max dataset | 1500000 |
-| beta decay / min | 0.97 / 0.1 |
-| reward | shaped |
-| train seed | 42 |
-| eval every N iterations | 5 |
-| save every N iterations | 5 |
-| eval games / opponent | 500 (250 first + 250 second; vs random + F) |
+
+|                         |                                             |
+| ----------------------- | ------------------------------------------- |
+| DAgger iterations       | 40                                          |
+| train epochs / iter     | 2                                           |
+| steps / iter            | 8192                                        |
+| num envs                | 8                                           |
+| max dataset             | 1500000                                     |
+| beta decay / min        | 0.97 / 0.1                                  |
+| reward                  | shaped                                      |
+| train seed              | 42                                          |
+| eval every N iterations | 5                                           |
+| save every N iterations | 5                                           |
+| eval games / opponent   | 500 (250 first + 250 second; vs random + F) |
+
 
 ```bash
 DAGGER_HPARAMS=(
@@ -190,12 +193,14 @@ DAGGER_HPARAMS=(
 
 ### Model size sweep (separate, public actor / full critic)
 
-| ID   | config | policy/critic dims | cnn channels | fusion | policy-lr | Status | Win% vs F (1st/2nd) | Win% vs AB | Notes            |
-| ---- | ------ | ------------------ | ------------ | ------ | --------- | ------ | ------------------- | ---------- | ---------------- |
-| D-S  | `xdim-flat-2p-d-s.yaml` | 1024×2             | 32,64,64     | 1024   | 1e-4      | WIP    |                     |            | small/fast       |
-| D-M  | `xdim-flat-2p-d-m.yaml` | 2048×2             | 64,128,128   | 2048   | 1e-4      | WIP    |                     |            | current preset   |
-| D-L  | `xdim-flat-2p-d-l.yaml` | 3072×2             | 64,128,128   | 3072   | 1e-4      | WIP    |                     |            | wide             |
-| D-XL | `xdim-flat-2p-d-xl.yaml` | 2048×3             | 128,128,128  | 2048   | 1e-4      | WIP    |                     |            | deep + heavy CNN |
+
+| ID   | config                   | policy/critic dims | cnn channels | fusion | policy-lr | Status | W&B                                                                                           | Notes                                      |
+| ---- | ------------------------ | ------------------ | ------------ | ------ | --------- | ------ | --------------------------------------------------------------------------------------------- | ------------------------------------------ |
+| D-S  | `xdim-flat-2p-d-s.yaml`  | 1024×2             | 32,64,64     | 1024   | 1e-4      | done   | [run](https://wandb.ai/myang2-california-institute-of-technology-caltech/catan/runs/k8ena49j) | small/fast                                 |
+| D-M  | `xdim-flat-2p-d-m.yaml`  | 2048×2             | 64,128,128   | 2048   | 1e-4      | done   | [run](https://wandb.ai/myang2-california-institute-of-technology-caltech/catan/runs/vlvmghoj) | **chosen** — learns better/faster than D-S |
+| D-L  | `xdim-flat-2p-d-l.yaml`  | 3072×2             | 64,128,128   | 3072   | 1e-4      | done   | [run](https://wandb.ai/myang2-california-institute-of-technology-caltech/catan/runs/rfvt4yxy) | no clear gain over D-M for extra width     |
+| D-XL | `xdim-flat-2p-d-xl.yaml` | 2048×3             | 128,128,128  | 2048   | 1e-4      | skip   |                                                                                               | deep + heavy CNN; skipped after D-M/D-L    |
+
 
 ```bash
 uv run train-dagger --config configs/models/xdim-flat-2p-d-s.yaml \
@@ -220,10 +225,12 @@ uv run train-dagger --config configs/models/xdim-flat-2p-d-xl.yaml \
 D-sep/D-shared use the D-M (2048×2) configs for now; swap in the winning size
 preset if it isn't D-M.
 
-| ID       | config | network_mode | policy/critic mode | Status | Win% vs F (1st/2nd) | Throughput (steps/s) | Notes              |
-| -------- | ------ | ------------ | ------------------ | ------ | ------------------- | -------------------- | ------------------ |
-| D-sep    | `xdim-flat-2p-d-m.yaml` | separate     | public / full      | WIP    |                     |                      | size winner above  |
+
+| ID       | config                            | network_mode | policy/critic mode | Status | Win% vs F (1st/2nd) | Throughput (steps/s) | Notes              |
+| -------- | --------------------------------- | ------------ | ------------------ | ------ | ------------------- | -------------------- | ------------------ |
+| D-sep    | `xdim-flat-2p-d-m.yaml`           | separate     | public / full      | WIP    |                     |                      | size winner above  |
 | D-shared | `xdim-flat-2p-public-shared.yaml` | shared       | public / public    | WIP    |                     |                      | target fast config |
+
 
 ```bash
 uv run train-dagger --config configs/models/xdim-flat-2p-d-m.yaml \
@@ -242,8 +249,6 @@ for exp in dagger-d-s dagger-d-m dagger-d-l dagger-d-xl dagger-d-sep dagger-d-sh
   for seat in first second; do
     uv run scripts/eval_vs_catanatron.py --experiment "$exp" --which best \
       --num-games 1000 --seed 67 --nn-seat "$seat" --opponents F
-    uv run scripts/eval_vs_catanatron.py --experiment "$exp" --which best \
-      --num-games 1000 --seed 67 --nn-seat "$seat" --opponents AB:2
   done
 done
 ```
@@ -263,12 +268,12 @@ uv run train-sarl-ppo --load-from-experiment <best-dagger> --load-from-which bes
 ### SARL PPO vs ValueFunction
 
 
-| ID            | network  | policy/critic mode | Status | Win% vs F (1st/2nd) | Win% vs AB | Throughput | Notes |
-| ------------- | -------- | ------------------ | ------ | ------------------- | ---------- | ---------- | ----- |
-| P-sep-full    | separate | full / full        | WIP    |                     |            |            |       |
-| P-sep-pub     | separate | public / full      | WIP    |                     |            |            |       |
-| P-shared-full | shared   | full / full        | WIP    |                     |            |            |       |
-| P-shared-pub  | shared   | public / public    | WIP    |                     |            |            |       |
+| ID            | network  | policy/critic mode | Status | Win% vs F (1st/2nd) | Throughput | Notes |
+| ------------- | -------- | ------------------ | ------ | ------------------- | ---------- | ----- |
+| P-sep-full    | separate | full / full        | WIP    |                     |            |       |
+| P-sep-pub     | separate | public / full      | WIP    |                     |            |       |
+| P-shared-full | shared   | full / full        | WIP    |                     |            |       |
+| P-shared-pub  | shared   | public / public    | WIP    |                     |            |       |
 
 
 ### MARL self-play (centralized critic)
@@ -283,13 +288,13 @@ public info (`NNPolicyPlayer`), no belief needed.
 (marginalize the full-info policy over the dev-card belief at test time).
 
 
-| ID            | network  | policy/critic mode | deploy / eval | Status | Win% vs F (1st/2nd) | Win% vs AB | Notes                             |
-| ------------- | -------- | ------------------ | ------------- | ------ | ------------------- | ---------- | --------------------------------- |
-| M-sep-pub     | separate | public / public    | direct        | WIP    |                     |            |                                   |
-| M-shared-pub  | shared   | public / public    | direct        | WIP    |                     |            | ≈2x faster                        |
-| M-sep-full    | separate | full / full        | belief-avg    | WIP    |                     |            |                                   |
-| M-shared-full | shared   | full / full        | belief-avg    | WIP    |                     |            | ≈2x faster                        |
-| M-sep-priv    | separate | public / full      | direct        | WIP    |                     |            | privileged critic (separate only) |
+| ID            | network  | policy/critic mode | deploy / eval | Status | Win% vs F (1st/2nd) | Notes                             |
+| ------------- | -------- | ------------------ | ------------- | ------ | ------------------- | --------------------------------- |
+| M-sep-pub     | separate | public / public    | direct        | WIP    |                     |                                   |
+| M-shared-pub  | shared   | public / public    | direct        | WIP    |                     | ≈2x faster                        |
+| M-sep-full    | separate | full / full        | belief-avg    | WIP    |                     |                                   |
+| M-shared-full | shared   | full / full        | belief-avg    | WIP    |                     | ≈2x faster                        |
+| M-sep-priv    | separate | public / full      | direct        | WIP    |                     | privileged critic (separate only) |
 
 
 ➡ Two questions to settle here: (1) shared ≈ separate? if so, lock in shared
@@ -312,12 +317,12 @@ i.e. is AlphaZero training worth it, and what gain should we expect? Compare
 against the same agent with no search (raw `NNPolicyPlayer`) as the baseline.
 
 
-| ID         | base MARL agent  | num-simulations | ismcts-determ. | Status | Win% vs F (1st/2nd) | Win% vs AB | Notes                      |
-| ---------- | ---------------- | --------------- | -------------- | ------ | ------------------- | ---------- | -------------------------- |
-| H-raw      | best MARL        | — (no search)   | —              | WIP    |                     |            | baseline (policy only)     |
-| H-mcts-64  | best MARL        | 64              | 1              | WIP    |                     |            | plain MCTS                 |
-| H-mcts-128 | best MARL        | 128             | 1              | WIP    |                     |            | more search                |
-| H-ismcts   | best MARL (full) | 64              | 8              | WIP    |                     |            | IS-MCTS (public/full only) |
+| ID         | base MARL agent  | num-simulations | ismcts-determ. | Status | Win% vs F (1st/2nd) | Notes                      |
+| ---------- | ---------------- | --------------- | -------------- | ------ | ------------------- | -------------------------- |
+| H-raw      | best MARL        | — (no search)   | —              | WIP    |                     | baseline (policy only)     |
+| H-mcts-64  | best MARL        | 64              | 1              | WIP    |                     | plain MCTS                 |
+| H-mcts-128 | best MARL        | 128             | 1              | WIP    |                     | more search                |
+| H-ismcts   | best MARL (full) | 64              | 8              | WIP    |                     | IS-MCTS (public/full only) |
 
 
 ➡ If search lifts win rate meaningfully, proceed to Phase 3; the lift sets the
@@ -340,11 +345,11 @@ a viable substitute; the oracle − belief gap measures how much private info is
 worth to the bot.
 
 
-| ID       | agent (train info) | deploy / eval             | Status | Win% vs F (1st/2nd) | Win% vs AB | Notes       |
-| -------- | ------------------ | ------------------------- | ------ | ------------------- | ---------- | ----------- |
-| B-oracle | full / full        | full-info oracle (cheats) | WIP    |                     |            | upper bound |
-| B-belief | full / full        | belief-averaged           | WIP    |                     |            | no cheating |
-| B-public | public / public    | direct (`NNPolicyPlayer`) | WIP    |                     |            | reference   |
+| ID       | agent (train info) | deploy / eval             | Status | Win% vs F (1st/2nd) | Notes       |
+| -------- | ------------------ | ------------------------- | ------ | ------------------- | ----------- |
+| B-oracle | full / full        | full-info oracle (cheats) | WIP    |                     | upper bound |
+| B-belief | full / full        | belief-averaged           | WIP    |                     | no cheating |
+| B-public | public / public    | direct (`NNPolicyPlayer`) | WIP    |                     | reference   |
 
 
 ➡ Records: belief vs public answers "is perfect-info + averaging comparable?";
@@ -365,11 +370,11 @@ uv run train-alphazero --load-from-experiment <best-model> --load-from-which bes
 ```
 
 
-| ID   | warm-start          | simulations | ismcts-determ. | c-puct | Status | Win% vs F (1st/2nd) | Win% vs AB | Notes                      |
-| ---- | ------------------- | ----------- | -------------- | ------ | ------ | ------------------- | ---------- | -------------------------- |
-| AZ-1 | best Phase 2        | 64          | 1              | 1.5    | WIP    |                     |            | plain MCTS                 |
-| AZ-2 | best Phase 2        | 128         | 1              | 1.5    | WIP    |                     |            | more sims                  |
-| AZ-3 | best Phase 2 (full) | 64          | 8              | 1.5    | WIP    |                     |            | IS-MCTS (public/full only) |
+| ID   | warm-start          | simulations | ismcts-determ. | c-puct | Status | Win% vs F (1st/2nd) | Notes                      |
+| ---- | ------------------- | ----------- | -------------- | ------ | ------ | ------------------- | -------------------------- |
+| AZ-1 | best Phase 2        | 64          | 1              | 1.5    | WIP    |                     | plain MCTS                 |
+| AZ-2 | best Phase 2        | 128         | 1              | 1.5    | WIP    |                     | more sims                  |
+| AZ-3 | best Phase 2 (full) | 64          | 8              | 1.5    | WIP    |                     | IS-MCTS (public/full only) |
 
 
 ---
