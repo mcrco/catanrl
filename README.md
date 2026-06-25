@@ -143,12 +143,12 @@ from post-hoc eval when available. Status is `WIP` until a run is done.
 ## Decisions
 
 
-| Decision                     | Choice | Source run                                                                                           |
-| ---------------------------- | ------ | ---------------------------------------------------------------------------------------------------- |
-| `xdim` model size            | D-M    | [dagger-d-m](https://wandb.ai/myang2-california-institute-of-technology-caltech/catan/runs/vlvmghoj) |
-| Shared vs separate backbone  |        |                                                                                                      |
-| Full vs public info          |        |                                                                                                      |
-| Arch for AlphaZero long runs |        |                                                                                                      |
+| Decision                     | Choice   | Source run                                                                                                                      |
+| ---------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `xdim` model size            | D-M      | [dagger-d-m](https://wandb.ai/myang2-california-institute-of-technology-caltech/catan/runs/vlvmghoj)                            |
+| Shared vs separate backbone  | D-shared | D-shared [run](https://wandb.ai/myang2-california-institute-of-technology-caltech/catan/runs/xcy69zp3); D-sep is just D-M above |
+| Full vs public info          |          |                                                                                                                                 |
+| Arch for AlphaZero long runs |          |                                                                                                                                 |
 
 
 ---
@@ -160,7 +160,7 @@ from post-hoc eval when available. Status is `WIP` until a run is done.
 Training hparams:
 
 
-|                         |                                             |
+| Parameter               | Value                                       |
 | ----------------------- | ------------------------------------------- |
 | DAgger iterations       | 40                                          |
 | train epochs / iter     | 2                                           |
@@ -194,12 +194,12 @@ DAGGER_HPARAMS=(
 ### Model size sweep (separate, public actor / full critic)
 
 
-| ID   | config                   | policy/critic dims | cnn channels | fusion | policy-lr | Status | W&B                                                                                           | Notes                                      |
-| ---- | ------------------------ | ------------------ | ------------ | ------ | --------- | ------ | --------------------------------------------------------------------------------------------- | ------------------------------------------ |
-| D-S  | `xdim-flat-2p-d-s.yaml`  | 1024×2             | 32,64,64     | 1024   | 1e-4      | done   | [run](https://wandb.ai/myang2-california-institute-of-technology-caltech/catan/runs/k8ena49j) | small/fast                                 |
-| D-M  | `xdim-flat-2p-d-m.yaml`  | 2048×2             | 64,128,128   | 2048   | 1e-4      | done   | [run](https://wandb.ai/myang2-california-institute-of-technology-caltech/catan/runs/vlvmghoj) | **chosen** — learns better/faster than D-S |
-| D-L  | `xdim-flat-2p-d-l.yaml`  | 3072×2             | 64,128,128   | 3072   | 1e-4      | done   | [run](https://wandb.ai/myang2-california-institute-of-technology-caltech/catan/runs/rfvt4yxy) | no clear gain over D-M for extra width     |
-| D-XL | `xdim-flat-2p-d-xl.yaml` | 2048×3             | 128,128,128  | 2048   | 1e-4      | skip   |                                                                                               | deep + heavy CNN; skipped after D-M/D-L    |
+| ID   | config                   | policy/critic dims | cnn channels | fusion | policy-lr | Status                               | W&B                                                                                           | Notes                                      |
+| ---- | ------------------------ | ------------------ | ------------ | ------ | --------- | ------------------------------------ | --------------------------------------------------------------------------------------------- | ------------------------------------------ |
+| D-S  | `xdim-flat-2p-d-s.yaml`  | 1024×2             | 32,64,64     | 1024   | 1e-4      | done                                 | [run](https://wandb.ai/myang2-california-institute-of-technology-caltech/catan/runs/k8ena49j) | small/fast                                 |
+| D-M  | `xdim-flat-2p-d-m.yaml`  | 2048×2             | 64,128,128   | 2048   | 1e-4      | done                                 | [run](https://wandb.ai/myang2-california-institute-of-technology-caltech/catan/runs/vlvmghoj) | **chosen** — learns better/faster than D-S |
+| D-L  | `xdim-flat-2p-d-l.yaml`  | 3072×2             | 64,128,128   | 3072   | 1e-4      | done                                 | [run](https://wandb.ai/myang2-california-institute-of-technology-caltech/catan/runs/rfvt4yxy) | no clear gain over D-M for extra width     |
+| D-XL | `xdim-flat-2p-d-xl.yaml` | 2048×3             | 128,128,128  | 2048   | 1e-4      | skip since D-L showed no improvement |                                                                                               | deep + heavy CNN; skipped after D-M/D-L    |
 
 
 ```bash
@@ -220,16 +220,17 @@ uv run train-dagger --config configs/models/xdim-flat-2p-d-xl.yaml \
   "${DAGGER_HPARAMS[@]}"
 ```
 
-### Shared ≈ separate check (at the chosen size)
+### Shared ≈ separate check (at D-M size)
 
-D-sep/D-shared use the D-M (2048×2) configs for now; swap in the winning size
-preset if it isn't D-M.
+Compare D-shared curves to the separate D-M run
+([dagger-d-m](https://wandb.ai/myang2-california-institute-of-technology-caltech/catan/runs/vlvmghoj)).
+D-sep still needed for a matched `public / full` separate baseline.
 
 
-| ID       | config                            | network_mode | policy/critic mode | Status | Win% vs F (1st/2nd) | Throughput (steps/s) | Notes              |
-| -------- | --------------------------------- | ------------ | ------------------ | ------ | ------------------- | -------------------- | ------------------ |
-| D-sep    | `xdim-flat-2p-d-m.yaml`           | separate     | public / full      | WIP    |                     |                      | size winner above  |
-| D-shared | `xdim-flat-2p-public-shared.yaml` | shared       | public / public    | WIP    |                     |                      | target fast config |
+| ID       | config                            | network_mode | policy/critic mode | Status | W&B                                                                                           | Notes                                   |
+| -------- | --------------------------------- | ------------ | ------------------ | ------ | --------------------------------------------------------------------------------------------- | --------------------------------------- |
+| D-sep    | `xdim-flat-2p-d-m.yaml`           | separate     | public / full      | WIP    |                                                                                               | matched separate baseline at D-M size   |
+| D-shared | `xdim-flat-2p-public-shared.yaml` | shared       | public / public    | done   | [run](https://wandb.ai/myang2-california-institute-of-technology-caltech/catan/runs/xcy69zp3) | ~15h wall time vs ~16h for separate D-M |
 
 
 ```bash
@@ -240,17 +241,6 @@ uv run train-dagger --config configs/models/xdim-flat-2p-d-m.yaml \
 uv run train-dagger --config configs/models/xdim-flat-2p-public-shared.yaml \
   --experiment-name dagger-d-shared --expert F --opponents F --wandb --wandb-group dagger \
   "${DAGGER_HPARAMS[@]}"
-```
-
-### Eval (after each run)
-
-```bash
-for exp in dagger-d-s dagger-d-m dagger-d-l dagger-d-xl dagger-d-sep dagger-d-shared; do
-  for seat in first second; do
-    uv run scripts/eval_vs_catanatron.py --experiment "$exp" --which best \
-      --num-games 1000 --seed 67 --nn-seat "$seat" --opponents F
-  done
-done
 ```
 
 ---
