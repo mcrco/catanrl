@@ -971,10 +971,6 @@ def architecture_preset_from_experiment(exp: Experiment) -> "ArchitecturePreset"
     if tc.get("xdim_critic_fusion_hidden_dim") is not None:
         xdim_critic_fusion_hidden_dim = int(tc["xdim_critic_fusion_hidden_dim"])
 
-    critic_hidden_mode = tc.get("critic_hidden_mode")
-    if critic_hidden_mode is None and tc.get("critic_mode") in ("full", "guessed_dev_cards"):
-        critic_hidden_mode = tc["critic_mode"]
-
     return ArchitecturePreset(
         model_type=model_type,
         backbone_type=backbone_display_type(policy.backbone),
@@ -991,7 +987,6 @@ def architecture_preset_from_experiment(exp: Experiment) -> "ArchitecturePreset"
         vps_to_win=game.vps_to_win or tc.get("vps_to_win") or 15,
         discard_limit=game.discard_limit or tc.get("discard_limit") or 9,
         num_players=game.num_players,
-        critic_hidden_mode=critic_hidden_mode,
     )
 
 

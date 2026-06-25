@@ -38,7 +38,6 @@ class ArchitecturePreset:
     vps_to_win: int
     discard_limit: int
     num_players: int | None = None
-    critic_hidden_mode: str | None = None
 
     @property
     def actor_observation_level(self) -> str:
@@ -127,14 +126,6 @@ def load_architecture_preset(path: str | Path) -> ArchitecturePreset:
     if num_players is not None and (not isinstance(num_players, int) or num_players < 2):
         raise ValueError("game.num_players must be an integer >= 2 when set.")
 
-    critic_hidden_mode = model.get("critic_hidden_mode")
-    if critic_hidden_mode is not None:
-        critic_hidden_mode = _parse_choice(
-            critic_hidden_mode,
-            field="model.critic_hidden_mode",
-            choices=("full", "guessed_dev_cards"),
-        )
-
     return ArchitecturePreset(
         model_type=_parse_choice(
             model.get("model_type"), field="model.model_type", choices=MODEL_TYPE_CHOICES
@@ -175,7 +166,6 @@ def load_architecture_preset(path: str | Path) -> ArchitecturePreset:
         vps_to_win=_parse_optional_int(game.get("vps_to_win"), field="game.vps_to_win") or 15,
         discard_limit=_parse_optional_int(game.get("discard_limit"), field="game.discard_limit") or 9,
         num_players=num_players,
-        critic_hidden_mode=critic_hidden_mode,
     )
 
 
@@ -201,8 +191,6 @@ def architecture_train_config_fields(arch: ArchitecturePreset) -> dict[str, Any]
     }
     if arch.num_players is not None:
         fields["num_players"] = arch.num_players
-    if arch.critic_hidden_mode is not None:
-        fields["critic_hidden_mode"] = arch.critic_hidden_mode
     return fields
 
 
