@@ -24,6 +24,12 @@ from catanrl.algorithms.common import PolicyAgent, mask_action_logits
 from catanrl.models.backbone_builder import build_backbone_config
 from ...envs import decode_puffer_batch, extract_expert_actions_from_infos
 from ...envs.puffer.single_agent_env import compute_single_agent_dims, make_puffer_vectorized_envs
+from ...eval.dagger_eval import (
+    FrozenImitationEvalSet,
+    expert_supports_frozen_imitation_eval,
+    is_better_critic_checkpoint,
+    is_better_policy_checkpoint,
+)
 from ...eval.training_eval import eval_policy_value_against_baselines
 from ...models.models import (
     build_flat_policy_network,
@@ -569,6 +575,9 @@ def train(
     eval_expert_config: Optional[str] = None,
     eval_every_iterations: int = 1,
     save_every_updates: int = 1,
+    imitation_eval_num_games: int = 80,
+    imitation_eval_max_decision_points: int = 4000,
+    imitation_eval_seed: int = 67,
     seed: int = 42,
     num_envs: int = 4,
     reward_function: Literal["shaped", "win"] = "shaped",
@@ -619,6 +628,9 @@ def train(
         eval_expert_config: Expert config to use for eval labels (defaults to expert_config)
         eval_every_iterations: Run eval every N DAgger iterations (always evals on final iteration)
         save_every_updates: Save periodic checkpoints every N iterations
+        imitation_eval_num_games: F-vs-F games for the frozen imitation eval set
+        imitation_eval_max_decision_points: Cap on non-forced decisions (0 disables)
+        imitation_eval_seed: Seed for frozen imitation eval state generation
         seed: Random seed
         num_envs: Number of parallel environments
         reward_function: Reward function type ("shaped" or "win")
@@ -743,6 +755,33 @@ def train(
     print(f"Eval cadence: every {eval_every_iterations} iteration(s)")
     print(f"Save cadence: every {save_every_updates} iteration(s)")
 
+    frozen_imitation_eval: Optional[FrozenImitationEvalSet] = None
+    if (
+        imitation_eval_max_decision_points > 0
+        and expert_supports_frozen_imitation_eval(expert_config)
+    ):
+        print(
+            f"Building frozen imitation eval set "
+            f"({imitation_eval_num_games} F-vs-F games, "
+            f"max {imitation_eval_max_decision_points} decisions, seed={imitation_eval_seed})..."
+        )
+        frozen_imitation_eval = FrozenImitationEvalSet.generate(
+            map_type=map_type,
+            num_players=num_players,
+            vps_to_win=vps_to_win,
+            discard_limit=discard_limit,
+            num_games=imitation_eval_num_games,
+            max_decision_points=imitation_eval_max_decision_points,
+            seed=imitation_eval_seed,
+        )
+        print(
+            f"Frozen imitation eval set: {len(frozen_imitation_eval.decision_points)} decision points."
+        )
+    elif imitation_eval_max_decision_points > 0:
+        print(
+            "Skipping frozen imitation eval: training expert is not ValueFunctionPlayer (F)."
+        )
+
     policy_backbone_config = build_backbone_config(
         backbone_type=backbone_type,
         hidden_dims=policy_hidden_dims,
@@ -851,7 +890,8 @@ def train(
 
     beta = beta_init
     best_eval_win_rate = float("-inf")
-    best_eval_critic_mse = float("inf")
+    best_eval_critic_ev = float("-inf")
+    best_eval_value_regret = float("inf")
     total_steps = n_iterations * num_envs * steps_per_iteration
     global_step = 0
     start_iteration = 0
@@ -869,7 +909,10 @@ def train(
         start_iteration = int(resume_state.get("iteration", 0))
         beta = float(resume_state.get("beta", beta_init))
         best_eval_win_rate = float(resume_state.get("best_eval_win_rate", float("-inf")))
-        best_eval_critic_mse = float(resume_state.get("best_eval_critic_mse", float("inf")))
+        best_eval_critic_ev = float(resume_state.get("best_eval_critic_ev", float("-inf")))
+        best_eval_value_regret = float(
+            resume_state.get("best_eval_value_regret", float("inf"))
+        )
         print(
             f"  Restored: global_step={global_step:,}, "
             f"completed_iterations={start_iteration}, beta={beta:.3f}"
@@ -884,7 +927,8 @@ def train(
             "iteration": completed_iteration,
             "beta": beta,
             "best_eval_win_rate": best_eval_win_rate,
-            "best_eval_critic_mse": best_eval_critic_mse,
+            "best_eval_critic_ev": best_eval_critic_ev,
+            "best_eval_value_regret": best_eval_value_regret,
             "policy_model": policy_model.state_dict(),
             "critic_model": (
                 critic_model.state_dict() if critic_model is not None else None
@@ -977,6 +1021,8 @@ def train(
                 )
                 eval_metrics: Dict[str, float] = {}
                 eval_win_rate: Optional[float] = None
+                eval_value_regret: Optional[float] = None
+                eval_critic_ev: Optional[float] = None
                 if should_eval:
                     # Evaluate policy against baselines and critic value predictions
                     policy_model.eval()
@@ -1006,51 +1052,74 @@ def train(
                             expert_config=eval_expert_cfg,
                             progress_desc=f"Eval {iteration}/{last_iteration}",
                         )
+                        if frozen_imitation_eval is not None:
+                            eval_metrics.update(
+                                frozen_imitation_eval.eval_policy(
+                                    policy_model=policy_model,
+                                    model_type=model_type,
+                                    observation_level=actor_observation_level,
+                                    device=torch_device,
+                                )
+                            )
                     policy_model.train()
                     value_model.train()
                     eval_win_rate = float(eval_metrics.get("eval/win_rate_vs_value", 0.0))
+                    if "imitation/value_regret_norm" in eval_metrics:
+                        eval_value_regret = float(eval_metrics["imitation/value_regret_norm"])
+                    if "eval/value_explained_variance" in eval_metrics:
+                        eval_critic_ev = float(eval_metrics["eval/value_explained_variance"])
 
-                pbar.set_postfix(
-                    {
-                        "iter": f"{iteration}/{last_iteration}",
-                        "beta": f"{beta:.2f}",
-                        "acc": f"{train_stats['accuracy'] * 100:.1f}%",
-                        "wr_val": (
-                            f"{eval_win_rate * 100:.1f}%"
-                            if eval_win_rate is not None
-                            else "skipped"
-                        ),
-                    }
+                postfix: Dict[str, str] = {
+                    "iter": f"{iteration}/{last_iteration}",
+                    "beta": f"{beta:.2f}",
+                    "acc": f"{train_stats['accuracy'] * 100:.1f}%",
+                    "wr_val": (
+                        f"{eval_win_rate * 100:.1f}%"
+                        if eval_win_rate is not None
+                        else "skipped"
+                    ),
+                }
+                if eval_value_regret is not None:
+                    postfix["regret"] = f"{eval_value_regret:.3f}"
+                if eval_critic_ev is not None:
+                    postfix["critic_ev"] = f"{eval_critic_ev:.3f}"
+                pbar.set_postfix(postfix)
+
+                os.makedirs(save_path, exist_ok=True)
+                policy_best_path = (
+                    os.path.join(save_path, "policy_value_best.pt")
+                    if uses_shared_network
+                    else os.path.join(save_path, "policy_best.pt")
                 )
+                critic_best_path = os.path.join(save_path, "critic_best.pt")
 
-                if eval_win_rate is not None and eval_win_rate > best_eval_win_rate:
+                if (
+                    should_eval
+                    and eval_value_regret is not None
+                    and is_better_policy_checkpoint(eval_value_regret, best_eval_value_regret)
+                ):
+                    best_eval_value_regret = eval_value_regret
+                    torch.save(policy_model.state_dict(), policy_best_path)
+                elif (
+                    should_eval
+                    and eval_value_regret is None
+                    and eval_win_rate is not None
+                    and eval_win_rate > best_eval_win_rate
+                ):
+                    # Fallback when frozen imitation eval is unavailable (non-F expert).
+                    torch.save(policy_model.state_dict(), policy_best_path)
+
+                if should_eval and eval_win_rate is not None and eval_win_rate > best_eval_win_rate:
                     best_eval_win_rate = eval_win_rate
-                    os.makedirs(save_path, exist_ok=True)
-                    if uses_shared_network:
-                        torch.save(
-                            policy_model.state_dict(),
-                            os.path.join(save_path, "policy_value_best.pt"),
-                        )
-                    else:
-                        torch.save(
-                            policy_model.state_dict(),
-                            os.path.join(save_path, "policy_best.pt"),
-                        )
 
-                eval_critic_mse = eval_metrics.get("eval/value_mse", float("inf"))
-                if should_eval and eval_critic_mse < best_eval_critic_mse:
-                    best_eval_critic_mse = eval_critic_mse
-                    os.makedirs(save_path, exist_ok=True)
-                    if uses_shared_network:
-                        torch.save(
-                            policy_model.state_dict(),
-                            os.path.join(save_path, "policy_value_best.pt"),
-                        )
-                    else:
-                        torch.save(
-                            critic_model.state_dict(),
-                            os.path.join(save_path, "critic_best.pt"),
-                        )
+                if (
+                    should_eval
+                    and critic_model is not None
+                    and eval_critic_ev is not None
+                    and is_better_critic_checkpoint(eval_critic_ev, best_eval_critic_ev)
+                ):
+                    best_eval_critic_ev = eval_critic_ev
+                    torch.save(critic_model.state_dict(), critic_best_path)
 
                 # Save periodic checkpoints aligned with eval/update cadence.
                 if iteration % save_every_updates == 0:
@@ -1120,8 +1189,20 @@ def train(
 
     if wandb.run is not None:
         wandb.run.summary["best_eval_win_rate_vs_value"] = best_eval_win_rate
+        if best_eval_value_regret < float("inf"):
+            wandb.run.summary["best_imitation_value_regret_norm"] = best_eval_value_regret
+        if best_eval_critic_ev > float("-inf"):
+            wandb.run.summary["best_eval_critic_explained_variance"] = best_eval_critic_ev
 
     print(f"\n[DAgger] Training complete. Best eval win rate vs value: {best_eval_win_rate:.3f}")
+    if best_eval_value_regret < float("inf"):
+        print(
+            f"[DAgger] Best policy checkpoint: value_regret={best_eval_value_regret:.4f}"
+        )
+    if best_eval_critic_ev > float("-inf"):
+        print(
+            f"[DAgger] Best critic checkpoint: explained_variance={best_eval_critic_ev:.4f}"
+        )
     return policy_model, critic_model
 
 

@@ -166,6 +166,24 @@ def main():
         ),
     )
     parser.add_argument(
+        "--imitation-eval-games",
+        type=int,
+        default=80,
+        help="F-vs-F games for the frozen imitation eval set (default: 80)",
+    )
+    parser.add_argument(
+        "--imitation-eval-max-decision-points",
+        type=int,
+        default=4000,
+        help="Cap on non-forced decisions in the frozen imitation set; 0 disables (default: 4000)",
+    )
+    parser.add_argument(
+        "--imitation-eval-seed",
+        type=int,
+        default=67,
+        help="Seed for frozen imitation eval state generation (default: 67)",
+    )
+    parser.add_argument(
         "--save-every-updates",
         type=int,
         default=1,
@@ -263,6 +281,9 @@ def main():
         "eviction_strategy": args.eviction_strategy,
         "fresh_eval_games_per_opponent": args.fresh_eval_games_per_opponent,
         "eval_every_iterations": args.eval_every_iterations,
+        "imitation_eval_games": args.imitation_eval_games,
+        "imitation_eval_max_decision_points": args.imitation_eval_max_decision_points,
+        "imitation_eval_seed": args.imitation_eval_seed,
         "save_every_updates": args.save_every_updates,
         "seed": args.seed,
         "load_from_experiment": args.load_from_experiment,
@@ -323,6 +344,9 @@ def main():
         wandb_config=wandb_config,
         fresh_eval_games_per_opponent=args.fresh_eval_games_per_opponent,
         eval_every_iterations=args.eval_every_iterations,
+        imitation_eval_num_games=args.imitation_eval_games,
+        imitation_eval_max_decision_points=args.imitation_eval_max_decision_points,
+        imitation_eval_seed=args.imitation_eval_seed,
         save_every_updates=args.save_every_updates,
         seed=args.seed,
         num_envs=args.num_envs,
