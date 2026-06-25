@@ -247,24 +247,84 @@ uv run train-dagger --config configs/models/xdim-flat-2p-public-shared.yaml \
 
 ## Phase 2 — SARL PPO + MARL (shared vs separate, full vs public)
 
-Warm-start from the best DAgger via `--load-from-experiment` (arch inherited).
-The two factors under test are network mode and info level; no private runs.
+Warm-start from the matching Phase 1 DAgger run when the architecture matches
+(`--config` must agree with `--load-from-experiment`). Public-info variants warm-start
+from `dagger-d-m` (separate) or `dagger-d-shared` (shared). Full/full variants use
+a fresh run — Phase 1 DAgger used a public actor, so there is no compatible checkpoint.
 
-```
-uv run train-sarl-ppo --load-from-experiment <best-dagger> --load-from-which best \
-  --experiment-name <id> --opponents F --wandb
+BASE map, 2 players, train vs `F`, shaped reward.
+
+Training hparams:
+
+
+| Parameter               | Value                                       |
+| ----------------------- | ------------------------------------------- |
+| total timesteps         | 16_384_000                                  |
+| rollout steps / update  | 4096                                        |
+| PPO updates (total)     | 4000                                        |
+| train epochs / update   | 10                                          |
+| batch size              | 64                                          |
+| num envs                | 8                                           |
+| policy lr               | 1e-4                                        |
+| gamma / GAE λ           | 0.99 / 0.95                                 |
+| clip ε / entropy coef   | 0.2 / 0.01                                  |
+| reward                  | shaped                                      |
+| eval every N updates    | 400 (10 eval passes)                        |
+| save every N updates    | 400 (10 checkpoints)                        |
+| eval games / opponent   | 500 (250 first + 250 second; vs F)          |
+| trend eval seed         | 42                                          |
+
+
+```bash
+SARL_HPARAMS=(
+  --total-timesteps 16384000
+  --rollout-steps 4096
+  --train-epochs 10
+  --batch-size 64
+  --num-envs 8
+  --policy-lr 1e-4
+  --gamma 0.99
+  --gae-lambda 0.95
+  --clip-epsilon 0.2
+  --entropy-coef 0.01
+  --reward-function shaped
+  --eval-every-updates 400
+  --save-every-updates 400
+  --fresh-eval-games-per-opponent 500
+  --trend-eval-seed 42
+)
 ```
 
 ### SARL PPO vs ValueFunction
 
 
-| ID            | network  | policy/critic mode | Status | Win% vs F (1st/2nd) | Throughput | Notes |
-| ------------- | -------- | ------------------ | ------ | ------------------- | ---------- | ----- |
-| P-sep-full    | separate | full / full        | WIP    |                     |            |       |
-| P-sep-pub     | separate | public / full      | WIP    |                     |            |       |
-| P-shared-full | shared   | full / full        | WIP    |                     |            |       |
-| P-shared-pub  | shared   | public / public    | WIP    |                     |            |       |
+| ID            | config                         | network  | policy/critic mode | warm-start       | Status | Win% vs F (1st/2nd) | Throughput | Notes                          |
+| ------------- | ------------------------------ | -------- | ------------------ | ---------------- | ------ | ------------------- | ---------- | ------------------------------ |
+| P-sep-full    | `xdim-flat-2p-full-sep.yaml`   | separate | full / full        | — (fresh)        | WIP    |                     |            | no matching DAgger checkpoint    |
+| P-sep-pub     | `xdim-flat-2p-d-m.yaml`        | separate | public / full      | `dagger-d-m`     | WIP    |                     |            |                                |
+| P-shared-full | `xdim-flat-2p-full-shared.yaml` | shared   | full / full        | — (fresh)        | WIP    |                     |            | no matching DAgger checkpoint    |
+| P-shared-pub  | `xdim-flat-2p-public-shared.yaml` | shared   | public / public    | `dagger-d-shared` | WIP    |                     |            |                                |
 
+
+```bash
+uv run train-sarl-ppo --config configs/models/xdim-flat-2p-full-sep.yaml \
+  --experiment-name p-sep-full --opponents F --wandb --wandb-group sarl-ppo \
+  "${SARL_HPARAMS[@]}"
+
+uv run train-sarl-ppo --config configs/models/xdim-flat-2p-d-m.yaml \
+  --load-from-experiment dagger-d-m --load-from-which best \
+  --experiment-name p-sep-pub --opponents F --wandb --wandb-group sarl-ppo \
+  "${SARL_HPARAMS[@]}"
+
+uv run train-sarl-ppo --config configs/models/xdim-flat-2p-full-shared.yaml \
+  --experiment-name p-shared-full --opponents F --wandb --wandb-group sarl-ppo \
+  "${SARL_HPARAMS[@]}"
+
+uv run train-sarl-ppo --config configs/models/xdim-flat-2p-public-shared.yaml \
+  --load-from-experiment dagger-d-shared --load-from-which best \
+  --experiment-name p-shared-pub --opponents F --wandb --wandb-group sarl-ppo \
+  "${SARL_HPARAMS[@]}"
+```
 
 ### MARL self-play (centralized critic)
 

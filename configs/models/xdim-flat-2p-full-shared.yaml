@@ -1,0 +1,21 @@
+# D-M size, shared policy-value backbone, symmetric full observations (actor == critic).
+name: xdim-flat-2p-full-shared
+
+model:
+  model_type: flat
+  backbone_type: xdim
+  policy_hidden_dims: [2048, 2048]
+  critic_hidden_dims: [2048, 2048]
+  policy_mode: full
+  critic_mode: full
+  network_mode: shared
+  xdim_cnn_channels: [64, 128, 128]
+  xdim_cnn_kernel_size: [3, 5]
+  xdim_policy_fusion_hidden_dim: 2048
+  xdim_critic_fusion_hidden_dim: 2048
+
+game:
+  map_type: BASE
+  vps_to_win: 15
+  discard_limit: 9
+  num_players: 2
