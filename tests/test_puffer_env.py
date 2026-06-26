@@ -223,7 +223,10 @@ def test_single_agent_truncation_when_turn_limit_reached():
         assert float(rewards[0]) == 0.0
         assert not bool(terminals[0])
         assert bool(truncations[0])
-        assert env._episode_done is True
+        assert bool(env.masks[0])
+        assert env._episode_done is False
+        assert env.game is not None
+        assert env.game.state.num_turns < TURNS_LIMIT
     finally:
         env.close()
 
@@ -521,6 +524,30 @@ def test_single_agent_win_reward_on_forced_terminal_state():
         with patch.object(env.game, "winning_color", return_value=env.p0.color):
             reward = env.reward_function.reward(env, env.game, env.p0.color)
         assert reward == 1.0
+    finally:
+        env.close()
+
+
+def test_single_agent_terminal_step_autoresets_for_next_transition():
+    env = _make_single_env(reward_function=WinReward())
+    try:
+        _, infos = env.reset(seed=1)
+        with patch.object(env.game, "winning_color", return_value=env.p0.color):
+            action = int(infos[0]["valid_actions"][0])
+            _, rewards, terminals, truncations, next_infos = env.step(
+                np.asarray([action], dtype=np.int32)
+            )
+
+        assert float(rewards[0]) == 1.0
+        assert bool(terminals[0])
+        assert not bool(truncations[0])
+        assert bool(env.masks[0])
+        assert env._episode_done is False
+        assert next_infos[0]["nn_won"] is True
+        assert next_infos[0]["final_info"]["nn_won"] is True
+        assert int(next_infos[0]["expert_action"]) in next_infos[0]["valid_actions"]
+        assert env.game is not None
+        assert env.game.state.current_color() == env.p0.color
     finally:
         env.close()
 

@@ -4,15 +4,13 @@ from typing import Any, Callable, Dict, List, Literal, Optional
 
 import numpy as np
 import pufferlib.vector as puffer_vector
+from catanatron.game import TURNS_LIMIT, Game
+from catanatron.gym.board_tensor_features import create_board_tensor
+from catanatron.models.player import Color, Player, RandomPlayer
 from gymnasium import spaces
 from pufferlib.emulation import emulate, emulate_action_space, emulate_observation_space, nativize
 from pufferlib.environment import PufferEnv
 
-from catanatron.game import Game, TURNS_LIMIT
-from catanatron.gym.board_tensor_features import create_board_tensor
-from catanatron.models.player import Color, Player, RandomPlayer
-
-from catanrl.envs.puffer.rewards import RewardFunction, ShapedReward, WinReward
 from catanrl.envs.puffer.common import (
     BOARD_HEIGHT,
     BOARD_WIDTH,
@@ -24,6 +22,7 @@ from catanrl.envs.puffer.common import (
     create_opponents,
     normalize_reset_seed,
 )
+from catanrl.envs.puffer.rewards import RewardFunction, ShapedReward, WinReward
 from catanrl.features.catanatron_utils import (
     ActorObservationLevel,
     full_game_to_features,
@@ -111,9 +110,13 @@ class SingleAgentCatanatronPufferEnv(PufferEnv):
         self.single_observation_space, self.obs_dtype = emulate_observation_space(
             self.env_single_observation_space
         )
-        self.single_action_space, self.atn_dtype = emulate_action_space(self.env_single_action_space)
+        self.single_action_space, self.atn_dtype = emulate_action_space(
+            self.env_single_action_space
+        )
         self.num_agents = 1
-        self.is_obs_emulated = self.single_observation_space is not self.env_single_observation_space
+        self.is_obs_emulated = (
+            self.single_observation_space is not self.env_single_observation_space
+        )
         self.is_atn_emulated = self.single_action_space is not self.env_single_action_space
 
         super().__init__(buf=buf)
@@ -140,8 +143,7 @@ class SingleAgentCatanatronPufferEnv(PufferEnv):
     def _advance_until_p0_decision(self) -> None:
         assert self.game is not None
         while (
-            self.game.winning_color() is None
-            and self.game.state.current_color() != self.p0.color
+            self.game.winning_color() is None and self.game.state.current_color() != self.p0.color
         ):
             self.game.play_tick()
 
@@ -305,12 +307,29 @@ class SingleAgentCatanatronPufferEnv(PufferEnv):
         reward = self.reward_function.reward(self, self.game, self.p0.color)
         self.reward_function.after_step(self, self.game, self.p0.color)
 
+        done = bool(terminated or truncated)
+        # if env has finished, we need to reset the obs immediately.
+        # otherwise, we would return the terminal state, and the training loop
+        # would run policy to get a bogus action and store a bogus tuple.
+        if done:
+            final_reward = float(reward)
+            final_info = info
+            _, reset_infos = self.reset(seed=None)
+            info = reset_infos[0]
+            info["nn_won"] = final_info["nn_won"]
+            info["final_info"] = final_info
+            self.rewards[0] = final_reward
+            self.terminals[0] = bool(terminated)
+            self.truncations[0] = bool(truncated)
+            self.masks[0] = True
+            return self.observations, self.rewards, self.terminals, self.truncations, [info]
+
         self._pack_observation(observation)
         self.rewards[0] = float(reward)
         self.terminals[0] = bool(terminated)
         self.truncations[0] = bool(truncated)
         self.masks[0] = True
-        self._episode_done = bool(terminated or truncated)
+        self._episode_done = False
         return self.observations, self.rewards, self.terminals, self.truncations, [info]
 
     def close(self):
