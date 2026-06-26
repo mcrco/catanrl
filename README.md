@@ -292,7 +292,7 @@ SARL_HPARAMS=(
   --entropy-coef 0.001
   --max-grad-norm 0.5
   --target-kl 0.01
-  --reward-function win
+  --reward-function shaped
   --eval-every-updates 400
   --save-every-updates 400
   --fresh-eval-games-per-opponent 500
