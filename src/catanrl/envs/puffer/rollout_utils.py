@@ -43,11 +43,31 @@ def _flatten_actor_components(numeric: np.ndarray, board: np.ndarray) -> np.ndar
     return np.concatenate([numeric_flat, board_flat], axis=0)
 
 
-def flatten_puffer_observation(obs: Dict[str, Any]) -> Tuple[np.ndarray, np.ndarray]:
-    """Convert a Puffer observation dict to flattened actor/critic vectors."""
-    actor_obs = obs["observation"]
-    actor_vec = _flatten_actor_components(actor_obs["numeric"], actor_obs["board"])
-    critic_vec = np.asarray(obs["critic"], dtype=np.float32).reshape(-1)
+def flatten_puffer_observation(
+    obs: Dict[str, Any],
+    actor_indices: np.ndarray | None = None,
+    critic_indices: np.ndarray | None = None,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Convert a Puffer observation dict to flattened actor/critic vectors.
+
+    Current envs expose a full flat observation and callers select actor/critic
+    views by index. The structured branch is retained for older saved fixtures
+    and clearer failures while tests migrate.
+    """
+    raw_observation = obs["observation"]
+    if isinstance(raw_observation, dict):
+        actor_obs = raw_observation
+        actor_vec = _flatten_actor_components(actor_obs["numeric"], actor_obs["board"])
+        critic_source = np.asarray(obs.get("critic", actor_vec), dtype=np.float32).reshape(-1)
+    else:
+        full_vec = np.asarray(raw_observation, dtype=np.float32).reshape(-1)
+        if actor_indices is None:
+            actor_vec = full_vec
+        else:
+            actor_vec = full_vec[actor_indices]
+        critic_source = full_vec
+
+    critic_vec = critic_source if critic_indices is None else critic_source[critic_indices]
     return actor_vec, critic_vec
 
 
@@ -62,12 +82,14 @@ def decode_puffer_batch(
     obs_dtype: Any,
     actor_dim: int,
     critic_dim: Optional[int] = None,
+    actor_indices: Optional[np.ndarray] = None,
+    critic_indices: Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, Optional[np.ndarray], np.ndarray]:
     """Decode flat Puffer observations into actor/critic vectors and action masks.
 
-    Expects structured observations with schema:
-      {"observation": {"numeric": ..., "board": ...}, "action_mask": ..., "critic": ...}
-    If critic_dim is None, critic outputs are skipped and returned as None.
+    Current envs expose {"observation": full_flat, "action_mask": ...}. Actor
+    and critic views are selected with optional index arrays. If critic_dim is
+    None, critic outputs are skipped and returned as None.
     """
     # Local import keeps this util torch-free and avoids puffer dependency at import time.
     from pufferlib.emulation import nativize
@@ -82,7 +104,11 @@ def decode_puffer_batch(
 
     for idx in range(batch_size):
         structured = nativize(flat_obs[idx], obs_space, obs_dtype)
-        actor_vec, critic_vec = flatten_puffer_observation(structured)
+        actor_vec, critic_vec = flatten_puffer_observation(
+            structured,
+            actor_indices=actor_indices,
+            critic_indices=critic_indices,
+        )
         actor_batch[idx] = actor_vec
         if critic_batch is not None:
             critic_batch[idx] = critic_vec

@@ -10,7 +10,6 @@ from pufferlib.emulation import emulate, emulate_action_space, emulate_observati
 from pufferlib.environment import PufferEnv
 
 from catanatron.game import Game, TURNS_LIMIT
-from catanatron.gym.board_tensor_features import create_board_tensor
 from catanatron.models.player import Color, Player
 
 from catanrl.envs.puffer.common import (
@@ -38,9 +37,6 @@ from catanrl.utils.catanatron_action_space import (
 )
 from catanrl.utils.catanatron_map import build_catan_map
 from catanrl.utils.seeding import derive_map_and_game_seeds, derive_seed
-
-LocalObservation = Dict[str, np.ndarray]
-
 
 @dataclass
 class MultiAgentCatanatronEnvConfig:
@@ -140,23 +136,14 @@ class ParallelCatanatronPufferEnv(PufferEnv):
     def _next_episode_seed(self, seed: int | None) -> int | None:
         return self._seed_tracker.next_episode_seed(seed, derive_seed)
 
-    def _actor_observation(self, color: Color) -> LocalObservation:
+    def _full_observation(self, color: Color) -> np.ndarray:
         assert self.game is not None
-        full_vector = full_game_to_features(
+        return full_game_to_features(
             self.game,
             self.num_players,
             self.map_type,
             base_color=color,
         )
-        numeric = full_vector[self.actor_numeric_indices]
-        board = create_board_tensor(self.game, color, channels_first=True).astype(
-            np.float32,
-            copy=False,
-        )
-        return {
-            "numeric": numeric.astype(np.float32, copy=False),
-            "board": board,
-        }
 
     def _action_mask(self, agent: str) -> np.ndarray:
         assert self.game is not None
@@ -181,14 +168,8 @@ class ParallelCatanatronPufferEnv(PufferEnv):
         assert self.game is not None
         color = self.agent_name_to_color[agent]
         return {
-            "observation": self._actor_observation(color),
+            "observation": self._full_observation(color),
             "action_mask": self._action_mask(agent),
-            "critic": full_game_to_features(
-                self.game,
-                self.num_players,
-                self.map_type,
-                base_color=color,
-            ),
         }
 
     def _get_info(self, agent: str) -> Dict[str, Any]:
@@ -418,21 +399,7 @@ def make_vectorized_envs(
 
 
 def flatten_marl_observation(observation: Dict[str, np.ndarray]) -> np.ndarray:
-    numeric = np.asarray(observation["observation"]["numeric"], dtype=np.float32).reshape(-1)
-    board_arr = np.asarray(observation["observation"]["board"], dtype=np.float32)
-    if board_arr.ndim != 3:
-        raise ValueError(f"Expected 3D board tensor, got shape {board_arr.shape}")
-
-    if board_arr.shape[0] == BOARD_WIDTH and board_arr.shape[1] == BOARD_HEIGHT:
-        board_wh_last = board_arr
-    elif board_arr.shape[1] == BOARD_WIDTH and board_arr.shape[2] == BOARD_HEIGHT:
-        board_wh_last = np.transpose(board_arr, (1, 2, 0))
-    else:
-        raise ValueError(
-            "Unrecognized board tensor layout; expected (W,H,C) or (C,W,H), "
-            f"got {board_arr.shape}"
-        )
-    return np.concatenate([numeric, board_wh_last.reshape(-1)], axis=0)
+    return np.asarray(observation["observation"], dtype=np.float32).reshape(-1)
 
 
 def get_valid_actions(
@@ -451,7 +418,6 @@ __all__ = [
     "BOARD_HEIGHT",
     "BOARD_WIDTH",
     "COLOR_ORDER",
-    "LocalObservation",
     "MultiAgentCatanatronEnvConfig",
     "ParallelCatanatronPufferEnv",
     "_make_parallel_env",

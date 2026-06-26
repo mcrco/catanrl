@@ -139,21 +139,12 @@ def build_shared_critic_observation_space(
     critic_dim: int,
     action_space_size: int,
 ) -> spaces.Dict:
-    actor_space = spaces.Dict(
-        {
-            "numeric": spaces.Box(
-                low=0.0,
-                high=HIGH,
-                shape=(numeric_dim,),
-                dtype=np.float32,
-            ),
-            "board": spaces.Box(
-                low=0.0,
-                high=1.0,
-                shape=board_tensor_shape,
-                dtype=np.float32,
-            ),
-        }
+    del numeric_dim, board_tensor_shape
+    observation_space = spaces.Box(
+        low=-1.0,
+        high=HIGH,
+        shape=(critic_dim,),
+        dtype=np.float32,
     )
     action_mask_space = spaces.Box(
         low=0,
@@ -161,17 +152,10 @@ def build_shared_critic_observation_space(
         shape=(action_space_size,),
         dtype=np.int8,
     )
-    critic_space = spaces.Box(
-        low=0.0,
-        high=HIGH,
-        shape=(critic_dim,),
-        dtype=np.float32,
-    )
     return spaces.Dict(
         {
-            "observation": actor_space,
+            "observation": observation_space,
             "action_mask": action_mask_space,
-            "critic": critic_space,
         }
     )
 

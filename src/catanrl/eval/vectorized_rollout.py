@@ -8,14 +8,11 @@ from typing import Any, Callable, List, Literal, Optional, Sequence, Tuple, cast
 
 import numpy as np
 import torch
-from pufferlib.emulation import nativize
 
 from ..envs import (
     decode_puffer_batch,
     EpisodeBuffer,
     extract_expert_actions_from_infos,
-    flatten_puffer_observation,
-    get_action_mask_from_obs,
     init_episode_buffers,
 )
 from ..envs.puffer.multi_agent_env import make_vectorized_envs as make_marl_vectorized_envs
@@ -23,6 +20,7 @@ from ..envs.puffer.single_agent_env import compute_single_agent_dims, make_puffe
 from ..features.catanatron_utils import (
     ActorObservationLevel,
     CriticObservationLevel,
+    get_actor_indices_from_full,
     get_observation_indices_from_full,
 )
 from ..models.wrappers import PolicyNetworkWrapper, PolicyValueNetworkWrapper, ValueNetworkWrapper
@@ -220,6 +218,11 @@ def run_policy_value_eval_vectorized(
     )
     actor_dim = dims["actor_dim"]
     full_critic_dim = full_dims["critic_dim"]
+    actor_observation_indices = get_actor_indices_from_full(
+        num_players,
+        map_type,
+        level=actor_observation_level,
+    )
     critic_observation_indices = get_observation_indices_from_full(
         num_players,
         map_type,
@@ -277,19 +280,16 @@ def run_policy_value_eval_vectorized(
     try:
         while episodes_completed < num_games:
             batch_size = observations.shape[0]
-            actor_batch = np.zeros((batch_size, actor_dim), dtype=np.float32)
-            critic_batch = np.zeros((batch_size, full_critic_dim), dtype=np.float32)
-            action_masks: np.ndarray | None = None
-
-            for idx in range(batch_size):
-                structured = nativize(observations[idx], obs_space, obs_dtype)
-                actor_batch[idx], critic_batch[idx] = flatten_puffer_observation(structured)
-                mask = get_action_mask_from_obs(structured)
-                if action_masks is None:
-                    action_masks = np.zeros((batch_size, mask.shape[0]), dtype=np.bool_)
-                action_masks[idx] = mask
-            if action_masks is None:
-                raise ValueError("No action masks available from vectorized observations.")
+            actor_batch, critic_batch, action_masks = decode_puffer_batch(
+                flat_obs=observations,
+                obs_space=obs_space,
+                obs_dtype=obs_dtype,
+                actor_dim=actor_dim,
+                critic_dim=full_critic_dim,
+                actor_indices=actor_observation_indices,
+            )
+            if critic_batch is None:
+                raise RuntimeError("Expected critic observations for vectorized evaluation.")
 
             for idx in range(batch_size):
                 value_state = (
@@ -491,6 +491,11 @@ def run_policy_h2h_eval_vectorized(
     obs_space = driver_env.env_single_observation_space
     obs_dtype = driver_env.obs_dtype
     actor_dim = int(driver_env.vector_dim)
+    actor_observation_indices = get_actor_indices_from_full(
+        num_players,
+        map_type,
+        level=actor_observation_level,
+    )
     agents_per_env = getattr(envs, "agents_per_env", [num_players] * num_envs)
     env_offsets: list[int] = []
     ptr = 0
@@ -524,6 +529,7 @@ def run_policy_h2h_eval_vectorized(
                 obs_dtype=obs_dtype,
                 actor_dim=actor_dim,
                 critic_dim=None,
+                actor_indices=actor_observation_indices,
             )
             batch_size = actor_batch.shape[0]
             current_mask = np.zeros(batch_size, dtype=np.bool_)

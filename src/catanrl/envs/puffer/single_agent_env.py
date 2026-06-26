@@ -5,7 +5,6 @@ from typing import Any, Callable, Dict, List, Literal, Optional
 import numpy as np
 import pufferlib.vector as puffer_vector
 from catanatron.game import TURNS_LIMIT, Game
-from catanatron.gym.board_tensor_features import create_board_tensor
 from catanatron.models.player import Color, Player, RandomPlayer
 from gymnasium import spaces
 from pufferlib.emulation import emulate, emulate_action_space, emulate_observation_space, nativize
@@ -159,25 +158,7 @@ class SingleAgentCatanatronPufferEnv(PufferEnv):
             for action in self.game.playable_actions
         ]
 
-    def _actor_observation(self) -> Dict[str, np.ndarray]:
-        assert self.game is not None
-        full_vector = full_game_to_features(
-            self.game,
-            self.num_players,
-            self.map_type,
-            base_color=self.p0.color,
-        )
-        numeric = full_vector[self.actor_numeric_indices]
-        board = create_board_tensor(self.game, self.p0.color, channels_first=True).astype(
-            np.float32,
-            copy=False,
-        )
-        return {
-            "numeric": numeric.astype(np.float32, copy=False),
-            "board": board.astype(np.float32, copy=False),
-        }
-
-    def _critic_observation(self) -> np.ndarray:
+    def _full_observation(self) -> np.ndarray:
         assert self.game is not None
         return full_game_to_features(
             self.game,
@@ -220,9 +201,8 @@ class SingleAgentCatanatronPufferEnv(PufferEnv):
 
     def _get_observation(self) -> Dict[str, Any]:
         return {
-            "observation": self._actor_observation(),
+            "observation": self._full_observation(),
             "action_mask": self._action_mask(),
-            "critic": self._critic_observation(),
         }
 
     def reset(self, seed=None):

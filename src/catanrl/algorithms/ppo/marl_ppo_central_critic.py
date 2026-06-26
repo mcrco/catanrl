@@ -19,6 +19,7 @@ from ...eval.training_eval import eval_policy_against_champion, eval_policy_valu
 from ...features.catanatron_utils import (
     ActorObservationLevel,
     CriticObservationLevel,
+    get_actor_indices_from_full,
     get_observation_indices_from_full,
 )
 from ...models.models import (
@@ -129,15 +130,13 @@ def train(
         actor_observation_level=actor_observation_level,
         critic_observation_level=critic_observation_level,
     )
-    full_dims = compute_single_agent_dims(
+    critic_input_dim = dims["critic_dim"]
+    critic_numeric_dim = dims["critic_numeric_dim"]
+    actor_observation_indices = get_actor_indices_from_full(
         num_players,
         map_type,
-        actor_observation_level=actor_observation_level,
-        critic_observation_level="full",
+        level=actor_observation_level,
     )
-    critic_input_dim = dims["critic_dim"]
-    full_critic_input_dim = full_dims["critic_dim"]
-    critic_numeric_dim = dims["critic_numeric_dim"]
     critic_observation_indices = get_observation_indices_from_full(
         num_players,
         map_type,
@@ -297,11 +296,12 @@ def train(
             obs_space=obs_space,
             obs_dtype=obs_dtype,
             actor_dim=actor_input_dim,
-            critic_dim=full_critic_input_dim,
+            critic_dim=critic_input_dim,
+            actor_indices=actor_observation_indices,
+            critic_indices=critic_observation_indices,
         )
         if critic_batch is None:
             raise RuntimeError("Expected critic observations for MARL centralized critic training.")
-        critic_batch = critic_batch[:, critic_observation_indices]
         return actor_batch, critic_batch, action_masks
 
     metric_window = max(1, metric_window)

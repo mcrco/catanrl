@@ -31,6 +31,7 @@ from ...eval.training_eval import eval_policy_value_against_baselines
 from ...features.catanatron_utils import (
     ActorObservationLevel,
     CriticObservationLevel,
+    get_actor_indices_from_full,
     get_observation_indices_from_full,
 )
 from ...models.models import (
@@ -144,18 +145,16 @@ def train(
         actor_observation_level=actor_observation_level,
         critic_observation_level=effective_critic_observation_level,
     )
-    full_dims = compute_single_agent_dims(
-        num_players,
-        map_type,
-        actor_observation_level=actor_observation_level,
-        critic_observation_level="full",
-    )
     actor_input_dim = dims["actor_dim"]
     critic_input_dim = dims["critic_dim"]
-    full_critic_input_dim = full_dims["critic_dim"]
     actor_numeric_dim = dims["actor_numeric_dim"]
     critic_numeric_dim = dims["critic_numeric_dim"]
     board_channels = dims["board_channels"]
+    actor_observation_indices = get_actor_indices_from_full(
+        num_players,
+        map_type,
+        level=actor_observation_level,
+    )
     critic_observation_indices = get_observation_indices_from_full(
         num_players,
         map_type,
@@ -428,10 +427,10 @@ def train(
             obs_space=obs_space,
             obs_dtype=obs_dtype,
             actor_dim=actor_input_dim,
-            critic_dim=full_critic_input_dim if uses_privileged_critic else None,
+            critic_dim=critic_input_dim if uses_privileged_critic else None,
+            actor_indices=actor_observation_indices,
+            critic_indices=critic_observation_indices if uses_privileged_critic else None,
         )
-        if critic_batch is not None:
-            critic_batch = critic_batch[:, critic_observation_indices]
         return actor_batch, critic_batch, action_masks
 
     env_episode_rewards = np.zeros(num_envs)

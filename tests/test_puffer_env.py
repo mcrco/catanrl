@@ -25,7 +25,10 @@ from catanrl.envs.puffer.single_agent_env import (
     SingleAgentCatanatronPufferEnv,
     make_puffer_vectorized_envs,
 )
-from catanrl.features.catanatron_utils import get_observation_indices_from_full
+from catanrl.features.catanatron_utils import (
+    get_actor_indices_from_full,
+    get_observation_indices_from_full,
+)
 from catanrl.utils.catanatron_action_space import get_end_turn_index, to_action_space
 
 
@@ -144,10 +147,9 @@ def test_single_agent_observation_fields_have_expected_shapes():
     try:
         env.reset(seed=7)
         structured = _decode_single(env)
-        assert structured["observation"]["numeric"].shape == (env.actor_numeric_dim,)
-        assert structured["observation"]["board"].shape == env.board_tensor_shape
-        assert structured["critic"].shape == (env.critic_vector_dim,)
+        assert structured["observation"].shape == (env.critic_vector_dim,)
         assert structured["action_mask"].shape == (env.action_space_size,)
+        assert env.env_single_observation_space.contains(structured)
     finally:
         env.close()
 
@@ -157,7 +159,8 @@ def test_single_agent_critic_is_full_state_actor_is_restricted():
     try:
         env.reset(seed=11)
         structured = _decode_single(env)
-        assert structured["critic"].shape[0] > structured["observation"]["numeric"].shape[0]
+        actor_view = structured["observation"][env.actor_observation_indices]
+        assert structured["observation"].shape[0] > actor_view.shape[0]
     finally:
         env.close()
 
@@ -172,12 +175,12 @@ def test_single_agent_valid_step_changes_state_and_returns_zero_win_reward():
     try:
         _, infos = env.reset(seed=123)
         before_index = get_state_index(env.game.state)
-        before_obs = _decode_single(env)["observation"]["numeric"].copy()
+        before_obs = _decode_single(env)["observation"].copy()
         _, rewards, terminals, truncations, infos = _step_single_valid(env, infos[0])
         structured = _decode_single(env)
 
         assert get_state_index(env.game.state) != before_index
-        assert not np.array_equal(structured["observation"]["numeric"], before_obs)
+        assert not np.array_equal(structured["observation"], before_obs)
         assert float(rewards[0]) == 0.0
         assert not bool(terminals[0])
         assert not bool(truncations[0])
@@ -512,7 +515,7 @@ def test_multi_agent_without_shared_critic_omits_critic_info():
         for info in infos:
             assert "critic_observation" not in info
             structured = _decode_multi_row(env, 0)
-            assert "critic" in structured
+            assert structured["observation"].shape == (env.critic_vector_dim,)
     finally:
         env.close()
 
@@ -581,12 +584,14 @@ def test_vectorized_puffer_envs_decode_batches():
         single_obs, _ = single_envs.reset(seed=[101, 202])
         single_driver = single_envs.driver_env
         single_dims = compute_single_agent_dims(num_players=2, map_type="BASE")
+        single_actor_indices = get_actor_indices_from_full(2, "BASE")
         single_actor, single_critic, single_masks = decode_puffer_batch(
             flat_obs=single_obs,
             obs_space=single_driver.env_single_observation_space,
             obs_dtype=single_driver.obs_dtype,
             actor_dim=single_dims["actor_dim"],
             critic_dim=single_dims["critic_dim"],
+            actor_indices=single_actor_indices,
         )
         assert single_actor.shape == (2, single_dims["actor_dim"])
         assert single_critic is not None
@@ -598,12 +603,14 @@ def test_vectorized_puffer_envs_decode_batches():
         actor_dim, board_shape, actor_numeric_dim = compute_multiagent_input_dim(2, "BASE")
         assert board_shape is not None
         critic_dim = compute_single_agent_dims(2, "BASE")["critic_dim"]
+        multi_actor_indices = get_actor_indices_from_full(2, "BASE")
         multi_actor, multi_critic, multi_masks = decode_puffer_batch(
             flat_obs=multi_obs,
             obs_space=multi_driver.env_single_observation_space,
             obs_dtype=multi_driver.obs_dtype,
             actor_dim=actor_dim,
             critic_dim=critic_dim,
+            actor_indices=multi_actor_indices,
         )
         assert multi_actor.shape == (2, actor_dim)
         assert multi_critic is not None
@@ -630,12 +637,14 @@ def _assert_observation_level_shapes(actor_level: str):
             "BASE",
             actor_observation_level=actor_level,
         )
+        single_actor_indices = get_actor_indices_from_full(2, "BASE", level=actor_level)
         single_actor, single_critic, _ = decode_puffer_batch(
             flat_obs=single_obs,
             obs_space=single_env.env_single_observation_space,
             obs_dtype=single_env.obs_dtype,
             actor_dim=single_dims["actor_dim"],
             critic_dim=single_dims["critic_dim"],
+            actor_indices=single_actor_indices,
         )
         assert single_actor.shape == (1, single_dims["actor_dim"])
         assert single_critic is not None
@@ -649,12 +658,14 @@ def _assert_observation_level_shapes(actor_level: str):
         )
         assert board_shape is not None
         critic_dim = single_dims["critic_dim"]
+        multi_actor_indices = get_actor_indices_from_full(2, "BASE", level=actor_level)
         multi_actor, multi_critic, _ = decode_puffer_batch(
             flat_obs=multi_obs,
             obs_space=multi_env.env_single_observation_space,
             obs_dtype=multi_env.obs_dtype,
             actor_dim=actor_dim,
             critic_dim=critic_dim,
+            actor_indices=multi_actor_indices,
         )
         assert multi_actor.shape == (2, actor_dim)
         assert multi_critic is not None

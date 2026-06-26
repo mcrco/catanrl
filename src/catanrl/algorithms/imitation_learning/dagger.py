@@ -245,6 +245,7 @@ def _collect_dagger_rollouts_vectorized(
             obs_dtype=obs_dtype,
             actor_dim=actor_dim,
             critic_dim=full_state_dim,
+            actor_indices=actor_observation_indices,
         )
         if critic_batch is None:
             raise RuntimeError("Expected critic observations while collecting DAgger rollouts.")
@@ -313,6 +314,7 @@ def _collect_dagger_rollouts_vectorized(
         obs_dtype=obs_dtype,
         actor_dim=actor_dim,
         critic_dim=full_state_dim,
+        actor_indices=actor_observation_indices,
     )
     if last_critic_states is None:
         raise RuntimeError("Expected critic observations when bootstrapping DAgger returns.")

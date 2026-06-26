@@ -12,6 +12,7 @@ from catanrl.envs.puffer.rollout_utils import flatten_puffer_observation, get_ac
 from catanrl.features.catanatron_utils import (
     full_game_to_features,
     game_to_features,
+    get_actor_indices_from_full,
 )
 from catanrl.utils.catanatron_action_space import to_action_space
 
@@ -96,7 +97,15 @@ def test_actor_and_critic_features_match_runtime_helpers():
     try:
         for state in states:
             observation = state["observation"]
-            actor_vec, critic_vec = flatten_puffer_observation(observation)
+            actor_indices = get_actor_indices_from_full(
+                state["num_players"],
+                state["map_type"],
+                level=env.actor_observation_level,
+            )
+            actor_vec, critic_vec = flatten_puffer_observation(
+                observation,
+                actor_indices=actor_indices,
+            )
             expected_actor = game_to_features(
                 state["game"],
                 state["p0_color"],
@@ -107,6 +116,7 @@ def test_actor_and_critic_features_match_runtime_helpers():
                 state["game"],
                 state["num_players"],
                 state["map_type"],
+                base_color=state["p0_color"],
             )
 
             assert np.array_equal(actor_vec, expected_actor)
