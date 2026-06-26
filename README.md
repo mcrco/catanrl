@@ -252,9 +252,11 @@ Warm-start from the matching Phase 1 DAgger run when the architecture matches
 from `dagger-d-m` (separate) or `dagger-d-shared` (shared). Full/full variants use
 a fresh run — Phase 1 DAgger used a public actor, so there is no compatible checkpoint.
 
-BASE map, 2 players, train vs `F`, shaped reward.
+BASE map, 2 players, train vs `F`, win reward.
 
-Training hparams:
+Training hparams use a conservative PPO trust-region baseline. Keep these fixed
+for the first sanity runs; the previous `4096` rollout / `10` epoch / `64` batch
+setup over-updated the warm-started policy immediately.
 
 
 | Parameter               | Value                                       |
@@ -262,13 +264,14 @@ Training hparams:
 | total timesteps         | 16_384_000                                  |
 | rollout steps / update  | 4096                                        |
 | PPO updates (total)     | 4000                                        |
-| train epochs / update   | 10                                          |
-| batch size              | 64                                          |
+| train epochs / update   | 1                                           |
+| batch size              | 2048                                        |
 | num envs                | 8                                           |
 | policy lr               | 1e-4                                        |
 | gamma / GAE λ           | 0.99 / 0.95                                 |
-| clip ε / entropy coef   | 0.2 / 0.01                                  |
-| reward                  | shaped                                      |
+| clip ε / entropy coef   | 0.2 / 0.001                                 |
+| max grad norm / KL stop | 0.5 / 0.01                                  |
+| reward                  | win                                         |
 | eval every N updates    | 400 (10 eval passes)                        |
 | save every N updates    | 400 (10 checkpoints)                        |
 | eval games / opponent   | 500 (250 first + 250 second; vs F)          |
@@ -279,15 +282,17 @@ Training hparams:
 SARL_HPARAMS=(
   --total-timesteps 16384000
   --rollout-steps 4096
-  --train-epochs 10
-  --batch-size 64
+  --train-epochs 1
+  --batch-size 2048
   --num-envs 8
   --policy-lr 1e-4
   --gamma 0.99
   --gae-lambda 0.95
   --clip-epsilon 0.2
-  --entropy-coef 0.01
-  --reward-function shaped
+  --entropy-coef 0.001
+  --max-grad-norm 0.5
+  --target-kl 0.01
+  --reward-function win
   --eval-every-updates 400
   --save-every-updates 400
   --fresh-eval-games-per-opponent 500
@@ -459,4 +464,3 @@ replaced once the new experiments finish.
 - best weights: [google drive link](https://drive.google.com/file/d/1C3c5Rk9Xlz2WTLCES4553aQwFK6XAOFp/view?usp=sharing)
 - DAgger: [wandb run](https://wandb.ai/myang2-california-institute-of-technology-caltech/catan-rl/runs/regwxcqf?nw=nwusermyang2)
 - PPO: [wandb run](https://wandb.ai/myang2-california-institute-of-technology-caltech/catan-rl/runs/rcew2svr?nw=nwusermyang2)
-
