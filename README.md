@@ -229,8 +229,8 @@ D-sep still needed for a matched `public / full` separate baseline.
 
 | ID       | config                            | network_mode | policy/critic mode | Status | W&B                                                                                           | Notes                                   |
 | -------- | --------------------------------- | ------------ | ------------------ | ------ | --------------------------------------------------------------------------------------------- | --------------------------------------- |
-| D-sep    | `xdim-flat-2p-d-m.yaml`           | separate     | public / full      | WIP    |                                                                                               | matched separate baseline at D-M size   |
-| D-shared | `xdim-flat-2p-public-shared.yaml` | shared       | public / public    | done   | [run](https://wandb.ai/myang2-california-institute-of-technology-caltech/catan/runs/xcy69zp3) | ~15h wall time vs ~16h for separate D-M |
+| D-sep    | `xdim-flat-2p-d-m.yaml`           | separate     | public / full      | done    | see D-M run                                                                                         | see D-M run   |
+| D-shared | `xdim-flat-2p-public-shared.yaml` | shared       | public / public    | done   | [run](https://wandb.ai/myang2-california-institute-of-technology-caltech/catan/runs/xcy69zp3) | comparable performance |
 
 
 ```bash
@@ -251,6 +251,16 @@ Warm-start from the matching Phase 1 DAgger run when the architecture matches
 (`--config` must agree with `--load-from-experiment`). Public-info variants warm-start
 from `dagger-d-m` (separate) or `dagger-d-shared` (shared). Full/full variants use
 a fresh run — Phase 1 DAgger used a public actor, so there is no compatible checkpoint.
+
+The shared public policy-value network has been difficult to train with PPO: the
+policy initially improves, then degrades substantially as training continues. This
+occurred in the [baseline run](https://wandb.ai/myang2-california-institute-of-technology-caltech/catan/runs/p98mf5xp),
+the [`value_coef=0.25` run](https://wandb.ai/myang2-california-institute-of-technology-caltech/catan/runs/lmwnpde8),
+and the [`policy_lr=5e-5`, `value_coef=0.25` run](https://wandb.ai/myang2-california-institute-of-technology-caltech/catan/runs/zouw7w02).
+The `P-sep-pub-pub` control below splits the `dagger-d-shared` policy-value
+checkpoint into independent public policy and public critic networks. This tests
+whether the failure is caused by the public critic information level rather than
+policy/value gradient interference in the shared backbone.
 
 BASE map, 2 players, train vs `F`, win reward.
 
@@ -303,12 +313,13 @@ SARL_HPARAMS=(
 ### SARL PPO vs ValueFunction
 
 
-| ID            | config                         | network  | policy/critic mode | warm-start       | Status | Win% vs F (1st/2nd) | Throughput | Notes                          |
-| ------------- | ------------------------------ | -------- | ------------------ | ---------------- | ------ | ------------------- | ---------- | ------------------------------ |
-| P-sep-full    | `xdim-flat-2p-full-sep.yaml`   | separate | full / full        | — (fresh)        | WIP    |                     |            | no matching DAgger checkpoint    |
-| P-sep-pub     | `xdim-flat-2p-d-m.yaml`        | separate | public / full      | `dagger-d-m`     | WIP    |                     |            |                                |
-| P-shared-full | `xdim-flat-2p-full-shared.yaml` | shared   | full / full        | — (fresh)        | WIP    |                     |            | no matching DAgger checkpoint    |
-| P-shared-pub  | `xdim-flat-2p-public-shared.yaml` | shared   | public / public    | `dagger-d-shared` | WIP    |                     |            |                                |
+| ID              | config                              | network  | policy/critic mode | warm-start              | Status | Win% vs F (1st/2nd) | W&B                                                                                          | Notes                                                          |
+| --------------- | ----------------------------------- | -------- | ------------------ | ----------------------- | ------ | ------------------- | -------------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
+| P-sep-full      | `xdim-flat-2p-full-sep.yaml`        | separate | full / full        | — (fresh)               | WIP    |                     |                                                                                              | no matching DAgger checkpoint                                  |
+| P-sep-pub       | `xdim-flat-2p-d-m.yaml`             | separate | public / full      | `dagger-d-m`            | done   | 57.2% / 56.8%       | [run](https://wandb.ai/myang2-california-institute-of-technology-caltech/catan/runs/5y5tqbjq) | privileged full-information critic                             |
+| P-sep-pub-pub   | `xdim-flat-2p-public-sep.yaml`      | separate | public / public    | `dagger-d-shared-split` | WIP    |                     |                                                                                              | tests whether public critic info, not sharing, causes collapse |
+| P-shared-full   | `xdim-flat-2p-full-shared.yaml`     | shared   | full / full        | — (fresh)               | WIP    |                     |                                                                                              | no matching DAgger checkpoint                                  |
+| P-shared-pub    | `xdim-flat-2p-public-shared.yaml`   | shared   | public / public    | `dagger-d-shared`       | issue  |                     | [runs above](https://wandb.ai/myang2-california-institute-of-technology-caltech/catan/runs/p98mf5xp) | improves early, then policy degrades substantially             |
 
 
 ```bash
@@ -319,6 +330,13 @@ uv run train-sarl-ppo --config configs/models/xdim-flat-2p-full-sep.yaml \
 uv run train-sarl-ppo --config configs/models/xdim-flat-2p-d-m.yaml \
   --load-from-experiment dagger-d-m --load-from-which best \
   --experiment-name p-sep-pub --opponents F --wandb --wandb-group sarl-ppo \
+  "${SARL_HPARAMS[@]}"
+
+# dagger-d-shared-split is a checkpoint-only conversion of dagger-d-shared:
+# its policy and critic receive independent copies of the shared backbone.
+uv run train-sarl-ppo --config configs/models/xdim-flat-2p-public-sep.yaml \
+  --load-from-experiment dagger-d-shared-split --load-from-which best \
+  --experiment-name p-sep-pub-pub --opponents F --wandb --wandb-group sarl-ppo \
   "${SARL_HPARAMS[@]}"
 
 uv run train-sarl-ppo --config configs/models/xdim-flat-2p-full-shared.yaml \
