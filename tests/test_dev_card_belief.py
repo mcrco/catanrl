@@ -229,6 +229,8 @@ def test_patch_full_features_matches_recomputed_full_features():
     game = make_1v1_game()
     set_player_dev_hand(game, Color.BLUE, KNIGHT=1)
     set_player_dev_hand(game, Color.RED, KNIGHT=2)
+    red_key = player_key(game.state, Color.RED)
+    game.state.player_state[f"{red_key}_VICTORY_POINTS"] = 4
     belief = DevCardBelief(game, Color.BLUE)
     colors = tuple(game.state.colors)
     names = get_full_numeric_feature_names(2, "BASE")

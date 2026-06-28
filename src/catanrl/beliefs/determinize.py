@@ -109,8 +109,9 @@ def patch_full_features(
 ) -> np.ndarray:
     """Return a copy of ``full_features`` with opponent dev slots set per hypothesis.
 
-    Only the opponent ``P{offset}_{DEV}_IN_HAND`` and ``P{offset}_ACTUAL_VPS``
-    numeric slots are modified; the board tail and all other features are shared
+    Only opponent numeric slots that depend on the hypothesized hand are
+    modified: ``P{offset}_{DEV}_IN_HAND``, ``P{offset}_{DEV}_PLAYABLE``, and
+    ``P{offset}_ACTUAL_VPS``. The board tail and all other features are shared
     from the perfect-information vector (legal in 1v1 where everything else is
     known). ``full_features`` must be a full-info vector built with
     ``base_color`` as perspective.
@@ -119,13 +120,24 @@ def patch_full_features(
     for color, hand in hypothesis.opponent_dev_hands.items():
         offset = _perspective_offset(colors, base_color, color)
         vp_index = numeric_name_to_index.get(f"P{offset}_ACTUAL_VPS")
-        if vp_index is not None:
-            old_vp = float(patched[vp_index])
+        public_vp_index = numeric_name_to_index.get(f"P{offset}_PUBLIC_VPS")
+        has_played_index = numeric_name_to_index.get(
+            f"P{offset}_HAS_PLAYED_DEVELOPMENT_CARD_IN_TURN"
+        )
+        has_played_dev = (
+            bool(patched[has_played_index]) if has_played_index is not None else False
+        )
         new_vp = float(hand.get(VICTORY_POINT, 0))
         for dev_card in DEVELOPMENT_CARDS:
             idx = numeric_name_to_index.get(f"P{offset}_{dev_card}_IN_HAND")
             if idx is not None:
                 patched[idx] = float(hand.get(dev_card, 0))
-        if vp_index is not None:
-            patched[vp_index] += new_vp - old_vp
+        for dev_card in _PLAYABLE_DEV_CARDS:
+            idx = numeric_name_to_index.get(f"P{offset}_{dev_card}_PLAYABLE")
+            if idx is not None:
+                patched[idx] = float(
+                    hand.get(dev_card, 0) > 0 and not has_played_dev
+                )
+        if vp_index is not None and public_vp_index is not None:
+            patched[vp_index] = patched[public_vp_index] + new_vp
     return patched
