@@ -108,7 +108,7 @@ def train(
             "network_mode='shared' requires actor and critic observation levels to match, "
             f"but got actor={actor_observation_level!r} and critic={critic_observation_level!r}. "
             "A shared backbone consumes a single observation; use network_mode='separate' for "
-            "asymmetric (e.g. privileged-critic) levels."
+            "asymmetric observation levels."
         )
     xdim_cnn_channels = list(xdim_cnn_channels)
     if not xdim_cnn_channels:

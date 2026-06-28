@@ -551,15 +551,9 @@ def apply_experiment_architecture_to_args(args: argparse.Namespace, exp: Experim
         _set_arg(args, "critic_mode", tc["critic_mode"])
     if "network_mode" in tc:
         _set_arg(args, "network_mode", tc["network_mode"])
-    elif "critic_mode" in tc and tc["critic_mode"] in ("shared", "privileged"):
-        _set_arg(
-            args,
-            "network_mode",
-            "shared" if tc["critic_mode"] == "shared" else "separate",
-        )
     elif policy.kind == KIND_POLICY_VALUE:
         _set_arg(args, "network_mode", "shared")
-    elif critic is None and policy.kind != KIND_POLICY_VALUE:
+    elif critic is not None:
         _set_arg(args, "network_mode", "separate")
 
     if policy.kind == KIND_POLICY_VALUE and critic is None:
@@ -936,8 +930,6 @@ def architecture_preset_from_experiment(exp: Experiment) -> "ArchitecturePreset"
     if network_mode is None:
         if policy.kind == KIND_POLICY_VALUE:
             network_mode = "shared"
-        elif tc.get("critic_mode") in ("shared", "privileged"):
-            network_mode = "shared" if tc["critic_mode"] == "shared" else "separate"
         elif critic is not None:
             network_mode = "separate"
         else:

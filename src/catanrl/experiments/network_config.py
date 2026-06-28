@@ -27,7 +27,7 @@ def add_observation_network_arguments(
         choices=OBSERVATION_LEVEL_CHOICES,
         help=(
             "Policy (actor) information level: private, public (1v1 opponent resources), "
-            "or full/privileged."
+            "or full."
         ),
     )
     parser.add_argument(
@@ -37,7 +37,7 @@ def add_observation_network_arguments(
         choices=OBSERVATION_LEVEL_CHOICES,
         help=(
             "Critic (value) information level: private, public (1v1 opponent resources), "
-            "or full/privileged."
+            "or full."
         ),
     )
     parser.add_argument(

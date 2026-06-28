@@ -98,7 +98,7 @@ def get_observation_numeric_feature_names(
 ) -> Tuple[str, ...]:
     """Return numeric feature names for the selected information level.
 
-    Ordering always follows the full privileged numeric vector so these names can
+    Ordering always follows the full-information numeric vector so these names can
     be used to index directly into `full_game_to_features`.
     """
     _validate_observation_level(level, context="actor_observation_level")

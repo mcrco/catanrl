@@ -316,7 +316,7 @@ SARL_HPARAMS=(
 | ID              | config                              | network  | policy/critic mode | warm-start              | Status | Win% vs F (1st/2nd) | W&B                                                                                          | Notes                                                          |
 | --------------- | ----------------------------------- | -------- | ------------------ | ----------------------- | ------ | ------------------- | -------------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
 | P-sep-full      | `xdim-flat-2p-full-sep.yaml`        | separate | full / full        | — (fresh)               | WIP    |                     |                                                                                              | no matching DAgger checkpoint                                  |
-| P-sep-pub       | `xdim-flat-2p-d-m.yaml`             | separate | public / full      | `dagger-d-m`            | done   | 57.2% / 56.8%       | [run](https://wandb.ai/myang2-california-institute-of-technology-caltech/catan/runs/5y5tqbjq) | privileged full-information critic                             |
+| P-sep-pub       | `xdim-flat-2p-d-m.yaml`             | separate | public / full      | `dagger-d-m`            | done   | 57.2% / 56.8%       | [run](https://wandb.ai/myang2-california-institute-of-technology-caltech/catan/runs/5y5tqbjq) | asymmetric policy/critic observations                          |
 | P-sep-pub-pub   | `xdim-flat-2p-public-sep.yaml`      | separate | public / public    | `dagger-d-shared-split` | WIP    |                     |                                                                                              | tests whether public critic info, not sharing, causes collapse |
 | P-shared-full   | `xdim-flat-2p-full-shared.yaml`     | shared   | full / full        | — (fresh)               | WIP    |                     |                                                                                              | no matching DAgger checkpoint                                  |
 | P-shared-pub    | `xdim-flat-2p-public-shared.yaml`   | shared   | public / public    | `dagger-d-shared`       | issue  |                     | [runs above](https://wandb.ai/myang2-california-institute-of-technology-caltech/catan/runs/p98mf5xp) | improves early, then policy degrades substantially             |
@@ -367,7 +367,7 @@ public info (`NNPolicyPlayer`), no belief needed.
 | M-shared-pub  | shared   | public / public    | direct        | WIP    |                     | ≈2x faster                        |
 | M-sep-full    | separate | full / full        | belief-avg    | WIP    |                     |                                   |
 | M-shared-full | shared   | full / full        | belief-avg    | WIP    |                     | ≈2x faster                        |
-| M-sep-priv    | separate | public / full      | direct        | WIP    |                     | privileged critic (separate only) |
+| M-sep-pub-full | separate | public / full      | direct        | WIP    |                     | asymmetric observations           |
 
 
 ➡ Two questions to settle here: (1) shared ≈ separate? if so, lock in shared

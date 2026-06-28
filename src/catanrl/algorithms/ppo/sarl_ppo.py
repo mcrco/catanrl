@@ -60,7 +60,7 @@ def train(
     xdim_critic_fusion_hidden_dim: int | None = None,
     policy_hidden_dims: Sequence[int] = (512, 512),
     critic_hidden_dims: Sequence[int] | None = None,
-    critic_mode: Literal["shared", "privileged"] = "shared",
+    network_mode: Literal["shared", "separate"] = "shared",
     load_weights: str | None = None,
     load_critic_weights: str | None = None,
     total_timesteps: int = 1_000_000,
@@ -100,7 +100,7 @@ def train(
     resume_state: dict | None = None,
     training_state_path: str | None = None,
 ):
-    """Train SARL PPO with optional privileged critic.
+    """Train SARL PPO with a shared or separate policy/value backbone.
 
     When ``resume_state`` is provided the run continues in place: model weights,
     optimizer/scheduler state and step counters are restored, and
@@ -112,11 +112,11 @@ def train(
         raise ValueError("total_timesteps must be > 0")
     if num_envs <= 0:
         raise ValueError("num_envs must be > 0")
-    if critic_mode not in ("shared", "privileged"):
-        raise ValueError(f"Unknown critic_mode '{critic_mode}'")
-    uses_privileged_critic = critic_mode == "privileged"
+    if network_mode not in ("shared", "separate"):
+        raise ValueError(f"Unknown network_mode '{network_mode}'")
+    uses_separate_critic = network_mode == "separate"
     effective_critic_observation_level = (
-        critic_observation_level if uses_privileged_critic else actor_observation_level
+        critic_observation_level if uses_separate_critic else actor_observation_level
     )
     critic_lr = policy_lr if critic_lr is None else critic_lr
     critic_hidden_dims = tuple(
@@ -170,7 +170,7 @@ def train(
     print(f"Opponents: {[repr(o) for o in opponents]}")
     print(
         f"Backbone: {backbone_type} | Model type: {model_type} | "
-        f"Critic mode: {critic_mode} | Actor observation: {actor_observation_level} | "
+        f"Network mode: {network_mode} | Actor observation: {actor_observation_level} | "
         f"Critic observation: {effective_critic_observation_level}"
     )
 
@@ -207,7 +207,7 @@ def train(
         xdim_fusion_hidden_dim=xdim_policy_fusion_hidden_dim,
     )
 
-    if uses_privileged_critic:
+    if uses_separate_critic:
         if model_type == "flat":
             policy_model = build_flat_policy_network(
                 backbone_config=policy_backbone_config, num_actions=action_space_size
@@ -252,7 +252,7 @@ def train(
     if load_weights and os.path.exists(load_weights):
         print(f"Loading policy weights from: {load_weights}")
         state_dict = torch.load(load_weights, map_location=device)
-        if uses_privileged_critic:
+        if uses_separate_critic:
             missing_keys, unexpected_keys = policy_model.load_state_dict(state_dict, strict=False)
             if missing_keys:
                 print(f"  Missing keys while loading policy weights: {missing_keys}")
@@ -262,7 +262,7 @@ def train(
             policy_model.load_state_dict(state_dict)
         print("  Policy weights loaded successfully.")
 
-    if uses_privileged_critic and load_critic_weights and os.path.exists(load_critic_weights):
+    if uses_separate_critic and load_critic_weights and os.path.exists(load_critic_weights):
         print(f"Loading critic weights from: {load_critic_weights}")
         assert critic_model is not None
         critic_state_dict = torch.load(load_critic_weights, map_location=device)
@@ -279,9 +279,9 @@ def train(
         actor_states: torch.Tensor,
         critic_states: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if uses_privileged_critic:
+        if uses_separate_critic:
             if critic_states is None:
-                raise ValueError("critic_states must be provided when using privileged critic.")
+                raise ValueError("critic_states must be provided when using a separate critic.")
             assert critic_model is not None
             return critic_model(critic_states).squeeze(-1)
 
@@ -293,7 +293,7 @@ def train(
             raise ValueError(f"Unknown model_type: {model_type}")
         return values.squeeze(-1)
 
-    if uses_privileged_critic:
+    if uses_separate_critic:
         assert critic_model is not None
         value_model: torch.nn.Module = critic_model
     else:
@@ -356,7 +356,7 @@ def train(
     if critic_model is not None:
         critic_model.eval()
 
-    if uses_privileged_critic:
+    if uses_separate_critic:
         buffer = CentralCriticExperienceBuffer(
             num_rollouts=rollout_steps,
             actor_state_dim=actor_input_dim,
@@ -427,9 +427,9 @@ def train(
             obs_space=obs_space,
             obs_dtype=obs_dtype,
             actor_dim=actor_input_dim,
-            critic_dim=critic_input_dim if uses_privileged_critic else None,
+            critic_dim=critic_input_dim if uses_separate_critic else None,
             actor_indices=actor_observation_indices,
-            critic_indices=critic_observation_indices if uses_privileged_critic else None,
+            critic_indices=critic_observation_indices if uses_separate_critic else None,
         )
         return actor_batch, critic_batch, action_masks
 
@@ -495,9 +495,9 @@ def train(
             env_episode_rewards += rewards
             env_episode_lengths += 1
 
-            if uses_privileged_critic:
+            if uses_separate_critic:
                 if critic_states is None:
-                    raise RuntimeError("Expected critic observations in privileged critic mode.")
+                    raise RuntimeError("Expected critic observations with a separate critic.")
                 cast(CentralCriticExperienceBuffer, buffer).add_batch(
                     states,
                     critic_states,

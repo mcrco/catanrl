@@ -77,7 +77,7 @@ def main():
         "--critic-lr",
         type=float,
         default=None,
-        help="Critic learning rate in privileged mode (default: use --policy-lr)",
+        help="Critic learning rate with separate networks (default: use --policy-lr)",
     )
     parser.add_argument("--gamma", type=float, default=0.99, help="Discount factor (default: 0.99)")
     parser.add_argument(
@@ -307,7 +307,7 @@ def main():
         xdim_critic_fusion_hidden_dim=arch.xdim_critic_fusion_hidden_dim,
         policy_hidden_dims=arch.policy_hidden_dims,
         critic_hidden_dims=arch.critic_hidden_dims,
-        critic_mode="privileged" if arch.network_mode == "separate" else "shared",
+        network_mode=arch.network_mode,
         load_weights=warm_start.checkpoints.policy if warm_start else None,
         load_critic_weights=warm_start.checkpoints.critic if warm_start else None,
         total_timesteps=args.total_timesteps,

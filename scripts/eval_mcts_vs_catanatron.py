@@ -244,7 +244,7 @@ def main():
         default="private",
         help=(
             "Information level used by the policy network: private, public "
-            "(1v1 opponent resources), or full/privileged."
+            "(1v1 opponent resources), or full."
         ),
     )
     parser.add_argument(
@@ -254,7 +254,7 @@ def main():
         default="full",
         help=(
             "Information level used by the critic network: private, public "
-            "(1v1 opponent resources), or full/privileged."
+            "(1v1 opponent resources), or full."
         ),
     )
     parser.add_argument(
