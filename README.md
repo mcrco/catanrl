@@ -374,6 +374,68 @@ public info (`NNPolicyPlayer`), no belief needed.
 (≈2x faster); (2) which real-game recipe wins — public-direct vs full-belief?
 Carry the winning arch + recipe into AlphaZero.
 
+Training hparams:
+
+| Parameter                       | Value                                      |
+| ------------------------------- | ------------------------------------------ |
+| total environment timesteps     | 16_384_000                                 |
+| rollout steps / environment     | 512                                        |
+| environment transitions/update  | 4_096                                      |
+| agent samples / update          | 8_192 (2 players × 4_096 transitions)      |
+| PPO updates (total)             | 4_000                                      |
+| train epochs / update           | 1                                          |
+| batch size                      | 2_048                                      |
+| num envs                        | 8                                          |
+| policy lr / critic lr           | 1e-4 / 1e-4                                |
+| gamma / GAE λ                   | 0.99 / 0.95                                |
+| clip ε / value coef             | 0.2 / 0.5                                  |
+| entropy coef / activity coef    | 0.001 / 0.0                                |
+| max grad norm / KL stop         | 0.5 / 0.01                                 |
+| reward                          | shaped                                     |
+| action selection                | stochastic                                 |
+| train seed                      | 42                                         |
+| eval every N updates            | 400 (10 eval passes)                       |
+| save every N updates            | 400                                        |
+| fresh eval games / opponent     | 500                                        |
+| fixed-seed eval games / opponent | 500                                       |
+| fixed-seed eval seed            | 42                                         |
+| head-to-head eval games         | 0 (disabled)                               |
+| metric window                   | 200                                        |
+
+```bash
+MARL_HPARAMS=(
+  --total-timesteps 16384000
+  --rollout-steps 512
+  --train-epochs 1
+  --batch-size 2048
+  --num-envs 8
+  --policy-lr 1e-4
+  --critic-lr 1e-4
+  --gamma 0.99
+  --gae-lambda 0.95
+  --clip-epsilon 0.2
+  --value-coef 0.5
+  --entropy-coef 0.001
+  --activity-coef 0.0
+  --max-grad-norm 0.5
+  --target-kl 0.01
+  --reward-function shaped
+  --seed 42
+  --eval-every-updates 400
+  --save-every-updates 400
+  --fresh-eval-games-per-opponent 500
+  --trend-eval-games-per-opponent 500
+  --trend-eval-seed 42
+  --h2h-eval-games 0
+  --metric-window 200
+)
+
+uv run train-marl-cc --config configs/models/xdim-flat-2p-d-m.yaml \
+  --load-from-experiment dagger-d-m --load-from-which best \
+  --experiment-name m-sep-pub-full --wandb --wandb-group marl-ppo \
+  "${MARL_HPARAMS[@]}"
+```
+
 ---
 
 ## Phase 2.5 — Eval experiments (test-time only, no extra training)
