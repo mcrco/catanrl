@@ -442,7 +442,9 @@ def _train_on_dataset(
                 non_single_mask = ~is_single_action
                 if uses_shared_network:
                     policy_optimizer.zero_grad()
-                    policy_logits = policy_agent.policy_logits(actor_features)
+                    policy_logits, value_pred = policy_agent.policy_logits_and_values(
+                        actor_features
+                    )
                     masked_policy_logits, _ = mask_action_logits(
                         policy_logits,
                         action_masks.detach().cpu().numpy(),
@@ -456,12 +458,6 @@ def _train_on_dataset(
                     else:
                         policy_loss = torch.tensor(0.0, device=device)
 
-                    _, value_pred = forward_policy_value(
-                        policy_agent.model,
-                        None,
-                        actor_features,
-                        model_type,
-                    )
                     value_loss = F.mse_loss(value_pred, returns)
                     (policy_loss + value_loss).backward()
                     torch.nn.utils.clip_grad_norm_(

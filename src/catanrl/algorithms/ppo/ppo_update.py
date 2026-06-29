@@ -203,11 +203,15 @@ def run_ppo_update(
             batch_valid_action_masks = valid_action_masks[batch_indices]
             batch_is_decision = is_decision[batch_indices]
 
-            log_probs, entropy, policy_logits = agent.evaluate_actions(
-                batch_actor_states, batch_actions, batch_valid_action_masks
-            )
-
-            values = predict_values(batch_actor_states, batch_critic_states)
+            if uses_separate_critic:
+                log_probs, entropy, policy_logits = agent.evaluate_actions(
+                    batch_actor_states, batch_actions, batch_valid_action_masks
+                )
+                values = predict_values(batch_actor_states, batch_critic_states)
+            else:
+                log_probs, entropy, policy_logits, values = agent.evaluate_actions_and_values(
+                    batch_actor_states, batch_actions, batch_valid_action_masks
+                )
 
             decision_count = int(np.sum(batch_is_decision))
             if decision_count > 0:

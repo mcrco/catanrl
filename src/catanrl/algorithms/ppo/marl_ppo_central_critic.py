@@ -521,19 +521,22 @@ def train(
             while global_step < target_timesteps:
                 actor_batch, critic_batch, valid_masks = decode_observations(observations)
                 actor_tensor = torch.from_numpy(actor_batch).float().to(device)
-                actions, log_probs, _ = policy_agent.select_actions_batch(
-                    actor_tensor, valid_masks, deterministic=deterministic_policy
-                )
-                played_action_buffer.append(actions)
-
-                critic_inputs = torch.from_numpy(critic_batch).float().to(device)
-                value_model.eval()
-                with torch.no_grad():
-                    if uses_shared_network:
-                        values = predict_values(actor_tensor).detach().cpu().numpy()
-                    else:
+                if uses_shared_network:
+                    actions, log_probs, _, values = (
+                        policy_agent.select_actions_and_values_batch(
+                            actor_tensor, valid_masks, deterministic=deterministic_policy
+                        )
+                    )
+                else:
+                    actions, log_probs, _ = policy_agent.select_actions_batch(
+                        actor_tensor, valid_masks, deterministic=deterministic_policy
+                    )
+                    critic_inputs = torch.from_numpy(critic_batch).float().to(device)
+                    value_model.eval()
+                    with torch.no_grad():
                         values = predict_values(actor_tensor, critic_inputs).detach().cpu().numpy()
-                value_model.train()
+                    value_model.train()
+                played_action_buffer.append(actions)
 
                 next_observations, rewards, terminations, truncations, infos = envs.step(actions)
                 rewards = rewards.astype(np.float32)

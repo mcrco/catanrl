@@ -475,20 +475,27 @@ def train(
                 if critic_states is not None
                 else None
             )
-            actions, log_probs, _ = agent.select_actions_batch(
-                states_t,
-                valid_action_masks,
-                deterministic=deterministic_policy,
-            )
-            played_action_buffer.append(actions)
-            with torch.no_grad():
-                values = (
-                    predict_values(states_t, critic_states_t)
-                    .detach()
-                    .cpu()
-                    .numpy()
-                    .astype(np.float32, copy=False)
+            if uses_separate_critic:
+                actions, log_probs, _ = agent.select_actions_batch(
+                    states_t,
+                    valid_action_masks,
+                    deterministic=deterministic_policy,
                 )
+                with torch.no_grad():
+                    values = (
+                        predict_values(states_t, critic_states_t)
+                        .detach()
+                        .cpu()
+                        .numpy()
+                        .astype(np.float32, copy=False)
+                    )
+            else:
+                actions, log_probs, _, values = agent.select_actions_and_values_batch(
+                    states_t,
+                    valid_action_masks,
+                    deterministic=deterministic_policy,
+                )
+            played_action_buffer.append(actions)
             next_observations, rewards, terminations, truncations, infos = envs.step(actions)
 
             dones = np.logical_or(terminations, truncations)

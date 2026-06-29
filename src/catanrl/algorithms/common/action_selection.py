@@ -55,6 +55,21 @@ class PolicyAgent:
             return self.model.get_flat_action_logits(action_type_logits, param_logits)
         raise ValueError(f"Unknown model_type '{self.model_type}'")
 
+    def policy_logits_and_values(
+        self, states: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Return flat policy logits and values from one joint-model forward."""
+        if not isinstance(self.model, PolicyValueNetworkWrapper):
+            raise ValueError("policy_logits_and_values requires a joint policy-value model.")
+        if self.model_type == "flat":
+            policy_logits, values = self.model(states)
+            return policy_logits, values.view(-1)
+        if self.model_type == "hierarchical":
+            action_type_logits, param_logits, values = self.model(states)
+            policy_logits = self.model.get_flat_action_logits(action_type_logits, param_logits)
+            return policy_logits, values.view(-1)
+        raise ValueError(f"Unknown model_type '{self.model_type}'")
+
     def select_action(
         self,
         state_vec: np.ndarray,
@@ -97,24 +112,73 @@ class PolicyAgent:
         try:
             with torch.no_grad():
                 policy_logits = self.policy_logits(states)
-                raw_argmax_tensor = torch.argmax(policy_logits, dim=-1)
-                masked_logits, _ = mask_action_logits(
-                    policy_logits, valid_action_masks, clamp_range=clamp_range
-                )
-                dist = torch.distributions.Categorical(logits=masked_logits)
-                if deterministic:
-                    action_tensor = torch.argmax(masked_logits, dim=-1)
-                else:
-                    action_tensor = dist.sample()
-                log_prob_tensor = dist.log_prob(action_tensor)
-                return (
-                    action_tensor.detach().cpu().numpy().astype(np.int64, copy=False),
-                    log_prob_tensor.detach().cpu().numpy().astype(np.float32, copy=False),
-                    raw_argmax_tensor.detach().cpu().numpy().astype(np.int64, copy=False),
+                return self.select_actions_from_logits_batch(
+                    policy_logits,
+                    valid_action_masks,
+                    deterministic=deterministic,
+                    clamp_range=clamp_range,
                 )
         finally:
             if was_training:
                 self.model.train()
+
+    def select_actions_and_values_batch(
+        self,
+        states: torch.Tensor,
+        valid_action_masks: npt.NDArray[np.bool_] | np.ndarray,
+        deterministic: bool = False,
+        clamp_range: Tuple[float, float] | None = None,
+    ) -> Tuple[
+        npt.NDArray[np.int64],
+        npt.NDArray[np.float32],
+        npt.NDArray[np.int64],
+        npt.NDArray[np.float32],
+    ]:
+        """Select actions and predict values with one joint-model forward."""
+        was_training = self.model.training
+        self.model.eval()
+        try:
+            with torch.no_grad():
+                policy_logits, values = self.policy_logits_and_values(states)
+                actions, log_probs, raw_argmax = self.select_actions_from_logits_batch(
+                    policy_logits,
+                    valid_action_masks,
+                    deterministic=deterministic,
+                    clamp_range=clamp_range,
+                )
+                return (
+                    actions,
+                    log_probs,
+                    raw_argmax,
+                    values.detach().cpu().numpy().astype(np.float32, copy=False),
+                )
+        finally:
+            if was_training:
+                self.model.train()
+
+    def select_actions_from_logits_batch(
+        self,
+        policy_logits: torch.Tensor,
+        valid_action_masks: npt.NDArray[np.bool_] | np.ndarray,
+        deterministic: bool = False,
+        clamp_range: Tuple[float, float] | None = None,
+    ) -> Tuple[npt.NDArray[np.int64], npt.NDArray[np.float32], npt.NDArray[np.int64]]:
+        """Select masked actions from precomputed flat policy logits."""
+        raw_argmax_tensor = torch.argmax(policy_logits, dim=-1)
+        masked_logits, _ = mask_action_logits(
+            policy_logits, valid_action_masks, clamp_range=clamp_range
+        )
+        dist = torch.distributions.Categorical(logits=masked_logits)
+        if deterministic:
+            action_tensor = torch.argmax(masked_logits, dim=-1)
+        else:
+            action_tensor = dist.sample()
+        log_prob_tensor = dist.log_prob(action_tensor)
+        return (
+            action_tensor.detach().cpu().numpy().astype(np.int64, copy=False),
+            log_prob_tensor.detach().cpu().numpy().astype(np.float32, copy=False),
+            raw_argmax_tensor.detach().cpu().numpy().astype(np.int64, copy=False),
+        )
 
     def evaluate_actions(
         self,
@@ -125,6 +189,32 @@ class PolicyAgent:
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Return action log-probs, entropies, and raw logits for PPO updates."""
         policy_logits = self.policy_logits(states)
+        return self.evaluate_actions_from_logits(
+            policy_logits, actions, valid_action_masks, clamp_range
+        )
+
+    def evaluate_actions_and_values(
+        self,
+        states: torch.Tensor,
+        actions: torch.Tensor,
+        valid_action_masks: npt.NDArray[np.bool_] | np.ndarray,
+        clamp_range: Tuple[float, float] | None = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Evaluate actions and values with one joint-model forward."""
+        policy_logits, values = self.policy_logits_and_values(states)
+        log_probs, entropy, policy_logits = self.evaluate_actions_from_logits(
+            policy_logits, actions, valid_action_masks, clamp_range
+        )
+        return log_probs, entropy, policy_logits, values
+
+    def evaluate_actions_from_logits(
+        self,
+        policy_logits: torch.Tensor,
+        actions: torch.Tensor,
+        valid_action_masks: npt.NDArray[np.bool_] | np.ndarray,
+        clamp_range: Tuple[float, float] | None = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Evaluate actions from precomputed flat policy logits."""
         masked_logits, _ = mask_action_logits(
             policy_logits, valid_action_masks, clamp_range=clamp_range
         )
