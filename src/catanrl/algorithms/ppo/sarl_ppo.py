@@ -684,9 +684,12 @@ def train(
                     "train/clipfrac": metrics.get("clipfrac", 0.0),
                     "train/ratio_mean": metrics.get("ratio_mean", 0.0),
                     "train/ratio_std": metrics.get("ratio_std", 0.0),
+                    "train/grad_norm": metrics["grad_norm"],
                     "train/early_stop_kl": metrics.get("early_stop", 0.0),
                     "train/single_action_fraction": metrics.get("single_action_fraction", 0.0),
                 }
+                if critic_model is not None:
+                    log_dict["train/critic_grad_norm"] = metrics["critic_grad_norm"]
                 wandb.log(log_dict, step=global_step)
 
                 if save_path and ppo_update_count % save_every_updates == 0:

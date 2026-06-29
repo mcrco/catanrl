@@ -641,7 +641,13 @@ def train(
                             "train/clipfrac": metrics["clipfrac"],
                             "train/ratio_mean": metrics["ratio_mean"],
                             "train/ratio_std": metrics["ratio_std"],
+                            "train/grad_norm": metrics["grad_norm"],
                             "train/early_stop_kl": metrics["early_stop"],
+                            **(
+                                {"train/critic_grad_norm": metrics["critic_grad_norm"]}
+                                if critic_optimizer is not None
+                                else {}
+                            ),
                         },
                         step=global_step,
                     )

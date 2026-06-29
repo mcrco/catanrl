@@ -31,6 +31,8 @@ def _empty_metrics(
         "clipfrac": 0.0,
         "ratio_mean": 0.0,
         "ratio_std": 0.0,
+        "grad_norm": 0.0,
+        "critic_grad_norm": 0.0,
         "num_updates": float(num_updates),
         "early_stop": 1.0 if early_stop else 0.0,
     }
@@ -173,6 +175,10 @@ def run_ppo_update(
     total_clipfrac = 0.0
     total_ratio_mean = 0.0
     total_ratio_std = 0.0
+    total_grad_norm = 0.0
+    total_critic_grad_norm = 0.0
+    grad_norm_updates = 0
+    critic_grad_norm_updates = 0
     n_updates = 0
     early_stop = False
 
@@ -239,23 +245,31 @@ def run_ppo_update(
                     (
                         policy_loss + entropy_coef * entropy_loss + activity_coef * activity_loss
                     ).backward()
-                    torch.nn.utils.clip_grad_norm_(agent.model.parameters(), max_grad_norm)
+                    grad_norm = torch.nn.utils.clip_grad_norm_(
+                        agent.model.parameters(), max_grad_norm
+                    )
                     if _has_nan_grad(agent.model.parameters()):
                         if warn_on_empty:
                             print("  WARNING: NaN policy gradients detected! Skipping batch update.")
                         policy_optimizer.zero_grad()
                         continue
                     policy_optimizer.step()
+                    total_grad_norm += float(grad_norm.item())
+                    grad_norm_updates += 1
 
                 critic_optimizer.zero_grad()
                 (value_coef * value_loss).backward()
-                torch.nn.utils.clip_grad_norm_(value_model.parameters(), max_grad_norm)
+                critic_grad_norm = torch.nn.utils.clip_grad_norm_(
+                    value_model.parameters(), max_grad_norm
+                )
                 if _has_nan_grad(value_model.parameters()):
                     if warn_on_empty:
                         print("  WARNING: NaN critic gradients detected! Skipping batch update.")
                     critic_optimizer.zero_grad()
                     continue
                 critic_optimizer.step()
+                total_critic_grad_norm += float(critic_grad_norm.item())
+                critic_grad_norm_updates += 1
 
                 loss = (
                     policy_loss
@@ -272,13 +286,15 @@ def run_ppo_update(
                 )
                 policy_optimizer.zero_grad()
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(agent.model.parameters(), max_grad_norm)
+                grad_norm = torch.nn.utils.clip_grad_norm_(agent.model.parameters(), max_grad_norm)
                 if _has_nan_grad(agent.model.parameters()):
                     if warn_on_empty:
                         print("  WARNING: NaN gradients detected! Skipping batch update.")
                     policy_optimizer.zero_grad()
                     continue
                 policy_optimizer.step()
+                total_grad_norm += float(grad_norm.item())
+                grad_norm_updates += 1
 
             total_approx_kl += approx_kl
             total_clipfrac += clipfrac
@@ -315,6 +331,8 @@ def run_ppo_update(
         "clipfrac": total_clipfrac / n_updates,
         "ratio_mean": total_ratio_mean / n_updates,
         "ratio_std": total_ratio_std / n_updates,
+        "grad_norm": total_grad_norm / max(1, grad_norm_updates),
+        "critic_grad_norm": total_critic_grad_norm / max(1, critic_grad_norm_updates),
         "num_updates": float(n_updates),
         "early_stop": 1.0 if early_stop else 0.0,
     }
