@@ -426,7 +426,7 @@ MARL_HPARAMS=(
   --fresh-eval-games-per-opponent 500
   --trend-eval-games-per-opponent 500
   --trend-eval-seed 42
-  --h2h-eval-games 0
+  --h2h-eval-games 500
   --metric-window 200
 )
 
