@@ -98,7 +98,7 @@ def main():
         "--h2h-eval-games",
         type=int,
         default=0,
-        help="Optional current-vs-champion head-to-head games per eval pass (0 disables).",
+        help="Current-vs-champion games per seat (first and second) per eval pass (0 disables).",
     )
     parser.add_argument(
         "--h2h-eval-seed",

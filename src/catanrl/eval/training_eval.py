@@ -162,9 +162,6 @@ def eval_policy_against_champion(
         sum(turns) / len(turns) if turns else 0.0
     )
     metrics["eval_h2h/games"] = float(num_games)
-    metrics["eval_h2h/seat_first"] = float(nn_seat == "first")
-    metrics["eval_h2h/seat_second"] = float(nn_seat == "second")
-    metrics["eval_h2h/seat_random"] = float(nn_seat == "random")
 
     if log_to_wandb and global_step is not None:
         wandb.log(metrics, step=global_step)

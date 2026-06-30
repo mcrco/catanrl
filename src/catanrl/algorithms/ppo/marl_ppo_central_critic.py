@@ -417,20 +417,20 @@ def train(
         champion_policy_path = None
         if save_path:
             champion_policy_path = os.path.join(save_path, "policy_best.pt")
-        champion_available = bool(
-            h2h_eval_games > 0 and champion_policy_path and os.path.exists(champion_policy_path)
-        )
-        h2h_log["eval_h2h/champion_available"] = float(champion_available)
         if h2h_eval_games > 0:
-            h2h_log["eval_h2h/games"] = float(h2h_eval_games)
-            h2h_log["eval_h2h/seed"] = h2h_eval_seed if h2h_eval_seed is not None else 0
-        wandb.log({**fresh_log, **trend_log, **h2h_log}, step=global_step)
+            h2h_log["eval_h2h/games"] = 0.0
 
-        if champion_available and champion_policy_path is not None:
-            h2h_metrics_all: Dict[str, float] = {}
+        if (
+            h2h_eval_games > 0
+            and champion_policy_path is not None
+            and os.path.exists(champion_policy_path)
+        ):
+            total_games = 0.0
+            weighted_wins = 0.0
+            weighted_turns = 0.0
             base_h2h_seed = h2h_eval_seed if h2h_eval_seed is not None else 0
-            for seat_mode in ("first", "second", "random"):
-                h2h_metrics = eval_policy_against_champion(
+            for seat_mode in ("first", "second"):
+                seat_metrics = eval_policy_against_champion(
                     policy_model=policy_model,
                     model_type=model_type,
                     map_type=map_type,
@@ -447,16 +447,22 @@ def train(
                     nn_seat=seat_mode,
                     actor_observation_level=actor_observation_level,
                 )
-                prefix = f"eval_h2h_{seat_mode}"
-                for key, value in h2h_metrics.items():
-                    suffix = key.split("/", 1)[1] if "/" in key else key
-                    h2h_metrics_all[f"{prefix}/{suffix}"] = value
-                h2h_metrics_all[f"{prefix}/seed"] = base_h2h_seed
-                h2h_metrics_all[f"{prefix}/games"] = float(h2h_eval_games)
-            if h2h_metrics_all:
-                wandb.log(h2h_metrics_all, step=global_step)
+                games = seat_metrics["eval_h2h/games"]
+                win_rate = seat_metrics["eval_h2h/win_rate_vs_champion"]
+                avg_turns = seat_metrics["eval_h2h/avg_turns_vs_champion"]
+                h2h_log[f"eval_h2h/win_rate_vs_champion_{seat_mode}"] = win_rate
+                h2h_log[f"eval_h2h/avg_turns_vs_champion_{seat_mode}"] = avg_turns
+                total_games += games
+                weighted_wins += win_rate * games
+                weighted_turns += avg_turns * games
+
+            h2h_log["eval_h2h/games"] = total_games
+            h2h_log["eval_h2h/win_rate_vs_champion"] = weighted_wins / total_games
+            h2h_log["eval_h2h/avg_turns_vs_champion"] = weighted_turns / total_games
         elif h2h_eval_games > 0:
             print("  → Skipping H2H eval (no champion checkpoint available yet)")
+
+        wandb.log({**fresh_log, **trend_log, **h2h_log}, step=global_step)
 
         if save_path:
             eval_win_rate = None
