@@ -453,6 +453,8 @@ def run_policy_h2h_eval_vectorized(
     deterministic: bool = True,
     nn_seat: SeatOption = "first",
     actor_observation_level: ActorObservationLevel = "private",
+    champion_model_type: Optional[str] = None,
+    champion_actor_observation_level: Optional[ActorObservationLevel] = None,
     critic_observation_level: CriticObservationLevel = "full",
     seed: Optional[int] = None,
     progress_callback: Optional[Callable[[int], None]] = None,
@@ -475,6 +477,10 @@ def run_policy_h2h_eval_vectorized(
     rng = np.random.default_rng(seed)
     policy_model.eval()
     champion_model.eval()
+    champion_model_type = champion_model_type or model_type
+    champion_actor_observation_level = (
+        champion_actor_observation_level or actor_observation_level
+    )
 
     envs = make_marl_vectorized_envs(
         num_players=num_players,
@@ -484,18 +490,28 @@ def run_policy_h2h_eval_vectorized(
         shared_critic=False,
         reward_function="win",
         num_envs=num_envs,
-        actor_observation_level=actor_observation_level,
+        actor_observation_level="full",
     )
 
     driver_env = envs.driver_env
     obs_space = driver_env.env_single_observation_space
     obs_dtype = driver_env.obs_dtype
-    actor_dim = int(driver_env.vector_dim)
-    actor_observation_indices = get_actor_indices_from_full(
+    policy_observation_indices = get_actor_indices_from_full(
         num_players,
         map_type,
         level=actor_observation_level,
     )
+    champion_observation_indices = get_actor_indices_from_full(
+        num_players,
+        map_type,
+        level=champion_actor_observation_level,
+    )
+    full_observation_indices = get_actor_indices_from_full(
+        num_players,
+        map_type,
+        level="full",
+    )
+    full_actor_dim = len(full_observation_indices)
     agents_per_env = getattr(envs, "agents_per_env", [num_players] * num_envs)
     env_offsets: list[int] = []
     ptr = 0
@@ -523,15 +539,17 @@ def run_policy_h2h_eval_vectorized(
 
     try:
         while episodes_completed < num_games:
-            actor_batch, _, action_masks = decode_puffer_batch(
+            full_actor_batch, _, action_masks = decode_puffer_batch(
                 flat_obs=observations,
                 obs_space=obs_space,
                 obs_dtype=obs_dtype,
-                actor_dim=actor_dim,
+                actor_dim=full_actor_dim,
                 critic_dim=None,
-                actor_indices=actor_observation_indices,
+                actor_indices=full_observation_indices,
             )
-            batch_size = actor_batch.shape[0]
+            policy_batch = full_actor_batch[:, policy_observation_indices]
+            champion_batch = full_actor_batch[:, champion_observation_indices]
+            batch_size = full_actor_batch.shape[0]
             current_mask = np.zeros(batch_size, dtype=np.bool_)
             slots = np.zeros(batch_size, dtype=np.int64)
             for env_idx, start in enumerate(env_offsets):
@@ -543,7 +561,7 @@ def run_policy_h2h_eval_vectorized(
             actions = np.zeros(batch_size, dtype=np.int64)
             actions[current_mask] = _select_masked_actions(
                 policy_model=policy_model,
-                states=actor_batch[current_mask],
+                states=policy_batch[current_mask],
                 action_masks=action_masks[current_mask],
                 model_type=model_type,
                 device=torch_device,
@@ -552,9 +570,9 @@ def run_policy_h2h_eval_vectorized(
             champion_mask = ~current_mask
             actions[champion_mask] = _select_masked_actions(
                 policy_model=champion_model,
-                states=actor_batch[champion_mask],
+                states=champion_batch[champion_mask],
                 action_masks=action_masks[champion_mask],
-                model_type=model_type,
+                model_type=champion_model_type,
                 device=torch_device,
                 deterministic=deterministic,
             )

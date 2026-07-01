@@ -111,6 +111,18 @@ uv run scripts/eval_vs_catanatron.py \
   --opponents {AB:2/F}
 ```
 
+Or compare two compatible 1v1 experiment policies directly, with each policy
+playing both seats:
+
+```bash
+uv run scripts/eval_policy_h2h.py \
+  --experiment-a {experiment a} --which-a best \
+  --experiment-b {experiment b} --which-b best \
+  --games-per-seat 1000 --num-envs 8 --seed 42 \
+  --wandb --wandb-group policy-h2h-eval \
+  --wandb-run-name {wandb run name}
+```
+
 #### Managing experiments
 
 Experiments are written automatically by the training entrypoints under
