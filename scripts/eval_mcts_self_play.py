@@ -32,6 +32,7 @@ from catanrl.experiment_store import (
     load_experiment,
 )
 from catanrl.experiments.common_args import DEFAULT_WANDB_PROJECT
+from catanrl.eval.reporting import log_wandb_eval_results, wilson_interval
 from catanrl.experiments.network_config import resolve_observation_network_args
 from catanrl.features.catanatron_utils import (
     ActorObservationLevel,
@@ -249,8 +250,8 @@ def _merge_serialized_result(
     result_stats = result["stats"]
     if not isinstance(result_stats, dict):
         raise TypeError("Worker result stats must be a dictionary.")
-    for color_label, player_stats in result_stats.items():
-        target = aggregate[color_label]
+    for color_key, player_stats in result_stats.items():
+        target = aggregate[color_key]
         if not isinstance(player_stats, dict):
             raise TypeError("Worker player stats must be a dictionary.")
         target["wins"] = int(target["wins"]) + int(player_stats["wins"])
@@ -283,7 +284,9 @@ def run_self_play_eval(
 ) -> tuple[dict[Color, PlayerStats], list[int]]:
     stats = {player.color: PlayerStats() for player in players}
     turns: list[int] = []
-    episode_seeds = [derive_seed(seed, "self_play_episode", game_idx) for game_idx in range(num_games)]
+    episode_seeds = [
+        derive_seed(seed, "self_play_episode", game_idx) for game_idx in range(num_games)
+    ]
 
     for episode_seed in tqdm(episode_seeds, disable=not show_tqdm):
         map_seed, game_seed = derive_map_and_game_seeds(episode_seed)
@@ -443,7 +446,9 @@ def run_parallel_self_play_eval(
         if assignment
     ]
     mp_ctx = mp.get_context("spawn")
-    request_queue: mp.Queue = mp_ctx.Queue(maxsize=max(1024, inference_batch_size * len(assignments) * 4))
+    request_queue: mp.Queue = mp_ctx.Queue(
+        maxsize=max(1024, inference_batch_size * len(assignments) * 4)
+    )
     response_queues: list[mp.Queue] = [mp_ctx.Queue(maxsize=512) for _ in assignments]
     result_queue: mp.Queue = mp_ctx.Queue()
     inference_server = _CentralNNMCTSInferenceServer(
@@ -767,6 +772,8 @@ def main():
 
     args = parser.parse_args()
 
+    if args.num_games < 1:
+        parser.error("--num-games must be at least 1")
     use_experiment = args.experiment is not None
     if use_experiment:
         if args.policy_weights is not None or args.critic_weights is not None:
@@ -829,15 +836,6 @@ def main():
     print(f"Prunning: {args.prunning}")
     print(f"Games: {args.num_games} | game workers: {args.num_game_workers}")
     print(f"VPs to win: {args.vps_to_win} | Discard limit: {args.discard_limit}")
-
-    if args.wandb:
-        wandb.init(
-            project=args.wandb_project,
-            name=args.wandb_run_name,
-            group=args.wandb_group,
-            job_type="eval",
-            config=vars(args),
-        )
 
     if use_experiment:
         policy_model = experiment_policy
@@ -952,15 +950,39 @@ def main():
     print(f"\nAverage Turns: {avg_turns:.1f}")
 
     if args.wandb:
-        metrics = {"avg_turns": avg_turns}
+        checkpoint = args.which if args.experiment else str(args.policy_weights)
+        rows: list[dict[str, str | float]] = []
         for color in COLOR_ORDER[: args.num_players]:
             player_stats = stats[color]
-            label = color_label(color).lower()
-            metrics[f"{label}/wins"] = player_stats.wins
-            metrics[f"{label}/win_rate"] = player_stats.wins / args.num_games if args.num_games else 0.0
-            metrics[f"{label}/avg_vps"] = player_stats.avg_vps
-        wandb.log(metrics)
-        wandb.finish()
+            ci_low, ci_high = wilson_interval(player_stats.wins, args.num_games)
+            rows.append(
+                {
+                    "agent": color_label(color),
+                    "checkpoint": checkpoint,
+                    "wins": float(player_stats.wins),
+                    "games": float(args.num_games),
+                    "win_rate": player_stats.wins / args.num_games,
+                    "ci95_low": ci_low,
+                    "ci95_high": ci_high,
+                    "avg_vps": player_stats.avg_vps,
+                    "avg_turns": avg_turns,
+                }
+            )
+        run = wandb.init(
+            project=args.wandb_project,
+            name=args.wandb_run_name,
+            group=args.wandb_group,
+            job_type="eval",
+            config=vars(args),
+        )
+        log_wandb_eval_results(
+            run,
+            rows,
+            wandb,
+            namespace="eval_self_play",
+            chart_title="MCTS self-play win rate by seat",
+        )
+        run.finish()
 
 
 if __name__ == "__main__":

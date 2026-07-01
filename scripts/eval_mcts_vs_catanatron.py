@@ -16,6 +16,12 @@ from catanatron.models.player import Player
 import wandb
 from catanrl.envs.puffer.common import compute_single_agent_dims
 from catanrl.eval.parallel_mcts_eval import run_parallel_mcts_eval
+from catanrl.eval.reporting import (
+    EvalResult,
+    log_wandb_eval_results,
+    print_eval_rows,
+    summarize_eval_results,
+)
 from catanrl.experiment_store import (
     KIND_POLICY_VALUE,
     backbone_display_type,
@@ -45,6 +51,7 @@ from catanrl.models.wrappers import (
     ValueNetworkWrapper,
 )
 from catanrl.utils.catanatron_action_space import get_action_space_size
+from catanrl.utils.seeding import derive_seed
 
 BOARD_WIDTH = 21
 BOARD_HEIGHT = 11
@@ -372,8 +379,11 @@ def main():
         "--nn-seat",
         type=str,
         default="random",
-        choices=["random", "first", "second"],
-        help="Seat the NN-guided player randomly, first, or second in turn order",
+        choices=["random", "first", "second", "both"],
+        help=(
+            "Seat the NN-guided player randomly, first, second, or run a balanced "
+            "first+second evaluation. --num-games is per seat for 'both'."
+        ),
     )
     parser.add_argument(
         "--seed",
@@ -425,6 +435,8 @@ def main():
 
     args = parser.parse_args()
 
+    if args.num_games < 1:
+        parser.error("--num-games must be at least 1")
     use_experiment = args.experiment is not None
     if use_experiment:
         if args.policy_weights is not None or args.critic_weights is not None:
@@ -502,15 +514,6 @@ def main():
     print(f"Games: {args.num_games}")
     print(f"VPs to win: {args.vps_to_win} | Discard limit: {args.discard_limit}")
 
-    if args.wandb:
-        wandb.init(
-            project=args.wandb_project,
-            name=args.wandb_run_name,
-            group=args.wandb_group,
-            job_type="eval",
-            config=vars(args) | {"num_players": num_players},
-        )
-
     if use_experiment:
         policy_model = experiment_policy
         critic_model = experiment_critic
@@ -549,55 +552,55 @@ def main():
         critic_mode_default=args.critic_observation_level,
     )
 
-    print(f"\nRunning {args.num_games} games...")
-    result = run_parallel_mcts_eval(
-        policy_model=policy_model,
-        critic_model=critic_model,
-        model_type=args.model_type,
-        map_type=args.map_type,
-        opponents=args.opponents,
-        num_games=args.num_games,
-        num_game_workers=args.num_game_workers,
-        num_simulations=args.num_simulations,
-        ismcts_determinizations=args.ismcts_determinizations,
-        c_puct=args.c_puct,
-        prunning=args.prunning,
-        adversarial_policy=args.adversarial_policy,
-        actor_observation_level=args.actor_observation_level,
-        critic_observation_level=args.critic_observation_level,
-        inference_batch_size=args.inference_batch_size,
-        inference_wait_ms=args.inference_wait_ms,
-        nn_seat=args.nn_seat,
-        seed=args.seed,
-        vps_to_win=args.vps_to_win,
-        discard_limit=args.discard_limit,
-        device=device,
-        show_tqdm=True,
-    )
-    wins = result.wins
-    vps = result.vps
-    total_vps = result.total_vps
-    turns = result.turns
+    seat_modes = ("first", "second") if args.nn_seat == "both" else (args.nn_seat,)
+    seat_results: dict[str, EvalResult] = {}
+    for seat_mode in seat_modes:
+        print(f"\nRunning {args.num_games} games ({seat_mode} seat)...")
+        result = run_parallel_mcts_eval(
+            policy_model=policy_model,
+            critic_model=critic_model,
+            model_type=args.model_type,
+            map_type=args.map_type,
+            opponents=args.opponents,
+            num_games=args.num_games,
+            num_game_workers=args.num_game_workers,
+            num_simulations=args.num_simulations,
+            ismcts_determinizations=args.ismcts_determinizations,
+            c_puct=args.c_puct,
+            prunning=args.prunning,
+            adversarial_policy=args.adversarial_policy,
+            actor_observation_level=args.actor_observation_level,
+            critic_observation_level=args.critic_observation_level,
+            inference_batch_size=args.inference_batch_size,
+            inference_wait_ms=args.inference_wait_ms,
+            nn_seat=seat_mode,
+            seed=(
+                derive_seed(args.seed, "seat", seat_mode) if args.nn_seat == "both" else args.seed
+            ),
+            vps_to_win=args.vps_to_win,
+            discard_limit=args.discard_limit,
+            device=device,
+            show_tqdm=True,
+        )
+        seat_results[seat_mode] = EvalResult(
+            result.wins, result.vps, result.total_vps, result.turns
+        )
 
-    print(f"\n{'=' * 60}")
-    print("Results")
-    print(f"{'=' * 60}")
-    print(f"Wins: {wins} / {args.num_games} ({100 * wins / args.num_games:.1f}%)")
-    print(f"Average VPs: {sum(vps) / len(vps):.2f}")
-    print(f"Average Total VPs: {sum(total_vps) / len(total_vps):.2f}")
-    print(f"Average Turns: {sum(turns) / len(turns):.1f}")
+    label = args.experiment or "mcts-policy"
+    checkpoint = args.which if args.experiment else str(args.policy_weights)
+    rows = [summarize_eval_results(label, checkpoint, seat_results)]
+    print_eval_rows(rows)
 
     if args.wandb:
-        wandb.log(
-            {
-                "wins": wins,
-                "win_rate": wins / args.num_games if args.num_games else 0.0,
-                "avg_vps": sum(vps) / len(vps) if vps else 0.0,
-                "avg_total_vps": sum(total_vps) / len(total_vps) if total_vps else 0.0,
-                "avg_turns": sum(turns) / len(turns) if turns else 0.0,
-            }
+        run = wandb.init(
+            project=args.wandb_project,
+            name=args.wandb_run_name,
+            group=args.wandb_group,
+            job_type="eval",
+            config=vars(args) | {"num_players": num_players},
         )
-        wandb.finish()
+        log_wandb_eval_results(run, rows, wandb, chart_title="MCTS win rate vs Catanatron")
+        run.finish()
 
 
 if __name__ == "__main__":

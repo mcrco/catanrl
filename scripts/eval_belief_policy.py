@@ -13,29 +13,26 @@ oracle (which illegally sees the true opponent dev cards) as an upper bound.
 """
 
 import argparse
-from typing import Literal, Sequence
-
 import torch
+import wandb
 from catanatron.players.value import ValueFunctionPlayer
 
 from catanrl.eval.eval_nn_vs_catanatron import eval
+from catanrl.eval.reporting import (
+    EvalResult,
+    log_wandb_eval_results,
+    print_eval_rows,
+    summarize_eval_results,
+)
 from catanrl.experiment_store import (
     backbone_display_type,
     backbone_hidden_dims,
     load_experiment,
 )
 from catanrl.features.catanatron_utils import COLOR_ORDER
+from catanrl.experiments.common_args import DEFAULT_WANDB_PROJECT
 from catanrl.players import BeliefAveragedPolicyPlayer, NNPolicyPlayer
-
-
-def _print_results(label: str, num_games: int, wins, vps, total_vps, turns) -> None:
-    print(f"\n{'=' * 60}")
-    print(f"Results: {label}")
-    print(f"{'=' * 60}")
-    print(f"Wins: {wins} / {num_games} ({100 * wins / num_games:.1f}%)")
-    print(f"Average VPs: {sum(vps) / len(vps):.2f}")
-    print(f"Average Total VPs: {sum(total_vps) / len(total_vps):.2f}")
-    print(f"Average Turns: {sum(turns) / len(turns):.1f}")
+from catanrl.utils.seeding import derive_seed
 
 
 def main():
@@ -61,7 +58,16 @@ def main():
     parser.add_argument("--policy-weights", type=str, default=None)
 
     parser.add_argument("--num-games", type=int, default=100)
-    parser.add_argument("--nn-seat", type=str, default="random", choices=["random", "first", "second"])
+    parser.add_argument(
+        "--nn-seat",
+        type=str,
+        default="random",
+        choices=["random", "first", "second", "both"],
+        help=(
+            "Seat the evaluated player randomly, first, second, or run a balanced "
+            "first+second evaluation. --num-games is per seat for 'both'."
+        ),
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--vps-to-win", type=int, default=15)
     parser.add_argument("--discard-limit", type=int, default=9)
@@ -87,9 +93,15 @@ def main():
         action="store_true",
         help="Permit a model whose training observation level is not 'full' (not recommended).",
     )
+    parser.add_argument("--wandb", action="store_true", help="Log config and results to W&B.")
+    parser.add_argument("--wandb-project", default=DEFAULT_WANDB_PROJECT)
+    parser.add_argument("--wandb-run-name", default=None)
+    parser.add_argument("--wandb-group", default=None)
 
     args = parser.parse_args()
 
+    if args.num_games < 1:
+        parser.error("--num-games must be at least 1")
     if (args.experiment is None) == (args.policy_weights is None):
         parser.error("Provide exactly one of --experiment or --policy-weights.")
 
@@ -158,10 +170,7 @@ def main():
         print(f"Loaded policy weights from {args.policy_weights}")
 
     def make_opponents():
-        return [
-            ValueFunctionPlayer(COLOR_ORDER[i + 1])
-            for i in range(len(args.opponent_configs))
-        ]
+        return [ValueFunctionPlayer(COLOR_ORDER[i + 1]) for i in range(len(args.opponent_configs))]
 
     belief_player = BeliefAveragedPolicyPlayer(
         color=COLOR_ORDER[0],
@@ -173,19 +182,37 @@ def main():
         seed=args.seed,
     )
 
-    print(f"\nRunning {args.num_games} games (belief-averaged)...")
-    results = eval(
-        belief_player,
-        make_opponents(),
-        map_type=args.map_type,
-        num_games=args.num_games,
-        seed=args.seed,
-        vps_to_win=args.vps_to_win,
-        discard_limit=args.discard_limit,
-        show_tqdm=True,
-        nn_seat=args.nn_seat,
-    )
-    _print_results("BeliefAveragedPolicyPlayer", args.num_games, *results)
+    seat_modes = ("first", "second") if args.nn_seat == "both" else (args.nn_seat,)
+    checkpoint = args.which if args.experiment else str(args.policy_weights)
+
+    def evaluate_player(player, variant: str) -> dict[str, EvalResult]:
+        seat_results: dict[str, EvalResult] = {}
+        for seat_mode in seat_modes:
+            print(f"\nRunning {args.num_games} games ({variant}, {seat_mode} seat)...")
+            seat_results[seat_mode] = EvalResult.from_tuple(
+                eval(
+                    player,
+                    make_opponents(),
+                    map_type=args.map_type,
+                    num_games=args.num_games,
+                    seed=(
+                        derive_seed(args.seed, "seat", seat_mode)
+                        if args.nn_seat == "both"
+                        else args.seed
+                    ),
+                    vps_to_win=args.vps_to_win,
+                    discard_limit=args.discard_limit,
+                    show_tqdm=True,
+                    nn_seat=seat_mode,
+                )
+            )
+        return seat_results
+
+    rows = [
+        summarize_eval_results(
+            "belief-averaged", checkpoint, evaluate_player(belief_player, "belief")
+        )
+    ]
 
     if args.also_oracle:
         oracle_player = NNPolicyPlayer(
@@ -195,19 +222,23 @@ def main():
             map_type=args.map_type,
             actor_observation_level="full",
         )
-        print(f"\nRunning {args.num_games} games (full-info oracle; cheats)...")
-        oracle_results = eval(
-            oracle_player,
-            make_opponents(),
-            map_type=args.map_type,
-            num_games=args.num_games,
-            seed=args.seed,
-            vps_to_win=args.vps_to_win,
-            discard_limit=args.discard_limit,
-            show_tqdm=True,
-            nn_seat=args.nn_seat,
+        rows.append(
+            summarize_eval_results(
+                "full-info-oracle", checkpoint, evaluate_player(oracle_player, "oracle")
+            )
         )
-        _print_results("Full-info oracle (upper bound)", args.num_games, *oracle_results)
+
+    print_eval_rows(rows)
+    if args.wandb:
+        run = wandb.init(
+            project=args.wandb_project,
+            name=args.wandb_run_name,
+            group=args.wandb_group,
+            job_type="eval",
+            config=vars(args) | {"num_players": num_players},
+        )
+        log_wandb_eval_results(run, rows, wandb, chart_title="Belief-policy evaluation win rate")
+        run.finish()
 
 
 if __name__ == "__main__":

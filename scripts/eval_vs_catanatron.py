@@ -15,6 +15,12 @@ from catanatron.models.player import Player
 
 from catanrl.envs.puffer.common import compute_single_agent_dims
 from catanrl.eval.eval_nn_vs_catanatron import eval
+from catanrl.eval.reporting import (
+    EvalResult,
+    log_wandb_eval_results,
+    print_eval_rows,
+    summarize_eval_results,
+)
 from catanrl.experiment_store import (
     backbone_display_type,
     backbone_hidden_dims,
@@ -31,6 +37,7 @@ from catanrl.models.models import build_flat_policy_network, build_hierarchical_
 from catanrl.models.wrappers import PolicyNetworkWrapper
 from catanrl.players import NNPolicyPlayer
 from catanrl.utils.catanatron_action_space import get_action_space_size
+from catanrl.utils.seeding import derive_seed
 
 
 BOARD_WIDTH = 21
@@ -107,8 +114,7 @@ def parse_opponents(opponents_str: str) -> list[Player]:
 
     if len(player_keys) > len(COLOR_ORDER) - 1:
         raise ValueError(
-            f"Too many opponents ({len(player_keys)}). "
-            f"Maximum supported is {len(COLOR_ORDER) - 1}."
+            f"Too many opponents ({len(player_keys)}). Maximum supported is {len(COLOR_ORDER) - 1}."
         )
 
     players: list[Player] = []
@@ -218,8 +224,11 @@ def main():
         "--nn-seat",
         type=str,
         default="random",
-        choices=["random", "first", "second"],
-        help="Seat the NN player randomly, first, or second in turn order",
+        choices=["random", "first", "second", "both"],
+        help=(
+            "Seat the NN player randomly, first, second, or run a balanced "
+            "first+second evaluation. --num-games is per seat for 'both'."
+        ),
     )
     parser.add_argument(
         "--seed",
@@ -271,6 +280,8 @@ def main():
 
     args = parser.parse_args()
 
+    if args.num_games < 1:
+        parser.error("--num-games must be at least 1")
     if (args.experiment is None) == (args.policy_weights is None):
         parser.error("Provide exactly one of --experiment or --policy-weights.")
 
@@ -314,15 +325,6 @@ def main():
     print(f"Games: {args.num_games}")
     print(f"VPs to win: {args.vps_to_win} | Discard limit: {args.discard_limit}")
 
-    if args.wandb:
-        wandb.init(
-            project=args.wandb_project,
-            name=args.wandb_run_name,
-            group=args.wandb_group,
-            job_type="eval",
-            config=vars(args) | {"num_players": num_players},
-        )
-
     if experiment_model is not None:
         model = experiment_model
         print(f"Loaded policy from experiment '{args.experiment}' ({args.which})")
@@ -351,39 +353,43 @@ def main():
     )
 
     # Run evaluation
-    print(f"\nRunning {args.num_games} games...")
-    wins, vps, total_vps, turns = eval(
-        nn_player,
-        opponents,
-        map_type=args.map_type,
-        num_games=args.num_games,
-        seed=args.seed,
-        vps_to_win=args.vps_to_win,
-        discard_limit=args.discard_limit,
-        show_tqdm=True,
-        nn_seat=args.nn_seat,
-    )
+    seat_modes = ("first", "second") if args.nn_seat == "both" else (args.nn_seat,)
+    seat_results: dict[str, EvalResult] = {}
+    for seat_mode in seat_modes:
+        print(f"\nRunning {args.num_games} games ({seat_mode} seat)...")
+        seat_results[seat_mode] = EvalResult.from_tuple(
+            eval(
+                nn_player,
+                opponents,
+                map_type=args.map_type,
+                num_games=args.num_games,
+                seed=(
+                    derive_seed(args.seed, "seat", seat_mode)
+                    if args.nn_seat == "both"
+                    else args.seed
+                ),
+                vps_to_win=args.vps_to_win,
+                discard_limit=args.discard_limit,
+                show_tqdm=True,
+                nn_seat=seat_mode,
+            )
+        )
 
-    # Print results
-    print(f"\n{'=' * 60}")
-    print("Results")
-    print(f"{'=' * 60}")
-    print(f"Wins: {wins} / {args.num_games} ({100 * wins / args.num_games:.1f}%)")
-    print(f"Average VPs: {sum(vps) / len(vps):.2f}")
-    print(f"Average Total VPs: {sum(total_vps) / len(total_vps):.2f}")
-    print(f"Average Turns: {sum(turns) / len(turns):.1f}")
+    label = args.experiment or "policy"
+    checkpoint = args.which if args.experiment else str(args.policy_weights)
+    rows = [summarize_eval_results(label, checkpoint, seat_results)]
+    print_eval_rows(rows)
 
     if args.wandb:
-        wandb.log(
-            {
-                "wins": wins,
-                "win_rate": wins / args.num_games if args.num_games else 0.0,
-                "avg_vps": sum(vps) / len(vps) if vps else 0.0,
-                "avg_total_vps": sum(total_vps) / len(total_vps) if total_vps else 0.0,
-                "avg_turns": sum(turns) / len(turns) if turns else 0.0,
-            }
+        run = wandb.init(
+            project=args.wandb_project,
+            name=args.wandb_run_name,
+            group=args.wandb_group,
+            job_type="eval",
+            config=vars(args) | {"num_players": num_players},
         )
-        wandb.finish()
+        log_wandb_eval_results(run, rows, wandb, chart_title="Policy win rate vs Catanatron")
+        run.finish()
 
 
 if __name__ == "__main__":
