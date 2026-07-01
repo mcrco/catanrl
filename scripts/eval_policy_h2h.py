@@ -2,6 +2,7 @@
 
 import argparse
 import math
+import re
 from typing import Any
 
 import torch
@@ -46,10 +47,112 @@ def summarize_seat_results(seat_results: dict[str, tuple[int, list[int]]]) -> di
     metrics["win_rate_b"] = 1.0 - metrics["win_rate_a"]
     metrics["avg_turns"] = sum(all_turns) / total_games
     metrics["games"] = float(total_games)
-    metrics["win_rate_a_standard_error"] = math.sqrt(
-        metrics["win_rate_a"] * (1.0 - metrics["win_rate_a"]) / total_games
-    )
+    metrics["wins_a"] = float(total_wins)
+    metrics["wins_b"] = float(total_games - total_wins)
     return metrics
+
+
+def wilson_interval(wins: int, games: int, z: float = 1.96) -> tuple[float, float]:
+    """Return a bounded approximate 95% binomial confidence interval."""
+    if games < 1:
+        raise ValueError("Cannot compute a confidence interval without games")
+    rate = wins / games
+    denominator = 1.0 + z**2 / games
+    center = (rate + z**2 / (2.0 * games)) / denominator
+    radius = z * math.sqrt(rate * (1.0 - rate) / games + z**2 / (4.0 * games**2))
+    radius /= denominator
+    return center - radius, center + radius
+
+
+def build_policy_rows(
+    metrics: dict[str, float],
+    policy_a: str,
+    checkpoint_a: str,
+    policy_b: str,
+    checkpoint_b: str,
+) -> list[dict[str, str | float]]:
+    """Build symmetric per-policy rows for console and W&B presentation."""
+    games = int(metrics["games"])
+    a_interval = wilson_interval(int(metrics["wins_a"]), games)
+    b_interval = wilson_interval(int(metrics["wins_b"]), games)
+    return [
+        {
+            "policy": policy_a,
+            "checkpoint": checkpoint_a,
+            "wins": metrics["wins_a"],
+            "games": metrics["games"],
+            "win_rate": metrics["win_rate_a"],
+            "ci95_low": a_interval[0],
+            "ci95_high": a_interval[1],
+            "first_seat_win_rate": metrics["win_rate_a_first"],
+            "second_seat_win_rate": metrics["win_rate_a_second"],
+            "avg_turns": metrics["avg_turns"],
+            "avg_turns_first": metrics["avg_turns_first"],
+            "avg_turns_second": metrics["avg_turns_second"],
+        },
+        {
+            "policy": policy_b,
+            "checkpoint": checkpoint_b,
+            "wins": metrics["wins_b"],
+            "games": metrics["games"],
+            "win_rate": metrics["win_rate_b"],
+            "ci95_low": b_interval[0],
+            "ci95_high": b_interval[1],
+            "first_seat_win_rate": 1.0 - metrics["win_rate_a_second"],
+            "second_seat_win_rate": 1.0 - metrics["win_rate_a_first"],
+            "avg_turns": metrics["avg_turns"],
+            "avg_turns_first": metrics["avg_turns_second"],
+            "avg_turns_second": metrics["avg_turns_first"],
+        },
+    ]
+
+
+def _metric_slug(name: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", name).strip("_")
+
+
+def build_wandb_summary(rows: list[dict[str, str | float]]) -> dict[str, float]:
+    """Build named one-shot summary metrics without creating history curves."""
+    summary = {
+        "eval_h2h/games": float(rows[0]["games"]),
+        "eval_h2h/avg_turns": float(rows[0]["avg_turns"]),
+    }
+    slugs = [_metric_slug(str(row["policy"])) for row in rows]
+    if slugs[0] == slugs[1]:
+        slugs = [
+            f"{slugs[index]}_{_metric_slug(str(row['checkpoint']))}"
+            for index, row in enumerate(rows)
+        ]
+    for slug, row in zip(slugs, rows):
+        for metric in (
+            "win_rate",
+            "ci95_low",
+            "ci95_high",
+            "first_seat_win_rate",
+            "second_seat_win_rate",
+            "avg_turns_first",
+            "avg_turns_second",
+        ):
+            summary[f"eval_h2h/{metric}_{slug}"] = float(row[metric])
+    return summary
+
+
+def log_wandb_results(run: Any, rows: list[dict[str, str | float]]) -> None:
+    """Store one-shot metrics as summary fields plus a table and bar chart."""
+    run.summary.update(build_wandb_summary(rows))
+    columns = list(rows[0])
+    table = wandb.Table(columns=columns, data=[[row[column] for column in columns] for row in rows])
+    run.log(
+        {
+            "eval_h2h/results_table": table,
+            "eval_h2h/win_rate_bar": wandb.plot.bar(
+                table,
+                "policy",
+                "win_rate",
+                title="Policy H2H overall win rate",
+            ),
+        }
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -133,31 +236,43 @@ def main() -> None:
             )
 
     metrics = summarize_seat_results(seat_results)
-    standard_error = metrics["win_rate_a_standard_error"]
-    print("\nResults")
-    print(f"A win rate, first seat:  {metrics['win_rate_a_first']:.3%}")
-    print(f"A win rate, second seat: {metrics['win_rate_a_second']:.3%}")
-    print(
-        f"A win rate, combined:    {metrics['win_rate_a']:.3%} "
-        f"(approx. 95% CI ±{1.96 * standard_error:.3%})"
+    rows = build_policy_rows(
+        metrics,
+        experiment_a.metadata.name,
+        args.which_a,
+        experiment_b.metadata.name,
+        args.which_b,
     )
-    print(f"B win rate, combined:    {metrics['win_rate_b']:.3%}")
-    print(f"Average turns:           {metrics['avg_turns']:.1f}")
-    print(f"Games:                   {int(metrics['games'])}")
+    print("\nResults")
+    for row in rows:
+        print(f"{row['policy']} ({row['checkpoint']}):")
+        print(
+            f"  Overall: {row['win_rate']:.3%} "
+            f"(95% CI {row['ci95_low']:.3%}–{row['ci95_high']:.3%})"
+        )
+        print(
+            f"  First seat: {row['first_seat_win_rate']:.3%} | "
+            f"Second seat: {row['second_seat_win_rate']:.3%}"
+        )
+        print(
+            f"  Avg turns: {row['avg_turns']:.1f} "
+            f"(first {row['avg_turns_first']:.1f}, second {row['avg_turns_second']:.1f})"
+        )
+    print(f"Games: {int(metrics['games'])}")
 
     if args.wandb:
         config: dict[str, Any] = vars(args).copy()
         config["experiment_a_name"] = experiment_a.metadata.name
         config["experiment_b_name"] = experiment_b.metadata.name
-        wandb.init(
+        run = wandb.init(
             project=args.wandb_project,
             name=args.wandb_run_name,
             group=args.wandb_group,
             job_type="eval",
             config=config,
         )
-        wandb.log({f"eval_h2h/{key}": value for key, value in metrics.items()})
-        wandb.finish()
+        log_wandb_results(run, rows)
+        run.finish()
 
 
 if __name__ == "__main__":
