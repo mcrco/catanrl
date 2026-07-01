@@ -1,20 +1,21 @@
 """
 Evaluate a neural-guided MCTS player against configurable Catanatron opponents.
 
-This script mirrors eval_vs_catanatron.py while loading both policy and critic
-networks, then using them inside NNMCTSPlayer.
+Games run in spawned worker processes while the parent owns the policy/critic
+and serves centrally batched inference requests.
 """
 
 import argparse
-from typing import Literal, Sequence
+import os
+from typing import Literal, Sequence, cast
 
 import torch
-import wandb
 from catanatron.cli.cli_players import CLI_PLAYERS
 from catanatron.models.player import Player
 
+import wandb
 from catanrl.envs.puffer.common import compute_single_agent_dims
-from catanrl.eval.eval_nn_vs_catanatron import eval
+from catanrl.eval.parallel_mcts_eval import run_parallel_mcts_eval
 from catanrl.experiment_store import (
     KIND_POLICY_VALUE,
     backbone_display_type,
@@ -24,8 +25,8 @@ from catanrl.experiment_store import (
 from catanrl.experiments.common_args import DEFAULT_WANDB_PROJECT
 from catanrl.experiments.network_config import resolve_observation_network_args
 from catanrl.features.catanatron_utils import (
-    ActorObservationLevel,
     COLOR_ORDER,
+    ActorObservationLevel,
     CriticObservationLevel,
 )
 from catanrl.models.backbones import (
@@ -38,8 +39,11 @@ from catanrl.models.models import (
     build_hierarchical_policy_network,
     build_value_network,
 )
-from catanrl.models.wrappers import PolicyNetworkWrapper, ValueNetworkWrapper
-from catanrl.players import NNMCTSPlayer
+from catanrl.models.wrappers import (
+    PolicyNetworkWrapper,
+    PolicyValueNetworkWrapper,
+    ValueNetworkWrapper,
+)
 from catanrl.utils.catanatron_action_space import get_action_space_size
 
 BOARD_WIDTH = 21
@@ -307,7 +311,16 @@ def main():
         "--num-search-workers",
         type=int,
         default=1,
-        help="Threaded MCTS search workers for the NN player. 1 preserves sequential search.",
+        help=(
+            "Within-tree search workers. Keep at 1; evaluation scales across games with "
+            "--num-game-workers instead."
+        ),
+    )
+    parser.add_argument(
+        "--num-game-workers",
+        type=int,
+        default=min(16, os.cpu_count() or 4),
+        help="Game worker processes sharing the central batched inference server.",
     )
     parser.add_argument(
         "--inference-batch-size",
@@ -449,13 +462,20 @@ def main():
                 f"'{args.experiment}' was trained for {exp.num_players}."
             )
         if exp.policy_spec.kind == KIND_POLICY_VALUE:
-            experiment_policy = exp.build_policy(
-                which=args.which, device=device, as_policy_only=False
+            experiment_policy = cast(
+                PolicyValueNetworkWrapper,
+                exp.build_policy(which=args.which, device=device, as_policy_only=False),
             )
             experiment_critic = None
         else:
-            experiment_policy = exp.build_policy(which=args.which, device=device)
-            experiment_critic = exp.build_critic(which=args.which, device=device)
+            experiment_policy = cast(
+                PolicyNetworkWrapper,
+                exp.build_policy(which=args.which, device=device),
+            )
+            experiment_critic = cast(
+                ValueNetworkWrapper,
+                exp.build_critic(which=args.which, device=device),
+            )
 
     print(f"\n{'=' * 60}")
     print("Neural MCTS Evaluation vs Catanatron Bot")
@@ -473,11 +493,8 @@ def main():
     print(f"Critic weights: {args.critic_weights}")
     print(f"MCTS simulations: {args.num_simulations} | c_puct: {args.c_puct}")
     print(f"IS-MCTS determinizations: {args.ismcts_determinizations}")
-    print(
-        "MCTS workers: "
-        f"{args.num_search_workers} | inference batch: {args.inference_batch_size} "
-        f"| wait: {args.inference_wait_ms} ms | virtual loss: {args.virtual_loss}"
-    )
+    print(f"Game workers: {args.num_game_workers}")
+    print(f"Inference batch: {args.inference_batch_size} | wait: {args.inference_wait_ms} ms")
     print(f"Prunning: {args.prunning}")
     print(f"Adversarial policy (inside MCTS): {args.adversarial_policy}")
     print(f"Opponents: {args.opponents}")
@@ -532,37 +549,35 @@ def main():
         critic_mode_default=args.critic_observation_level,
     )
 
-    nn_mcts_player = NNMCTSPlayer(
-        color=COLOR_ORDER[0],
-        model_type=args.model_type,
+    print(f"\nRunning {args.num_games} games...")
+    result = run_parallel_mcts_eval(
         policy_model=policy_model,
         critic_model=critic_model,
+        model_type=args.model_type,
         map_type=args.map_type,
+        opponents=args.opponents,
+        num_games=args.num_games,
+        num_game_workers=args.num_game_workers,
         num_simulations=args.num_simulations,
         ismcts_determinizations=args.ismcts_determinizations,
         c_puct=args.c_puct,
         prunning=args.prunning,
-        opponent_policy=args.adversarial_policy,
+        adversarial_policy=args.adversarial_policy,
         actor_observation_level=args.actor_observation_level,
         critic_observation_level=args.critic_observation_level,
-        num_search_workers=args.num_search_workers,
         inference_batch_size=args.inference_batch_size,
         inference_wait_ms=args.inference_wait_ms,
-        virtual_loss=args.virtual_loss,
-    )
-
-    print(f"\nRunning {args.num_games} games...")
-    wins, vps, total_vps, turns = eval(
-        nn_mcts_player,
-        opponents,
-        map_type=args.map_type,
-        num_games=args.num_games,
+        nn_seat=args.nn_seat,
         seed=args.seed,
         vps_to_win=args.vps_to_win,
         discard_limit=args.discard_limit,
+        device=device,
         show_tqdm=True,
-        nn_seat=args.nn_seat,
     )
+    wins = result.wins
+    vps = result.vps
+    total_vps = result.total_vps
+    turns = result.turns
 
     print(f"\n{'=' * 60}")
     print("Results")
