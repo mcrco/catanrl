@@ -552,6 +552,16 @@ def main():
         critic_mode_default=args.critic_observation_level,
     )
 
+    wandb_run = None
+    if args.wandb:
+        wandb_run = wandb.init(
+            project=args.wandb_project,
+            name=args.wandb_run_name,
+            group=args.wandb_group,
+            job_type="eval",
+            config=vars(args) | {"num_players": num_players},
+        )
+
     seat_modes = ("first", "second") if args.nn_seat == "both" else (args.nn_seat,)
     seat_results: dict[str, EvalResult] = {}
     for seat_mode in seat_modes:
@@ -591,16 +601,9 @@ def main():
     rows = [summarize_eval_results(label, checkpoint, seat_results)]
     print_eval_rows(rows)
 
-    if args.wandb:
-        run = wandb.init(
-            project=args.wandb_project,
-            name=args.wandb_run_name,
-            group=args.wandb_group,
-            job_type="eval",
-            config=vars(args) | {"num_players": num_players},
-        )
-        log_wandb_eval_results(run, rows, wandb, chart_title="MCTS win rate vs Catanatron")
-        run.finish()
+    if wandb_run is not None:
+        log_wandb_eval_results(wandb_run, rows, wandb, chart_title="MCTS win rate vs Catanatron")
+        wandb_run.finish()
 
 
 if __name__ == "__main__":
