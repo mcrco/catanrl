@@ -414,7 +414,8 @@ Training hparams:
 | fresh eval games / opponent     | 500                                        |
 | fixed-seed eval games / opponent | 500                                       |
 | fixed-seed eval seed            | 67                                         |
-| head-to-head eval games         | 0 (disabled)                               |
+| head-to-head eval games         | 500                                        |
+| head-to-head eval seed          | 67                                         |
 | metric window                   | 200                                        |
 
 ```bash
