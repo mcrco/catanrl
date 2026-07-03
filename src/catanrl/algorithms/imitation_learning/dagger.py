@@ -1037,6 +1037,7 @@ def train(
                             eval_opponent_configs=opponent_configs,
                             num_games=fresh_eval_games_per_opponent,
                             gamma=gamma,
+                            reward_function=reward_function,
                             seed=random.randint(0, sys.maxsize),
                             vps_to_win=vps_to_win,
                             discard_limit=discard_limit,

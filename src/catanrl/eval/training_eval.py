@@ -178,6 +178,7 @@ def eval_policy_value_against_baselines(
     eval_opponent_configs: Optional[Sequence[str]] = None,
     num_games: int = 250,
     gamma: float = 0.99,
+    reward_function: Literal["shaped", "win"] = "shaped",
     seed: int = 67,
     vps_to_win: int = 15,
     discard_limit: int = 9,
@@ -211,6 +212,7 @@ def eval_policy_value_against_baselines(
             player count as training.
         num_games: Number of games to play against EACH opponent.
         gamma: Discount factor for computing returns.
+        reward_function: Reward function whose discounted returns the critic predicts.
         seed: Random seed.
         log_to_wandb: Whether to log metrics to wandb.
         global_step: Global training step for wandb logging.
@@ -272,6 +274,7 @@ def eval_policy_value_against_baselines(
                         num_games=seat_eval_games,
                         gamma=gamma,
                         opponent_configs=opponent_configs,
+                        reward_function=reward_function,
                         device=device,
                         num_envs=num_envs,
                         vps_to_win=vps_to_win,
@@ -323,6 +326,7 @@ def eval_policy_value_against_baselines(
                     num_games=seat_eval_games,
                     gamma=gamma,
                     opponent_configs=opponent_configs,
+                    reward_function=reward_function,
                     device=device,
                     num_envs=num_envs,
                     vps_to_win=vps_to_win,

@@ -165,6 +165,7 @@ def run_policy_value_eval_vectorized(
     num_games: int,
     gamma: float,
     opponent_configs: Sequence[str],
+    reward_function: Literal["shaped", "win"] = "shaped",
     device: Optional[str] = None,
     vps_to_win: int = 15,
     discard_limit: int = 9,
@@ -234,7 +235,7 @@ def run_policy_value_eval_vectorized(
     num_envs = min(num_envs, num_games)
 
     envs = make_puffer_vectorized_envs(
-        reward_function="shaped",
+        reward_function=reward_function,
         map_type=map_type,
         opponent_configs=list(opponent_configs),
         num_envs=num_envs,
