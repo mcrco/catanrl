@@ -30,7 +30,7 @@ from catanrl.experiment_store import (
     load_experiment,
 )
 from catanrl.features.catanatron_utils import COLOR_ORDER
-from catanrl.experiments.common_args import DEFAULT_WANDB_PROJECT
+from catanrl.experiments.common_args import DEFAULT_EVAL_SEED, DEFAULT_WANDB_PROJECT
 from catanrl.players import BeliefAveragedPolicyPlayer, NNPolicyPlayer
 from catanrl.utils.seeding import derive_seed
 
@@ -68,7 +68,7 @@ def main():
             "first+second evaluation. --num-games is per seat for 'both'."
         ),
     )
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seed", type=int, default=DEFAULT_EVAL_SEED)
     parser.add_argument("--vps-to-win", type=int, default=15)
     parser.add_argument("--discard-limit", type=int, default=9)
     parser.add_argument("--device", type=str, default=None)

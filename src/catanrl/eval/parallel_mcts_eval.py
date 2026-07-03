@@ -20,7 +20,12 @@ from catanrl.features.catanatron_utils import ActorObservationLevel, CriticObser
 from catanrl.models import PolicyNetworkWrapper, PolicyValueNetworkWrapper, ValueNetworkWrapper
 from catanrl.players import NNMCTSPlayer
 from catanrl.players.nn_mcts_player import _RemoteNNMCTSInferenceBackend
-from catanrl.utils.catanatron_game import COLOR_ORDER, SeatOption, build_players_for_seat, force_player_order
+from catanrl.utils.catanatron_game import (
+    COLOR_ORDER,
+    SeatOption,
+    build_players_for_seat,
+    force_player_order,
+)
 from catanrl.utils.catanatron_map import build_catan_map
 from catanrl.utils.seeding import derive_map_and_game_seeds, derive_seed
 
@@ -31,6 +36,7 @@ class ParallelMCTSEvalResult:
     vps: list[int] = field(default_factory=list)
     total_vps: list[int] = field(default_factory=list)
     turns: list[int] = field(default_factory=list)
+    game_records: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def games(self) -> int:
@@ -41,14 +47,13 @@ class ParallelMCTSEvalResult:
         self.vps.extend(int(value) for value in payload["vps"])
         self.total_vps.extend(int(value) for value in payload["total_vps"])
         self.turns.extend(int(value) for value in payload["turns"])
+        self.game_records.extend(dict(record) for record in payload.get("game_records", []))
 
 
 def _assign_episode_seeds(num_games: int, num_workers: int, seed: int) -> list[list[int]]:
     assignments: list[list[int]] = [[] for _ in range(max(1, num_workers))]
     for game_idx in range(num_games):
-        assignments[game_idx % len(assignments)].append(
-            derive_seed(seed, "episode", game_idx)
-        )
+        assignments[game_idx % len(assignments)].append(derive_seed(seed, "episode", game_idx))
     return assignments
 
 
@@ -122,16 +127,26 @@ def _worker_main(
                 force_player_order(game, players)
             game.play()
 
-            if game.winning_color() == nn_player.color:
+            won = game.winning_color() == nn_player.color
+            if won:
                 result.wins += 1
-            result.vps.append(get_actual_victory_points(game.state, nn_player.color))
-            result.total_vps.append(
-                sum(
-                    get_actual_victory_points(game.state, color)
-                    for color in game.state.colors
-                )
+            nn_vps = get_actual_victory_points(game.state, nn_player.color)
+            total_vps = sum(
+                get_actual_victory_points(game.state, color) for color in game.state.colors
             )
+            result.vps.append(nn_vps)
+            result.total_vps.append(total_vps)
             result.turns.append(game.state.num_turns)
+            result.game_records.append(
+                {
+                    "seat": str(args_dict["nn_seat"]),
+                    "episode_seed": int(episode_seed),
+                    "win": won,
+                    "vps": int(nn_vps),
+                    "total_vps": int(total_vps),
+                    "turns": int(game.state.num_turns),
+                }
+            )
 
         result_queue.put(
             {
@@ -142,6 +157,7 @@ def _worker_main(
                     "vps": result.vps,
                     "total_vps": result.total_vps,
                     "turns": result.turns,
+                    "game_records": result.game_records,
                 },
             }
         )

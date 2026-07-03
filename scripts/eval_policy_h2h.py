@@ -11,7 +11,7 @@ from tqdm import tqdm
 
 from catanrl.eval.vectorized_rollout import run_policy_h2h_eval_vectorized
 from catanrl.experiment_store import Experiment, load_experiment
-from catanrl.experiments.common_args import DEFAULT_WANDB_PROJECT
+from catanrl.experiments.common_args import DEFAULT_EVAL_SEED, DEFAULT_WANDB_PROJECT
 
 
 def validate_compatible_experiments(experiment_a: Experiment, experiment_b: Experiment) -> None:
@@ -170,8 +170,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Games with experiment A in each fixed seat.",
     )
     parser.add_argument("--num-envs", type=int, default=8, help="Parallel game environments.")
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--device", default=None, help="cuda or cpu; defaults to CUDA if available.")
+    parser.add_argument("--seed", type=int, default=DEFAULT_EVAL_SEED)
+    parser.add_argument(
+        "--device", default=None, help="cuda or cpu; defaults to CUDA if available."
+    )
     parser.add_argument(
         "--sample-actions",
         action="store_true",

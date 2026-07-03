@@ -26,6 +26,10 @@ def test_parallel_mcts_eval_result_merges_worker_payloads():
             "vps": [15, 11],
             "total_vps": [26, 25],
             "turns": [120, 130],
+            "game_records": [
+                {"seat": "first", "episode_seed": 1, "win": True},
+                {"seat": "first", "episode_seed": 2, "win": False},
+            ],
         }
     )
     result.merge(
@@ -34,6 +38,9 @@ def test_parallel_mcts_eval_result_merges_worker_payloads():
             "vps": [15],
             "total_vps": [24],
             "turns": [110],
+            "game_records": [
+                {"seat": "first", "episode_seed": 3, "win": True},
+            ],
         }
     )
 
@@ -42,3 +49,4 @@ def test_parallel_mcts_eval_result_merges_worker_payloads():
     assert result.vps == [15, 11, 15]
     assert result.total_vps == [26, 25, 24]
     assert result.turns == [120, 130, 110]
+    assert [record["episode_seed"] for record in result.game_records] == [1, 2, 3]

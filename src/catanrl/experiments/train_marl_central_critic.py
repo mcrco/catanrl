@@ -6,6 +6,7 @@ from catanrl.experiments.architecture_config import (
     architecture_train_config_fields,
 )
 from catanrl.experiments.common_args import (
+    DEFAULT_EVAL_SEED,
     DEFAULT_MAX_GRAD_NORM,
     DEFAULT_METRIC_WINDOW,
     DEFAULT_TREND_EVAL_SEED,
@@ -103,7 +104,7 @@ def main():
     parser.add_argument(
         "--h2h-eval-seed",
         type=int,
-        default=123,
+        default=DEFAULT_EVAL_SEED,
         help="Fixed seed used for current-vs-champion head-to-head eval runs.",
     )
     parser.add_argument(
@@ -143,7 +144,10 @@ def main():
 
     arch = setup.arch
     warm_start = setup.warm_start
-    if arch.network_mode == "shared" and arch.actor_observation_level != arch.critic_observation_level:
+    if (
+        arch.network_mode == "shared"
+        and arch.actor_observation_level != arch.critic_observation_level
+    ):
         print(
             "Error: network_mode='shared' requires policy and critic information levels to match "
             f"(got policy={arch.actor_observation_level}, critic={arch.critic_observation_level}). "
@@ -165,9 +169,7 @@ def main():
         if args.wandb and not args.wandb_run_name:
             args.wandb_run_name = resume.wandb_run_name or experiment_name
     else:
-        experiment_name = make_experiment_name(
-            "marl-cc", args.wandb_run_name, args.experiment_name
-        )
+        experiment_name = make_experiment_name("marl-cc", args.wandb_run_name, args.experiment_name)
         if args.wandb and not args.wandb_run_name:
             args.wandb_run_name = experiment_name
     args.save_path = default_checkpoints_dir(experiment_name)

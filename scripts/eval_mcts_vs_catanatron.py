@@ -15,6 +15,7 @@ from catanatron.models.player import Player
 
 import wandb
 from catanrl.envs.puffer.common import compute_single_agent_dims
+from catanrl.eval.paired_comparison import log_paired_games_to_wandb, write_paired_results
 from catanrl.eval.parallel_mcts_eval import run_parallel_mcts_eval
 from catanrl.eval.reporting import (
     EvalResult,
@@ -28,7 +29,7 @@ from catanrl.experiment_store import (
     backbone_hidden_dims,
     load_experiment,
 )
-from catanrl.experiments.common_args import DEFAULT_WANDB_PROJECT
+from catanrl.experiments.common_args import DEFAULT_EVAL_SEED, DEFAULT_WANDB_PROJECT
 from catanrl.experiments.network_config import resolve_observation_network_args
 from catanrl.features.catanatron_utils import (
     COLOR_ORDER,
@@ -388,7 +389,7 @@ def main():
     parser.add_argument(
         "--seed",
         type=int,
-        default=42,
+        default=DEFAULT_EVAL_SEED,
         help="Random seed",
     )
     parser.add_argument(
@@ -431,6 +432,11 @@ def main():
         type=str,
         default=None,
         help="Optional Weights & Biases group name",
+    )
+    parser.add_argument(
+        "--paired-results-out",
+        default=None,
+        help="Write per-game outcomes for a later exact McNemar comparison.",
     )
 
     args = parser.parse_args()
@@ -564,6 +570,7 @@ def main():
 
     seat_modes = ("first", "second") if args.nn_seat == "both" else (args.nn_seat,)
     seat_results: dict[str, EvalResult] = {}
+    paired_games: list[dict] = []
     for seat_mode in seat_modes:
         print(f"\nRunning {args.num_games} games ({seat_mode} seat)...")
         result = run_parallel_mcts_eval(
@@ -595,14 +602,34 @@ def main():
         seat_results[seat_mode] = EvalResult(
             result.wins, result.vps, result.total_vps, result.turns
         )
+        paired_games.extend(result.game_records)
 
     label = args.experiment or "mcts-policy"
     checkpoint = args.which if args.experiment else str(args.policy_weights)
     rows = [summarize_eval_results(label, checkpoint, seat_results)]
     print_eval_rows(rows)
 
+    if args.paired_results_out:
+        write_paired_results(
+            args.paired_results_out,
+            agent=label,
+            checkpoint=checkpoint,
+            base_seed=args.seed,
+            scenario={
+                "map_type": args.map_type,
+                "opponents": args.opponents,
+                "num_games_per_seat": args.num_games,
+                "seats": list(seat_modes),
+                "vps_to_win": args.vps_to_win,
+                "discard_limit": args.discard_limit,
+            },
+            games=paired_games,
+        )
+        print(f"Paired game outcomes: {args.paired_results_out}")
+
     if wandb_run is not None:
         log_wandb_eval_results(wandb_run, rows, wandb, chart_title="MCTS win rate vs Catanatron")
+        log_paired_games_to_wandb(wandb_run, paired_games, wandb)
         wandb_run.finish()
 
 

@@ -31,7 +31,7 @@ from catanrl.experiment_store import (
     backbone_hidden_dims,
     load_experiment,
 )
-from catanrl.experiments.common_args import DEFAULT_WANDB_PROJECT
+from catanrl.experiments.common_args import DEFAULT_EVAL_SEED, DEFAULT_WANDB_PROJECT
 from catanrl.eval.reporting import log_wandb_eval_results, wilson_interval
 from catanrl.experiments.network_config import resolve_observation_network_args
 from catanrl.features.catanatron_utils import (
@@ -725,7 +725,7 @@ def main():
     parser.add_argument(
         "--seed",
         type=int,
-        default=42,
+        default=DEFAULT_EVAL_SEED,
         help="Random seed",
     )
     parser.add_argument(

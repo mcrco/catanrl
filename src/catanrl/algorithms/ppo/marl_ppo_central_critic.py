@@ -39,6 +39,18 @@ from .buffers import CentralCriticExperienceBuffer
 from .ppo_update import run_ppo_update
 
 
+def save_best_checkpoint_pair(
+    policy_model: torch.nn.Module,
+    critic_model: torch.nn.Module | None,
+    save_dir: str,
+) -> None:
+    """Save the best policy and, when separate, its same-update critic."""
+    os.makedirs(save_dir, exist_ok=True)
+    torch.save(policy_model.state_dict(), os.path.join(save_dir, "policy_best.pt"))
+    if critic_model is not None:
+        torch.save(critic_model.state_dict(), os.path.join(save_dir, "critic_best.pt"))
+
+
 def train(
     num_players: int = 2,
     map_type: Literal["BASE", "TOURNAMENT", "MINI"] = "BASE",
@@ -75,9 +87,9 @@ def train(
     deterministic_policy: bool = False,
     fresh_eval_games_per_opponent: int = 250,
     trend_eval_games_per_opponent: Optional[int] = None,
-    trend_eval_seed: Optional[int] = 43,
+    trend_eval_seed: Optional[int] = 67,
     h2h_eval_games: int = 0,
-    h2h_eval_seed: Optional[int] = 123,
+    h2h_eval_seed: Optional[int] = 67,
     eval_every_updates: int = 1,
     save_every_updates: int = 1,
     target_kl: Optional[float] = None,
@@ -354,9 +366,7 @@ def train(
 
     played_action_buffer: list[np.ndarray] = []
     played_action_type_steps: list[int] = []
-    played_action_type_history: dict[str, list[float]] = {
-        name: [] for name in action_type_names
-    }
+    played_action_type_history: dict[str, list[float]] = {name: [] for name in action_type_names}
 
     def run_and_log_evals() -> None:
         nonlocal best_eval_win_rate, best_eval_critic_mse
@@ -474,25 +484,25 @@ def train(
             if eval_win_rate is not None and eval_win_rate > best_eval_win_rate:
                 best_eval_win_rate = eval_win_rate
                 save_dir = save_path
-                os.makedirs(save_dir, exist_ok=True)
-                best_policy_path = os.path.join(save_dir, "policy_best.pt")
-                torch.save(policy_model.state_dict(), best_policy_path)
+                # The experiment loader treats ``best`` as a policy/critic
+                # pair. Keep both files from the same PPO update; selecting the
+                # critic independently by MSE can make it stale for the best
+                # policy and the state distribution that policy induces.
+                save_best_checkpoint_pair(policy_model, critic_model, save_dir)
                 if wandb.run is not None:
                     wandb.run.summary["best_eval_win_rate_vs_value"] = best_eval_win_rate
                 print(
-                    f"  → Saved best policy (eval win rate vs value: {best_eval_win_rate:.3f})"
+                    "  → Saved best policy"
+                    + (" + paired critic" if critic_model is not None else "")
+                    + f" (eval win rate vs value: {best_eval_win_rate:.3f})"
                 )
 
             eval_critic_mse = trend_eval_metrics.get("eval/value_mse", float("inf"))
             if critic_model is not None and eval_critic_mse < best_eval_critic_mse:
                 best_eval_critic_mse = eval_critic_mse
-                save_dir = save_path
-                os.makedirs(save_dir, exist_ok=True)
-                best_critic_path = os.path.join(save_dir, "critic_best.pt")
-                torch.save(critic_model.state_dict(), best_critic_path)
                 if wandb.run is not None:
                     wandb.run.summary["best_eval_critic_mse"] = best_eval_critic_mse
-                print(f"  → Saved best critic (eval MSE: {best_eval_critic_mse:.4f})")
+                print(f"  → New best critic MSE: {best_eval_critic_mse:.4f}")
 
     def persist_training_state() -> None:
         if not training_state_path:
@@ -528,10 +538,8 @@ def train(
                 actor_batch, critic_batch, valid_masks = decode_observations(observations)
                 actor_tensor = torch.from_numpy(actor_batch).float().to(device)
                 if uses_shared_network:
-                    actions, log_probs, _, values = (
-                        policy_agent.select_actions_and_values_batch(
-                            actor_tensor, valid_masks, deterministic=deterministic_policy
-                        )
+                    actions, log_probs, _, values = policy_agent.select_actions_and_values_batch(
+                        actor_tensor, valid_masks, deterministic=deterministic_policy
                     )
                 else:
                     actions, log_probs, _ = policy_agent.select_actions_batch(

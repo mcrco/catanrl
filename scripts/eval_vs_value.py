@@ -25,7 +25,7 @@ from catanrl.experiment_store import (
     backbone_hidden_dims,
     load_experiment,
 )
-from catanrl.experiments.common_args import DEFAULT_WANDB_PROJECT
+from catanrl.experiments.common_args import DEFAULT_EVAL_SEED, DEFAULT_WANDB_PROJECT
 from catanrl.features.catanatron_utils import ActorObservationLevel, COLOR_ORDER
 from catanrl.models.backbones import (
     BackboneConfig,
@@ -200,7 +200,7 @@ def main():
     parser.add_argument(
         "--seed",
         type=int,
-        default=42,
+        default=DEFAULT_EVAL_SEED,
         help="Random seed",
     )
     parser.add_argument(

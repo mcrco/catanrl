@@ -1,4 +1,4 @@
-from typing import List, Literal
+from typing import Any, List, Literal
 from tqdm import tqdm
 
 from catanatron.game import Game
@@ -15,11 +15,12 @@ def eval(
     opponents: List[Player],
     map_type: Literal["BASE", "TOURNAMENT", "MINI"] = "BASE",
     num_games: int = 100,
-    seed: int = 42,
+    seed: int = 67,
     vps_to_win: int = 15,
     discard_limit: int = 9,
     show_tqdm: bool = False,
     nn_seat: SeatOption = "random",
+    game_records: list[dict[str, Any]] | None = None,
 ):
     wins = 0
     vps = []
@@ -44,14 +45,27 @@ def eval(
         if not allow_upstream_shuffle:
             force_player_order(game, players)
         game.play()
-        if game.winning_color() == nn_player.color:
+        won = game.winning_color() == nn_player.color
+        if won:
             wins += 1
 
-        vps.append(get_actual_victory_points(game.state, nn_player.color))
+        nn_vps = get_actual_victory_points(game.state, nn_player.color)
+        vps.append(nn_vps)
         total_vps_for_game = sum(
             get_actual_victory_points(game.state, color) for color in game.state.colors
         )
         total_vps.append(total_vps_for_game)
         turns.append(game.state.num_turns)
+        if game_records is not None:
+            game_records.append(
+                {
+                    "seat": str(nn_seat),
+                    "episode_seed": int(episode_seed),
+                    "win": won,
+                    "vps": int(nn_vps),
+                    "total_vps": int(total_vps_for_game),
+                    "turns": int(game.state.num_turns),
+                }
+            )
 
     return wins, vps, total_vps, turns

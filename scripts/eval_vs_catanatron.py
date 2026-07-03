@@ -15,6 +15,7 @@ from catanatron.models.player import Player
 
 from catanrl.envs.puffer.common import compute_single_agent_dims
 from catanrl.eval.eval_nn_vs_catanatron import eval
+from catanrl.eval.paired_comparison import log_paired_games_to_wandb, write_paired_results
 from catanrl.eval.reporting import (
     EvalResult,
     log_wandb_eval_results,
@@ -26,7 +27,7 @@ from catanrl.experiment_store import (
     backbone_hidden_dims,
     load_experiment,
 )
-from catanrl.experiments.common_args import DEFAULT_WANDB_PROJECT
+from catanrl.experiments.common_args import DEFAULT_EVAL_SEED, DEFAULT_WANDB_PROJECT
 from catanrl.features.catanatron_utils import ActorObservationLevel, COLOR_ORDER
 from catanrl.models.backbones import (
     BackboneConfig,
@@ -233,7 +234,7 @@ def main():
     parser.add_argument(
         "--seed",
         type=int,
-        default=42,
+        default=DEFAULT_EVAL_SEED,
         help="Random seed",
     )
     parser.add_argument(
@@ -276,6 +277,11 @@ def main():
         type=str,
         default=None,
         help="Optional Weights & Biases group name",
+    )
+    parser.add_argument(
+        "--paired-results-out",
+        default=None,
+        help="Write per-game outcomes for a later exact McNemar comparison.",
     )
 
     args = parser.parse_args()
@@ -355,6 +361,7 @@ def main():
     # Run evaluation
     seat_modes = ("first", "second") if args.nn_seat == "both" else (args.nn_seat,)
     seat_results: dict[str, EvalResult] = {}
+    paired_games: list[dict] = []
     for seat_mode in seat_modes:
         print(f"\nRunning {args.num_games} games ({seat_mode} seat)...")
         seat_results[seat_mode] = EvalResult.from_tuple(
@@ -372,6 +379,7 @@ def main():
                 discard_limit=args.discard_limit,
                 show_tqdm=True,
                 nn_seat=seat_mode,
+                game_records=paired_games,
             )
         )
 
@@ -379,6 +387,24 @@ def main():
     checkpoint = args.which if args.experiment else str(args.policy_weights)
     rows = [summarize_eval_results(label, checkpoint, seat_results)]
     print_eval_rows(rows)
+
+    if args.paired_results_out:
+        write_paired_results(
+            args.paired_results_out,
+            agent=label,
+            checkpoint=checkpoint,
+            base_seed=args.seed,
+            scenario={
+                "map_type": args.map_type,
+                "opponents": args.opponents,
+                "num_games_per_seat": args.num_games,
+                "seats": list(seat_modes),
+                "vps_to_win": args.vps_to_win,
+                "discard_limit": args.discard_limit,
+            },
+            games=paired_games,
+        )
+        print(f"Paired game outcomes: {args.paired_results_out}")
 
     if args.wandb:
         run = wandb.init(
@@ -389,6 +415,7 @@ def main():
             config=vars(args) | {"num_players": num_players},
         )
         log_wandb_eval_results(run, rows, wandb, chart_title="Policy win rate vs Catanatron")
+        log_paired_games_to_wandb(run, paired_games, wandb)
         run.finish()
 
 

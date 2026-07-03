@@ -107,9 +107,12 @@ uv run scripts/eval_vs_catanatron.py \
   --which best \
   --num-games 1000 \
   --seed 67 \
-  --nn-seat {first/second} \
+  --nn-seat both \
   --opponents {AB:2/F}
 ```
+
+With `--nn-seat both`, `--num-games` is the number of games per seat and the
+run reports first-seat, second-seat, and combined win rates.
 
 Or compare two compatible 1v1 experiment policies directly, with each policy
 playing both seats:
@@ -118,7 +121,7 @@ playing both seats:
 uv run scripts/eval_policy_h2h.py \
   --experiment-a {experiment a} --which-a best \
   --experiment-b {experiment b} --which-b best \
-  --games-per-seat 1000 --num-envs 8 --seed 42 \
+  --games-per-seat 1000 --num-envs 8 --seed 67 \
   --wandb --wandb-group policy-h2h-eval \
   --wandb-run-name {wandb run name}
 ```
@@ -297,7 +300,7 @@ setup over-updated the warm-started policy immediately.
 | eval every N updates    | 400 (10 eval passes)                        |
 | save every N updates    | 400 (10 checkpoints)                        |
 | eval games / opponent   | 500 (250 first + 250 second; vs F)          |
-| trend eval seed         | 42                                          |
+| trend eval seed         | 67                                          |
 
 
 ```bash
@@ -318,7 +321,7 @@ SARL_HPARAMS=(
   --eval-every-updates 400
   --save-every-updates 400
   --fresh-eval-games-per-opponent 500
-  --trend-eval-seed 42
+  --trend-eval-seed 67
 )
 ```
 
@@ -410,7 +413,7 @@ Training hparams:
 | save every N updates            | 400                                        |
 | fresh eval games / opponent     | 500                                        |
 | fixed-seed eval games / opponent | 500                                       |
-| fixed-seed eval seed            | 42                                         |
+| fixed-seed eval seed            | 67                                         |
 | head-to-head eval games         | 0 (disabled)                               |
 | metric window                   | 200                                        |
 
@@ -437,7 +440,8 @@ MARL_HPARAMS=(
   --save-every-updates 400
   --fresh-eval-games-per-opponent 500
   --trend-eval-games-per-opponent 500
-  --trend-eval-seed 42
+  --trend-eval-seed 67
+  --h2h-eval-seed 67
   --h2h-eval-games 500
   --metric-window 200
 )
@@ -450,30 +454,187 @@ uv run train-marl-cc --config configs/models/xdim-flat-2p-d-m.yaml \
 
 ---
 
-## Phase 2.5 — Eval experiments (test-time only, no extra training)
+## Phase 2.5 — MCTS and deployment ablations
 
-Two test-time studies on the trained MARL agents. Both gate/inform Phase 3 and
-use the eval scripts directly — no new training runs.
+Use eval seed **67** for every new comparison in this phase and later phases.
+Keep training seeds explicit and separate from this evaluation seed. The win-reward
+study below requires one additional MARL training run; the other studies are
+test-time ablations.
 
-### MARL agent inside the AlphaZero/MCTS harness (before AlphaZero training)
+### Resolve the best Phase 2 policy
 
-Wrap a trained MARL policy+critic in `NNMCTSPlayer` and search at test time
-(`scripts/eval_mcts_vs_catanatron.py --experiment <marl-exp> --which best`).
-Question: does test-time MCTS on top of the MARL net buy win rate, and how much —
-i.e. is AlphaZero training worth it, and what gain should we expect? Compare
-against the same agent with no search (raw `NNPolicyPlayer`) as the baseline.
-
-
-| ID         | base MARL agent  | num-simulations | ismcts-determ. | Status | Win% vs F (1st/2nd) | Notes                      |
-| ---------- | ---------------- | --------------- | -------------- | ------ | ------------------- | -------------------------- |
-| H-raw      | best MARL        | — (no search)   | —              | WIP    |                     | baseline (policy only)     |
-| H-mcts-64  | best MARL        | 64              | 1              | WIP    |                     | plain MCTS                 |
-| H-mcts-128 | best MARL        | 128             | 1              | WIP    |                     | more search                |
-| H-ismcts   | best MARL (full) | 64              | 8              | WIP    |                     | IS-MCTS (public/full only) |
+The completed balanced H2H showed `m-sep-pub-full` beating the older
+`p-sep-pub` SARL policy 61.2% to 38.8% over 2,000 games. Against the stronger
+`p-sep-pub-pub` SARL policy, MARL won more narrowly: 52.1% to 47.9% over 2,000
+games. MARL scored 50.7% from the first seat and 53.5% from the second. Its 95%
+Wilson interval was 49.9–54.3%, so the result favors MARL but is statistically
+marginal rather than decisive.
 
 
-➡ If search lifts win rate meaningfully, proceed to Phase 3; the lift sets the
-expectation for what AlphaZero training should beat.
+| ID | policy A | policy B | Status | Win% A / B | W&B |
+| -- | -------- | -------- | ------ | ---------- | --- |
+| E-h2h-old | `m-sep-pub-full` | `p-sep-pub` | done | 61.2% / 38.8% | [run](https://wandb.ai/myang2-california-institute-of-technology-caltech/catan/runs/azsj36nc) |
+| E-h2h-final | `m-sep-pub-full` | `p-sep-pub-pub` | done | 52.1% / 47.9% | [run](https://wandb.ai/myang2-california-institute-of-technology-caltech/catan/runs/602zqes8) |
+
+
+```bash
+uv run scripts/eval_policy_h2h.py \
+  --experiment-a m-sep-pub-full --which-a best \
+  --experiment-b p-sep-pub-pub --which-b best \
+  --games-per-seat 1000 --num-envs 8 --seed 42 \
+  --wandb --wandb-group policy-h2h-eval \
+  --wandb-run-name h2h-m-sep-pub-full-best-vs-p-sep-pub-pub-best
+```
+
+That completed historical run used seed 42. Seed 67 is the standard for new
+evaluations; do not mix the historical result into paired seed-67 tests.
+
+Use `m-sep-pub-full` as `BEST_PHASE2` in subsequent experiments. Both candidates
+use public actors and critics whose observation levels are compatible with
+belief determinization.
+
+### MARL agent inside the MCTS harness
+
+The first seed-42 runs found 54.0% for the raw policy and 56.55% for search, but
+the search run combined the update-8000 best policy with an independently
+selected update-2000 critic. That MCTS result is superseded. MARL now saves
+`policy_best.pt` and `critic_best.pt` from the same policy-selection update.
+Rerun the baseline with the corrected pair and seed 67 before interpreting lift.
+
+`NNMCTSPlayer` runs `--num-simulations` once per determinization. Therefore
+8 determinizations × 64 simulations means 512 simulations per move.
+
+```bash
+EVAL_GAMES_PER_SEAT=1000
+EVAL_SEED=67
+BEST_PHASE2=m-sep-pub-full
+mkdir -p data/paired_eval
+
+uv run scripts/eval_vs_catanatron.py \
+  --experiment "$BEST_PHASE2" --which best --opponents F \
+  --num-games "$EVAL_GAMES_PER_SEAT" --nn-seat both --seed "$EVAL_SEED" \
+  --paired-results-out data/paired_eval/shaped-raw.json \
+  --wandb --wandb-group phase-2-5-mcts-gate \
+  --wandb-run-name "h-raw-seed67-${BEST_PHASE2}"
+
+uv run scripts/eval_mcts_vs_catanatron.py \
+  --experiment "$BEST_PHASE2" --which best --opponents F \
+  --num-games "$EVAL_GAMES_PER_SEAT" --nn-seat both --seed "$EVAL_SEED" \
+  --num-simulations 64 --ismcts-determinizations 8 --c-puct 1.5 \
+  --num-game-workers 16 --inference-batch-size 64 --inference-wait-ms 2 \
+  --paired-results-out data/paired_eval/shaped-mcts.json \
+  --wandb --wandb-group phase-2-5-mcts-gate \
+  --wandb-run-name "h-shaped-self-d8-s64-seed67-${BEST_PHASE2}"
+
+uv run scripts/compare_paired_eval.py \
+  --a data/paired_eval/shaped-mcts.json \
+  --b data/paired_eval/shaped-raw.json \
+  --output-json data/paired_eval/shaped-mcts-vs-raw-mcnemar.json \
+  --wandb --wandb-group phase-2-5-mcnemar \
+  --wandb-run-name shaped-mcts-vs-raw-mcnemar-seed67
+```
+
+### Ablation A — shaped reward vs win reward
+
+Train the same MARL configuration with `--reward-function win`. Compare both
+the raw actors and their MCTS lift; otherwise a policy-quality difference could
+be mistaken for a value-function improvement. Use the same training seed and
+the same seed-67 evaluation schedule for both agents.
+
+| ID | MARL reward | deployment | Status | Win% vs F (1st/2nd) |
+| -- | ----------- | ---------- | ------ | ------------------- |
+| A-shaped-raw | shaped | raw policy | WIP | |
+| A-shaped-mcts | shaped | d8 × s64 MCTS | WIP | |
+| A-win-raw | win/loss | raw policy | WIP | |
+| A-win-mcts | win/loss | d8 × s64 MCTS | WIP | |
+
+```bash
+uv run train-marl-cc --config configs/models/xdim-flat-2p-d-m.yaml \
+  --load-from-experiment dagger-d-m --load-from-which best \
+  --experiment-name m-sep-pub-full-win --wandb --wandb-group marl-ppo \
+  "${MARL_HPARAMS[@]}" --reward-function win
+
+# Evaluate m-sep-pub-full-win with the raw and MCTS commands above, writing
+# win-raw.json and win-mcts.json. Keep EVAL_GAMES_PER_SEAT=1000 and EVAL_SEED=67.
+
+uv run scripts/compare_paired_eval.py \
+  --a data/paired_eval/win-mcts.json --b data/paired_eval/win-raw.json \
+  --output-json data/paired_eval/win-mcts-vs-raw-mcnemar.json \
+  --wandb --wandb-group phase-2-5-mcnemar \
+  --wandb-run-name win-mcts-vs-raw-mcnemar-seed67
+```
+
+Primary comparison: `(A-win-mcts − A-win-raw)` versus
+`(A-shaped-mcts − A-shaped-raw)`. This tests whether the zero-sum win target is
+more useful to MCTS, rather than merely asking which independently trained actor
+is stronger.
+
+### Ablation B — opponent model inside search
+
+Hold policy, critic, determinization count, simulations, external opponent, and
+seed fixed. Compare `self` against `value`; the latter models the actual
+`ValueFunctionPlayer` used by `--opponents F`.
+
+```bash
+for ADVERSARY in self value; do
+  uv run scripts/eval_mcts_vs_catanatron.py \
+    --experiment m-sep-pub-full --which best --opponents F \
+    --num-games 1000 --nn-seat both --seed 67 \
+    --num-simulations 64 --ismcts-determinizations 8 --c-puct 1.5 \
+    --adversarial-policy "$ADVERSARY" \
+    --num-game-workers 16 --inference-batch-size 64 --inference-wait-ms 2 \
+    --paired-results-out "data/paired_eval/opponent-${ADVERSARY}.json" \
+    --wandb --wandb-group phase-2-5-mcts-opponent-ablation \
+    --wandb-run-name "h-opponent-${ADVERSARY}-d8-s64-seed67"
+done
+
+uv run scripts/compare_paired_eval.py \
+  --a data/paired_eval/opponent-value.json \
+  --b data/paired_eval/opponent-self.json \
+  --output-json data/paired_eval/opponent-value-vs-self-mcnemar.json \
+  --wandb --wandb-group phase-2-5-mcnemar \
+  --wandb-run-name opponent-value-vs-self-mcnemar-seed67
+```
+
+### Ablation C — determinizations vs search depth
+
+Hold the nominal search cap at 512 simulations per move and trade belief
+coverage against simulations per determinization. “Depth” here means the
+per-tree simulation budget; realized tree depth also depends on branching and
+chance outcomes. The implementation uses every unique hypothesis when fewer
+than the requested determinization count exist, so early-game actual compute can
+fall below the cap. Treat this as a nominal-compute sweep unless dynamic budget
+reallocation or per-move search-count logging is added.
+
+| ID | determinizations | sims / determinization | nominal max sims / move | Status |
+| -- | ---------------- | ----------------------- | ----------------------- | ------ |
+| C-d2-s256 | 2 | 256 | 512 | WIP |
+| C-d4-s128 | 4 | 128 | 512 | WIP |
+| C-d8-s64 | 8 | 64 | 512 | WIP |
+| C-d16-s32 | 16 | 32 | 512 | WIP |
+
+```bash
+for SPEC in "2 256" "4 128" "8 64" "16 32"; do
+  read -r DET SIM <<< "$SPEC"
+  uv run scripts/eval_mcts_vs_catanatron.py \
+    --experiment m-sep-pub-full --which best --opponents F \
+    --num-games 1000 --nn-seat both --seed 67 \
+    --num-simulations "$SIM" --ismcts-determinizations "$DET" --c-puct 1.5 \
+    --num-game-workers 16 --inference-batch-size 64 --inference-wait-ms 2 \
+    --paired-results-out "data/paired_eval/budget-d${DET}-s${SIM}.json" \
+    --wandb --wandb-group phase-2-5-mcts-budget-ablation \
+    --wandb-run-name "h-budget-d${DET}-s${SIM}-seed67"
+done
+
+for OTHER in d2-s256 d4-s128 d16-s32; do
+  uv run scripts/compare_paired_eval.py \
+    --a "data/paired_eval/budget-${OTHER}.json" \
+    --b data/paired_eval/budget-d8-s64.json \
+    --output-json "data/paired_eval/budget-${OTHER}-vs-d8-s64-mcnemar.json" \
+    --wandb --wandb-group phase-2-5-mcnemar \
+    --wandb-run-name "budget-${OTHER}-vs-d8-s64-mcnemar-seed67"
+done
+```
 
 ### Belief-averaging: "train on perfect info, average over states at test time"
 
