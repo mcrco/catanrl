@@ -38,6 +38,8 @@ from .action_stats import build_action_type_time_series_chart, compute_action_di
 from .buffers import CentralCriticExperienceBuffer
 from .ppo_update import run_ppo_update
 
+CriticWarmStartMode = Literal["full", "backbone", "none"]
+
 
 def save_best_checkpoint_pair(
     policy_model: torch.nn.Module,
@@ -49,6 +51,37 @@ def save_best_checkpoint_pair(
     torch.save(policy_model.state_dict(), os.path.join(save_dir, "policy_best.pt"))
     if critic_model is not None:
         torch.save(critic_model.state_dict(), os.path.join(save_dir, "critic_best.pt"))
+
+
+def load_critic_warm_start(
+    critic_model: ValueNetworkWrapper,
+    checkpoint_path: str,
+    mode: CriticWarmStartMode,
+    device: str | torch.device,
+) -> None:
+    """Load all critic weights or only its backbone, leaving a fresh value head."""
+    if mode == "none":
+        print("Skipping critic warm-start; using a randomly initialized critic.")
+        return
+    if mode not in ("full", "backbone"):
+        raise ValueError(f"Unknown critic warm-start mode: {mode!r}")
+
+    state = torch.load(checkpoint_path, map_location=device)
+    if mode == "full":
+        critic_model.load_state_dict(state)
+        print(f"Loading critic weights from {checkpoint_path}")
+        return
+
+    prefix = "backbone."
+    backbone_state = {
+        key.removeprefix(prefix): value
+        for key, value in state.items()
+        if key.startswith(prefix)
+    }
+    if not backbone_state:
+        raise ValueError(f"Critic checkpoint has no {prefix!r} parameters: {checkpoint_path}")
+    critic_model.backbone.load_state_dict(backbone_state, strict=True)
+    print(f"Loading critic backbone from {checkpoint_path} (fresh value head)")
 
 
 def train(
@@ -80,6 +113,7 @@ def train(
     save_path: Optional[str] = "weights/marl_central_critic",
     load_policy_weights: Optional[str] = None,
     load_critic_weights: Optional[str] = None,
+    critic_warm_start: CriticWarmStartMode = "full",
     wandb_config: Optional[Dict] = None,
     seed: Optional[int] = 42,
     device: str | torch.device | None = None,
@@ -115,6 +149,13 @@ def train(
     if network_mode not in ("separate", "shared"):
         raise ValueError(f"Unknown network_mode '{network_mode}'")
     uses_shared_network = network_mode == "shared"
+    if critic_warm_start not in ("full", "backbone", "none"):
+        raise ValueError(f"Unknown critic warm-start mode: {critic_warm_start!r}")
+    if uses_shared_network and critic_warm_start != "full":
+        raise ValueError(
+            "Non-full critic warm-start modes require network_mode='separate'; "
+            "a shared network has no independent critic backbone."
+        )
     if uses_shared_network and actor_observation_level != critic_observation_level:
         raise ValueError(
             "network_mode='shared' requires actor and critic observation levels to match, "
@@ -247,9 +288,15 @@ def train(
     if load_policy_weights and os.path.exists(load_policy_weights):
         print(f"Loading policy weights from {load_policy_weights}")
         policy_model.load_state_dict(torch.load(load_policy_weights, map_location=device))
-    if critic_model is not None and load_critic_weights and os.path.exists(load_critic_weights):
-        print(f"Loading critic weights from {load_critic_weights}")
-        critic_model.load_state_dict(torch.load(load_critic_weights, map_location=device))
+    if critic_model is not None and critic_warm_start == "none":
+        print("Skipping critic warm-start; using a randomly initialized critic.")
+    elif critic_model is not None and load_critic_weights and os.path.exists(load_critic_weights):
+        load_critic_warm_start(
+            critic_model,
+            load_critic_weights,
+            critic_warm_start,
+            device,
+        )
 
     policy_agent = PolicyAgent(policy_model, model_type, device)
     policy_optimizer = optim.Adam(policy_model.parameters(), lr=policy_lr)

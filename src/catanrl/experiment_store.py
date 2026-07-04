@@ -1021,7 +1021,8 @@ def resolve_training_architecture_and_warm_start(
 
     warm_start: Optional[TrainingWarmStart] = None
     if exp is not None:
-        require_critic = arch.network_mode == "separate"
+        critic_warm_start = getattr(args, "critic_warm_start", "full")
+        require_critic = arch.network_mode == "separate" and critic_warm_start != "none"
         checkpoints = resolve_training_checkpoints_from_experiment(
             exp, which, require_critic=require_critic
         )

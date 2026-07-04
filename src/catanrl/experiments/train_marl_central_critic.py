@@ -69,6 +69,16 @@ def main():
     parser.add_argument(
         "--critic-lr", type=float, default=3e-4, help="Learning rate for critic network"
     )
+    parser.add_argument(
+        "--critic-warm-start",
+        choices=["full", "backbone", "none"],
+        default="full",
+        help=(
+            "How to initialize a separate critic from --load-from-experiment: "
+            "full loads all critic weights; backbone loads feature weights with a fresh "
+            "value head; none uses a fully random critic."
+        ),
+    )
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--gae-lambda", type=float, default=0.95)
     parser.add_argument("--clip-epsilon", type=float, default=0.2)
@@ -157,6 +167,9 @@ def main():
     if arch.num_players is None:
         print("Error: MARL training requires game.num_players in the architecture preset.")
         return
+    if arch.network_mode == "shared" and args.critic_warm_start != "full":
+        print("Error: --critic-warm-start backbone/none requires network_mode='separate'.")
+        return
 
     try:
         resume = prepare_resume(args, warm_start)
@@ -165,6 +178,9 @@ def main():
         return
 
     if resume.active:
+        if args.critic_warm_start != "full":
+            print("Error: --critic-warm-start only applies to new warm-start runs, not --resume.")
+            return
         experiment_name = resume.experiment_name
         if args.wandb and not args.wandb_run_name:
             args.wandb_run_name = resume.wandb_run_name or experiment_name
@@ -183,6 +199,7 @@ def main():
         "rollout_steps": args.rollout_steps,
         "policy_lr": args.policy_lr,
         "critic_lr": args.critic_lr,
+        "critic_warm_start": args.critic_warm_start,
         "gamma": args.gamma,
         "gae_lambda": args.gae_lambda,
         "clip_epsilon": args.clip_epsilon,
@@ -257,6 +274,7 @@ def main():
         save_path=args.save_path,
         load_policy_weights=warm_start.checkpoints.policy if warm_start else None,
         load_critic_weights=warm_start.checkpoints.critic if warm_start else None,
+        critic_warm_start=args.critic_warm_start,
         wandb_config=wandb_config,
         seed=args.seed,
         device=args.device,
