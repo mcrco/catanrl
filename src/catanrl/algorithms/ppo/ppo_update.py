@@ -11,6 +11,53 @@ from .buffers import CentralCriticExperienceBuffer, ExperienceBuffer
 from .gae import compute_gae_batched
 
 
+VALUE_METRIC_EPSILON = 1e-8
+
+
+def compute_value_diagnostics(
+    value_predictions: np.ndarray,
+    returns: np.ndarray,
+) -> Dict[str, float]:
+    """Compute scale-aware diagnostics for a critic and its return targets."""
+    predictions = np.asarray(value_predictions, dtype=np.float64).reshape(-1)
+    targets = np.asarray(returns, dtype=np.float64).reshape(-1)
+    if predictions.shape != targets.shape:
+        raise ValueError(
+            "value_predictions and returns must have the same shape, "
+            f"got {predictions.shape} and {targets.shape}."
+        )
+    if targets.size == 0:
+        return {
+            "return_mean": 0.0,
+            "return_variance": 0.0,
+            "return_std": 0.0,
+            "value_prediction_mean": 0.0,
+            "value_prediction_std": 0.0,
+            "value_mse": 0.0,
+            "value_normalized_mse": 0.0,
+            "value_explained_variance": 0.0,
+        }
+
+    errors = targets - predictions
+    return_variance = float(np.var(targets))
+    value_mse = float(np.mean(np.square(errors)))
+    explained_variance = (
+        float(1.0 - np.var(errors) / return_variance)
+        if return_variance > VALUE_METRIC_EPSILON
+        else 0.0
+    )
+    return {
+        "return_mean": float(np.mean(targets)),
+        "return_variance": return_variance,
+        "return_std": float(np.sqrt(return_variance)),
+        "value_prediction_mean": float(np.mean(predictions)),
+        "value_prediction_std": float(np.std(predictions)),
+        "value_mse": value_mse,
+        "value_normalized_mse": value_mse / (return_variance + VALUE_METRIC_EPSILON),
+        "value_explained_variance": explained_variance,
+    }
+
+
 def _has_nan_grad(parameters) -> bool:
     return any(param.grad is not None and torch.isnan(param.grad).any() for param in parameters)
 
@@ -33,6 +80,7 @@ def _empty_metrics(
         "ratio_std": 0.0,
         "grad_norm": 0.0,
         "critic_grad_norm": 0.0,
+        **compute_value_diagnostics(np.array([]), np.array([])),
         "num_updates": float(num_updates),
         "early_stop": 1.0 if early_stop else 0.0,
     }
@@ -144,6 +192,7 @@ def run_ppo_update(
     old_log_probs = old_log_probs_tmj.reshape(-1)
     advantages = advantages_tmj.reshape(-1)
     returns = returns_tmj.reshape(-1)
+    value_diagnostics = compute_value_diagnostics(old_values_tmj.reshape(-1), returns)
     valid_action_masks = valid_action_masks_tmj.reshape(time_steps * num_envs, -1)
 
     single_action_fraction = float((valid_action_masks.sum(axis=1) <= 1).mean())
@@ -337,6 +386,7 @@ def run_ppo_update(
         "ratio_std": total_ratio_std / n_updates,
         "grad_norm": total_grad_norm / max(1, grad_norm_updates),
         "critic_grad_norm": total_critic_grad_norm / max(1, critic_grad_norm_updates),
+        **value_diagnostics,
         "num_updates": float(n_updates),
         "early_stop": 1.0 if early_stop else 0.0,
     }
@@ -345,4 +395,4 @@ def run_ppo_update(
     return metrics
 
 
-__all__ = ["run_ppo_update"]
+__all__ = ["compute_value_diagnostics", "run_ppo_update"]

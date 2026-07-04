@@ -383,10 +383,14 @@ def eval_policy_value_against_baselines(
             explained_var = 0.0
 
         metrics["eval/value_mse"] = mse
+        metrics["eval/value_normalized_mse"] = mse / (float(var_returns) + 1e-8)
         metrics["eval/value_mae"] = mae
         metrics["eval/value_explained_variance"] = explained_var
         metrics["eval/value_mean_pred"] = float(np.mean(value_preds))
+        metrics["eval/value_std_pred"] = float(np.std(value_preds))
         metrics["eval/value_mean_return"] = float(np.mean(returns))
+        metrics["eval/value_variance_return"] = float(var_returns)
+        metrics["eval/value_std_return"] = float(np.sqrt(var_returns))
 
     if compare_to_expert and all_expert_labels:
         labels = np.array(all_expert_labels, dtype=np.int64)
