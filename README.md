@@ -500,7 +500,10 @@ The first seed-42 runs found 54.0% for the raw policy and 56.55% for search, but
 the search run combined the update-8000 best policy with an independently
 selected update-2000 critic. That MCTS result is superseded. MARL now saves
 `policy_best.pt` and `critic_best.pt` from the same policy-selection update.
-Rerun the baseline with the corrected pair and seed 67 before interpreting lift.
+For `m-sep-pub-full`, both `best` files have been verified tensor-for-tensor
+against the update-8000 checkpoint pair. The corrected seed-67 raw and MCTS
+evaluations are the next measurement; the MCTS result is not interpretable
+until its paired raw baseline and exact McNemar test finish.
 
 `NNMCTSPlayer` runs `--num-simulations` once per determinization. Therefore
 8 determinizations × 64 simulations means 512 simulations per move.
@@ -544,10 +547,25 @@ the same seed-67 evaluation schedule for both agents.
 
 | ID | MARL reward | deployment | Status | Win% vs F (1st/2nd) |
 | -- | ----------- | ---------- | ------ | ------------------- |
-| A-shaped-raw | shaped | raw policy | WIP | |
-| A-shaped-mcts | shaped | d8 × s64 MCTS | WIP | |
-| A-win-raw | win/loss | raw policy | WIP | |
-| A-win-mcts | win/loss | d8 × s64 MCTS | WIP | |
+| A-shaped-raw | shaped | raw policy | [done](https://wandb.ai/myang2-california-institute-of-technology-caltech/catan/runs/w3yrqxyr) | 52.05% (54.1% / 50.0%) |
+| A-shaped-mcts | shaped | d8 × s64 MCTS | [running](https://wandb.ai/myang2-california-institute-of-technology-caltech/catan/runs/spoldu20) | |
+| A-win-raw | win/loss, `gamma=0.999`, GAE `lambda=0.99` | raw policy | [done](https://wandb.ai/myang2-california-institute-of-technology-caltech/catan/runs/f0krfssc) | 44.85% (47.5% / 42.2%) |
+| A-win-mcts | win/loss, `gamma=0.999`, GAE `lambda=0.99` | d8 × s64 MCTS | [done](https://wandb.ai/myang2-california-institute-of-technology-caltech/catan/runs/7bihx9g4) | 47.30% (49.5% / 45.1%) |
+
+The strongest completed win-reward run is
+[`m-sep-pub-full-win-g999-l99`](https://wandb.ai/myang2-california-institute-of-technology-caltech/catan/runs/i5ho4ux8).
+Its MCTS result improves on its paired raw policy by 2.45 percentage points,
+with 412 MCTS-only wins and 363 raw-only wins over 2,000 games. The exact
+two-sided McNemar p-value is 0.0846, so this is suggestive but not sufficient
+evidence of search lift. The win-reward policy is also substantially weaker
+than the historical shaped-reward raw result (44.85% versus 54.0%), making a
+corrected shaped-reward comparison higher priority than another win-reward
+training variant.
+
+The corrected shaped-reward raw baseline scored 52.05% over 2,000 seed-67
+games (54.1% first seat, 50.0% second seat). This is the paired reference for
+the running d8 × s64 search evaluation; the older seed-42 raw result is not
+used in the search-lift significance test.
 
 ```bash
 uv run train-marl-cc --config configs/models/xdim-flat-2p-d-m.yaml \
@@ -576,22 +594,26 @@ Hold policy, critic, determinization count, simulations, external opponent, and
 seed fixed. Compare `self` against `value`; the latter models the actual
 `ValueFunctionPlayer` used by `--opponents F`.
 
+The running A-shaped-mcts evaluation is already the exact `self` baseline for
+this ablation (same checkpoint, seed, seats, d8 × s64 budget, and `c_puct`).
+Reuse `shaped-mcts.json` rather than spending another evaluation run on an
+identical condition. The `value` condition is queued to start after the shaped
+MCTS-vs-raw paired comparison completes.
+
 ```bash
-for ADVERSARY in self value; do
-  uv run scripts/eval_mcts_vs_catanatron.py \
-    --experiment m-sep-pub-full --which best --opponents F \
-    --num-games 1000 --nn-seat both --seed 67 \
-    --num-simulations 64 --ismcts-determinizations 8 --c-puct 1.5 \
-    --adversarial-policy "$ADVERSARY" \
-    --num-game-workers 16 --inference-batch-size 64 --inference-wait-ms 2 \
-    --paired-results-out "data/paired_eval/opponent-${ADVERSARY}.json" \
-    --wandb --wandb-group phase-2-5-mcts-opponent-ablation \
-    --wandb-run-name "h-opponent-${ADVERSARY}-d8-s64-seed67"
-done
+uv run scripts/eval_mcts_vs_catanatron.py \
+  --experiment m-sep-pub-full --which best --opponents F \
+  --num-games 1000 --nn-seat both --seed 67 \
+  --num-simulations 64 --ismcts-determinizations 8 --c-puct 1.5 \
+  --adversarial-policy value \
+  --num-game-workers 16 --inference-batch-size 64 --inference-wait-ms 2 \
+  --paired-results-out data/paired_eval/opponent-value.json \
+  --wandb --wandb-group phase-2-5-mcts-opponent-ablation \
+  --wandb-run-name h-opponent-value-d8-s64-seed67
 
 uv run scripts/compare_paired_eval.py \
   --a data/paired_eval/opponent-value.json \
-  --b data/paired_eval/opponent-self.json \
+  --b data/paired_eval/shaped-mcts.json \
   --output-json data/paired_eval/opponent-value-vs-self-mcnemar.json \
   --wandb --wandb-group phase-2-5-mcnemar \
   --wandb-run-name opponent-value-vs-self-mcnemar-seed67
