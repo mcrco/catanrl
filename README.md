@@ -414,6 +414,7 @@ Training hparams:
 | fresh eval games / opponent     | 500                                        |
 | fixed-seed eval games / opponent | 500                                       |
 | fixed-seed eval seed            | 67                                         |
+| eval baselines                  | random + value                             |
 | head-to-head eval games         | 500                                        |
 | head-to-head eval seed          | 67                                         |
 | metric window                   | 200                                        |
@@ -500,7 +501,11 @@ The first seed-42 runs found 54.0% for the raw policy and 56.55% for search, but
 the search run combined the update-8000 best policy with an independently
 selected update-2000 critic. That MCTS result is superseded. MARL now saves
 `policy_best.pt` and `critic_best.pt` from the same policy-selection update.
-Rerun the baseline with the corrected pair and seed 67 before interpreting lift.
+The corrected seed-67 comparison is complete: raw policy won 52.05% and d8 x
+s64 search won 56.75% over the same 2,000 games. Search gained 4.70 percentage
+points (435 search-only wins vs 341 raw-only wins; exact two-sided McNemar
+`p=0.000831`). This establishes real search lift for the shaped-reward model,
+but model-strength tuning is now prioritized before finer search ablations.
 
 `NNMCTSPlayer` runs `--num-simulations` once per determinization. Therefore
 8 determinizations × 64 simulations means 512 simulations per move.
@@ -544,10 +549,10 @@ the same seed-67 evaluation schedule for both agents.
 
 | ID | MARL reward | deployment | Status | Win% vs F (1st/2nd) |
 | -- | ----------- | ---------- | ------ | ------------------- |
-| A-shaped-raw | shaped | raw policy | WIP | |
-| A-shaped-mcts | shaped | d8 × s64 MCTS | WIP | |
-| A-win-raw | win/loss | raw policy | WIP | |
-| A-win-mcts | win/loss | d8 × s64 MCTS | WIP | |
+| A-shaped-raw | shaped | raw policy | done | 52.05% (54.1% / 50.0%) |
+| A-shaped-mcts | shaped | d8 × s64 MCTS | done | 56.75% (59.1% / 54.4%) |
+| A-win-raw | win/loss, `gamma=0.999`, GAE `lambda=0.99` | raw policy | done | 44.85% (47.5% / 42.2%) |
+| A-win-mcts | win/loss, `gamma=0.999`, GAE `lambda=0.99` | d8 × s64 MCTS | done | 47.30% (49.5% / 45.1%) |
 
 ```bash
 uv run train-marl-cc --config configs/models/xdim-flat-2p-d-m.yaml \
@@ -570,11 +575,21 @@ Primary comparison: `(A-win-mcts − A-win-raw)` versus
 more useful to MCTS, rather than merely asking which independently trained actor
 is stronger.
 
+Result: win-reward search gained 2.45 points, but the paired result was not
+conclusive (`p=0.0846`) and its raw policy was much weaker than shaped reward.
+Do not spend more training budget on win-reward variants until a separate result
+motivates reopening this branch.
+
 ### Ablation B — opponent model inside search
 
 Hold policy, critic, determinization count, simulations, external opponent, and
 seed fixed. Compare `self` against `value`; the latter models the actual
 `ValueFunctionPlayer` used by `--opponents F`.
+
+This ablation is complete. The `value` opponent model scored 54.25%, compared
+with 56.75% for `self`, a -2.50 point difference (`p=0.0785`). There is no
+evidence that explicitly modeling `ValueFunctionPlayer` helps, so retain `self`
+as the search default.
 
 ```bash
 for ADVERSARY in self value; do
@@ -611,7 +626,7 @@ reallocation or per-move search-count logging is added.
 | -- | ---------------- | ----------------------- | ----------------------- | ------ |
 | C-d2-s256 | 2 | 256 | 512 | WIP |
 | C-d4-s128 | 4 | 128 | 512 | WIP |
-| C-d8-s64 | 8 | 64 | 512 | WIP |
+| C-d8-s64 | 8 | 64 | 512 | baseline done (56.75%) |
 | C-d16-s32 | 16 | 32 | 512 | WIP |
 
 ```bash
@@ -663,6 +678,104 @@ worth to the bot.
 
 ➡ Records: belief vs public answers "is perfect-info + averaging comparable?";
 oracle vs belief answers "how much does private info matter?".
+
+---
+
+## Phase 2.6 — strengthen the shaped-reward MARL policy
+
+The corrected shaped-reward agent is only a 52.05% raw policy against
+`ValueFunctionPlayer`, even though d8 x s64 IS-MCTS raises it to 56.75%. Before
+running search-budget ablations or AlphaZero, first test whether the PPO baseline
+under-optimizes each rollout. With 8,192 agent samples, one epoch and batch size
+2,048 produce only four optimizer minibatches per rollout.
+
+Self-play remains the training environment. `ValueFunctionPlayer` is a stable
+external benchmark, not a training opponent. Training episode length and VP are
+diagnostics only: symmetric self-play always produces a winner and can improve
+without moving either metric monotonically.
+
+### Evaluation protocol
+
+- Evaluate only against `ValueFunctionPlayer` with `--eval-baselines value`;
+  random win rate is saturated and no longer discriminates between models.
+- Use fixed trend seed **123** for sweep selection. Seed **67** remains the
+  final paired confirmation set and must not be used to choose a sweep winner.
+- Disable fresh baseline eval during screening to avoid duplicating the fixed
+  validation workload. Run 500 games per fixed-seed pass, balanced across seats.
+- Run current-vs-champion H2H at each evaluation. A candidate must improve
+  against `F` without a clear regression against its previous champion.
+- Rank runs primarily by the mean `eval_trend/win_rate_vs_value` over the last
+  three evaluation passes. Peak checkpoint win rate is secondary because it is
+  more vulnerable to evaluation noise.
+
+### Update-intensity screen
+
+All candidates use the same DAgger initialization, shaped reward, training seed,
+rollout size, and 8,192,000 environment-timestep screening budget. Change only
+the PPO reuse variables shown below.
+
+| ID | train epochs | batch size | policy LR | critic LR | optimizer minibatches / rollout | Status |
+| -- | ------------ | ---------- | --------- | --------- | ------------------------------- | ------ |
+| T0 | 1 | 2,048 | 1e-4 | 1e-4 | 4 | planned control |
+| T1 | 2 | 2,048 | 1e-4 | 1e-4 | 8 | planned |
+| T2 | 2 | 1,024 | 1e-4 | 1e-4 | 16 | planned |
+| T3 | 2 | 1,024 | 5e-5 | 1e-4 | 16 | planned; lower actor step size |
+
+```bash
+MARL_TUNE_HPARAMS=(
+  --total-timesteps 8192000
+  --rollout-steps 512
+  --num-envs 8
+  --gamma 0.99
+  --gae-lambda 0.95
+  --clip-epsilon 0.2
+  --value-coef 0.5
+  --entropy-coef 0.001
+  --activity-coef 0.0
+  --max-grad-norm 0.5
+  --target-kl 0.01
+  --reward-function shaped
+  --seed 42
+  --eval-every-updates 200
+  --save-every-updates 200
+  --fresh-eval-games-per-opponent 0
+  --trend-eval-games-per-opponent 500
+  --trend-eval-seed 123
+  --eval-baselines value
+  --h2h-eval-games 500
+  --h2h-eval-seed 123
+  --metric-window 200
+)
+
+# ID epochs batch policy_lr critic_lr
+for SPEC in \
+  "t0 1 2048 1e-4 1e-4" \
+  "t1 2 2048 1e-4 1e-4" \
+  "t2 2 1024 1e-4 1e-4" \
+  "t3 2 1024 5e-5 1e-4"; do
+  read -r ID EPOCHS BATCH POLICY_LR CRITIC_LR <<< "$SPEC"
+  uv run train-marl-cc --config configs/models/xdim-flat-2p-d-m.yaml \
+    --load-from-experiment dagger-d-m --load-from-which best \
+    --experiment-name "m-tune-${ID}" \
+    --train-epochs "$EPOCHS" --batch-size "$BATCH" \
+    --policy-lr "$POLICY_LR" --critic-lr "$CRITIC_LR" \
+    --wandb --wandb-group marl-ppo-update-intensity \
+    "${MARL_TUNE_HPARAMS[@]}"
+done
+```
+
+Monitor `train/approx_kl`, `train/clipfrac`, entropy, KL early stops, critic
+explained variance, and normalized critic MSE. Extra epochs are useful only if
+they improve held-out play without persistent KL clipping or policy collapse.
+
+### Promotion and confirmation
+
+Promote at most one candidate. Retrain the winning configuration for the full
+16,384,000-timestep budget with training seeds 42 and 43. Then compare both
+resulting policies against `F` on the held-out seed-67 schedule (1,000 games per
+seat) and run balanced H2H against `m-sep-pub-full`. Resume IS-MCTS allocation
+ablations only if the new raw policy shows a repeatable improvement rather than
+a single favorable validation checkpoint.
 
 ---
 
