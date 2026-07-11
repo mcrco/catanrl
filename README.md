@@ -755,7 +755,7 @@ for SPEC in \
   "t3 2 1024 5e-5 1e-4"; do
   read -r ID EPOCHS BATCH POLICY_LR CRITIC_LR <<< "$SPEC"
   uv run train-marl-cc --config configs/models/xdim-flat-2p-d-m.yaml \
-    --load-from-experiment dagger-d-m --load-from-which last \
+    --load-from-experiment dagger-d-m --load-from-which best \
     --experiment-name "m-tune-${ID}" \
     --train-epochs "$EPOCHS" --batch-size "$BATCH" \
     --policy-lr "$POLICY_LR" --critic-lr "$CRITIC_LR" \
