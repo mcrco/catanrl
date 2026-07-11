@@ -91,7 +91,14 @@ def main():
         "--fresh-eval-games-per-opponent",
         type=int,
         default=1000,
-        help="Fresh evaluation games per opponent (RandomPlayer and ValueFunctionPlayer).",
+        help="Fresh evaluation games per selected baseline opponent.",
+    )
+    parser.add_argument(
+        "--eval-baselines",
+        nargs="+",
+        choices=["random", "value"],
+        default=["random", "value"],
+        help="Baseline opponents used for fresh and fixed-seed training evaluations.",
     )
     parser.add_argument(
         "--trend-eval-games-per-opponent",
@@ -216,6 +223,7 @@ def main():
         "trend_eval_games_per_opponent": args.trend_eval_games_per_opponent,
         "trend_eval_seed": args.trend_eval_seed,
         "fresh_eval_games_per_opponent": args.fresh_eval_games_per_opponent,
+        "eval_baselines": args.eval_baselines,
         "h2h_eval_games": args.h2h_eval_games,
         "h2h_eval_seed": args.h2h_eval_seed,
         "eval_every_updates": args.eval_every_updates,
@@ -281,6 +289,7 @@ def main():
         max_grad_norm=args.max_grad_norm,
         deterministic_policy=args.deterministic_policy,
         fresh_eval_games_per_opponent=args.fresh_eval_games_per_opponent,
+        eval_baselines=args.eval_baselines,
         trend_eval_games_per_opponent=args.trend_eval_games_per_opponent,
         trend_eval_seed=args.trend_eval_seed,
         h2h_eval_games=args.h2h_eval_games,

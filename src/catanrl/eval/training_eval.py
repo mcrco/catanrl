@@ -23,7 +23,13 @@ from ..models.wrappers import PolicyNetworkWrapper, PolicyValueNetworkWrapper, V
 from ..players.nn_policy_player import NNPolicyPlayer
 from ..utils.seeding import derive_seed
 from .eval_nn_vs_catanatron import eval
-from .vectorized_rollout import SeatOption, run_policy_h2h_eval_vectorized, run_policy_value_eval_vectorized
+from .vectorized_rollout import (
+    SeatOption,
+    run_policy_h2h_eval_vectorized,
+    run_policy_value_eval_vectorized,
+)
+
+EvalBaseline = Literal["random", "value"]
 
 
 def _seat_split_games(num_games: int) -> int:
@@ -133,7 +139,9 @@ def eval_policy_against_champion(
     if num_players < 2:
         raise ValueError("Champion eval requires at least 2 players.")
 
-    torch_device = torch.device(device) if device is not None else next(policy_model.parameters()).device
+    torch_device = (
+        torch.device(device) if device is not None else next(policy_model.parameters()).device
+    )
     champion_model = copy.deepcopy(policy_model).to(torch_device)
     champion_state = torch.load(champion_policy_path, map_location=torch_device)
     champion_model.load_state_dict(champion_state)
@@ -158,9 +166,7 @@ def eval_policy_against_champion(
     )
 
     metrics["eval_h2h/win_rate_vs_champion"] = wins / num_games if num_games else 0.0
-    metrics["eval_h2h/avg_turns_vs_champion"] = (
-        sum(turns) / len(turns) if turns else 0.0
-    )
+    metrics["eval_h2h/avg_turns_vs_champion"] = sum(turns) / len(turns) if turns else 0.0
     metrics["eval_h2h/games"] = float(num_games)
 
     if log_to_wandb and global_step is not None:
@@ -176,6 +182,7 @@ def eval_policy_value_against_baselines(
     map_type: Literal["BASE", "TOURNAMENT", "MINI"],
     num_envs: int,
     eval_opponent_configs: Optional[Sequence[str]] = None,
+    eval_baselines: Sequence[EvalBaseline] = ("random", "value"),
     num_games: int = 250,
     gamma: float = 0.99,
     reward_function: Literal["shaped", "win"] = "shaped",
@@ -210,6 +217,7 @@ def eval_policy_value_against_baselines(
         eval_opponent_configs: Opponent configs from training/eval setup. Only the
             number of opponent slots is used so baseline evals run with the same
             player count as training.
+        eval_baselines: Baseline opponent types to evaluate against.
         num_games: Number of games to play against EACH opponent.
         gamma: Discount factor for computing returns.
         reward_function: Reward function whose discounted returns the critic predicts.
@@ -235,10 +243,21 @@ def eval_policy_value_against_baselines(
     if num_opponents < 1:
         raise ValueError("eval_opponent_configs must contain at least one opponent.")
 
-    # Define opponent types to evaluate against while preserving player count.
+    if not eval_baselines:
+        raise ValueError("eval_baselines must contain at least one baseline.")
+    unknown_baselines = {str(baseline) for baseline in eval_baselines} - {
+        "random",
+        "value",
+    }
+    if unknown_baselines:
+        raise ValueError(f"Unknown eval baselines: {sorted(unknown_baselines)}")
+    if len(set(eval_baselines)) != len(eval_baselines):
+        raise ValueError("eval_baselines must not contain duplicates.")
+
+    # Preserve the requested order and the player count used during training.
+    baseline_opponents = {"random": "random", "value": "F"}
     opponent_configs_list = [
-        ("random", ["random"] * num_opponents),
-        ("value", ["F"] * num_opponents),
+        (baseline, [baseline_opponents[baseline]] * num_opponents) for baseline in eval_baselines
     ]
 
     if num_games <= 0:
@@ -263,7 +282,9 @@ def eval_policy_value_against_baselines(
         ) as eval_pbar:
             for opponent_idx, (opponent_name, opponent_configs) in enumerate(opponent_configs_list):
                 opponent_seed = derive_seed(seed, "opponent", opponent_name, opponent_idx)
-                seat_results: dict[str, tuple[int, list[int], list[float], list[float], list[int], list[int]]] = {}
+                seat_results: dict[
+                    str, tuple[int, list[int], list[float], list[float], list[int], list[int]]
+                ] = {}
                 for seat_mode in ("first", "second"):
                     seat_seed = derive_seed(opponent_seed, "seat", seat_mode)
                     seat_results[seat_mode] = run_policy_value_eval_vectorized(
@@ -289,8 +310,22 @@ def eval_policy_value_against_baselines(
                         progress_callback=eval_pbar.update,
                     )
 
-                first_wins, first_turns, first_value_preds, first_returns, first_expert_labels, first_expert_preds = seat_results["first"]
-                second_wins, second_turns, second_value_preds, second_returns, second_expert_labels, second_expert_preds = seat_results["second"]
+                (
+                    first_wins,
+                    first_turns,
+                    first_value_preds,
+                    first_returns,
+                    first_expert_labels,
+                    first_expert_preds,
+                ) = seat_results["first"]
+                (
+                    second_wins,
+                    second_turns,
+                    second_value_preds,
+                    second_returns,
+                    second_expert_labels,
+                    second_expert_preds,
+                ) = seat_results["second"]
 
                 first_rate = first_wins / seat_eval_games
                 second_rate = second_wins / seat_eval_games
@@ -315,7 +350,9 @@ def eval_policy_value_against_baselines(
     else:
         for opponent_idx, (opponent_name, opponent_configs) in enumerate(opponent_configs_list):
             opponent_seed = derive_seed(seed, "opponent", opponent_name, opponent_idx)
-            seat_results: dict[str, tuple[int, list[int], list[float], list[float], list[int], list[int]]] = {}
+            seat_results: dict[
+                str, tuple[int, list[int], list[float], list[float], list[int], list[int]]
+            ] = {}
             for seat_mode in ("first", "second"):
                 seat_seed = derive_seed(opponent_seed, "seat", seat_mode)
                 seat_results[seat_mode] = run_policy_value_eval_vectorized(
@@ -340,8 +377,22 @@ def eval_policy_value_against_baselines(
                     seed=seat_seed,
                 )
 
-            first_wins, first_turns, first_value_preds, first_returns, first_expert_labels, first_expert_preds = seat_results["first"]
-            second_wins, second_turns, second_value_preds, second_returns, second_expert_labels, second_expert_preds = seat_results["second"]
+            (
+                first_wins,
+                first_turns,
+                first_value_preds,
+                first_returns,
+                first_expert_labels,
+                first_expert_preds,
+            ) = seat_results["first"]
+            (
+                second_wins,
+                second_turns,
+                second_value_preds,
+                second_returns,
+                second_expert_labels,
+                second_expert_preds,
+            ) = seat_results["second"]
 
             first_rate = first_wins / seat_eval_games
             second_rate = second_wins / seat_eval_games

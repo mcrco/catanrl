@@ -15,7 +15,11 @@ import wandb
 
 from ...envs import compute_multiagent_input_dim, compute_single_agent_dims, decode_puffer_batch
 from ...envs.puffer.multi_agent_env import make_vectorized_envs as make_marl_vectorized_envs
-from ...eval.training_eval import eval_policy_against_champion, eval_policy_value_against_baselines
+from ...eval.training_eval import (
+    EvalBaseline,
+    eval_policy_against_champion,
+    eval_policy_value_against_baselines,
+)
 from ...features.catanatron_utils import (
     ActorObservationLevel,
     CriticObservationLevel,
@@ -74,9 +78,7 @@ def load_critic_warm_start(
 
     prefix = "backbone."
     backbone_state = {
-        key.removeprefix(prefix): value
-        for key, value in state.items()
-        if key.startswith(prefix)
+        key.removeprefix(prefix): value for key, value in state.items() if key.startswith(prefix)
     }
     if not backbone_state:
         raise ValueError(f"Critic checkpoint has no {prefix!r} parameters: {checkpoint_path}")
@@ -120,6 +122,7 @@ def train(
     max_grad_norm: float = 1.0,
     deterministic_policy: bool = False,
     fresh_eval_games_per_opponent: int = 250,
+    eval_baselines: Sequence[EvalBaseline] = ("random", "value"),
     trend_eval_games_per_opponent: Optional[int] = None,
     trend_eval_seed: Optional[int] = 67,
     h2h_eval_games: int = 0,
@@ -428,6 +431,7 @@ def train(
                 model_type=model_type,
                 map_type=map_type,
                 eval_opponent_configs=["random"] * (num_players - 1),
+                eval_baselines=eval_baselines,
                 num_games=fresh_eval_games_per_opponent,
                 gamma=gamma,
                 reward_function=reward_function,
@@ -447,6 +451,7 @@ def train(
                 model_type=model_type,
                 map_type=map_type,
                 eval_opponent_configs=["random"] * (num_players - 1),
+                eval_baselines=eval_baselines,
                 num_games=trend_eval_games,
                 gamma=gamma,
                 reward_function=reward_function,
