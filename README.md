@@ -714,12 +714,17 @@ All candidates use the same DAgger initialization, shaped reward, training seed,
 rollout size, and 8,192,000 environment-timestep screening budget. Change only
 the PPO reuse variables shown below.
 
-| ID | train epochs | batch size | policy LR | critic LR | optimizer minibatches / rollout | Status |
-| -- | ------------ | ---------- | --------- | --------- | ------------------------------- | ------ |
-| T0 | 1 | 2,048 | 1e-4 | 1e-4 | 4 | planned control |
-| T1 | 2 | 2,048 | 1e-4 | 1e-4 | 8 | planned |
-| T2 | 2 | 1,024 | 1e-4 | 1e-4 | 16 | planned |
-| T3 | 2 | 1,024 | 5e-5 | 1e-4 | 16 | planned; lower actor step size |
+| ID | train epochs | batch size | policy LR | critic LR | minibatches / rollout | Best / final / last-3 mean vs F | Status |
+| -- | ------------ | ---------- | --------- | --------- | --------------------- | ------------------------------- | ------ |
+| T0 | 1 | 2,048 | 1e-4 | 1e-4 | 4 | 47.2% / 43.0% / 43.8% | done ([retry](https://wandb.ai/myang2-california-institute-of-technology-caltech/catan/runs/av2929ms)) |
+| T1 | 2 | 2,048 | 1e-4 | 1e-4 | 8 | 44.0% / 38.8% / 39.4% | done ([retry](https://wandb.ai/myang2-california-institute-of-technology-caltech/catan/runs/ot4t0kgf)) |
+| T2 | 2 | 1,024 | 1e-4 | 1e-4 | 16 | 39.4% / 35.8% / 35.4% | done ([run](https://wandb.ai/myang2-california-institute-of-technology-caltech/catan/runs/hobxaegk)) |
+| T3 | 2 | 1,024 | 5e-5 | 1e-4 | 16 | **56.2% / 55.4% / 54.7%** | **promoted** ([run](https://wandb.ai/myang2-california-institute-of-technology-caltech/catan/runs/1uzyrq0j)) |
+
+T0 and T1 initially failed on the first PPO backward pass at batch size 2,048
+because of CUDA allocator fragmentation. Both completed when retried with
+`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`; the retry results are the
+ones reported above.
 
 ```bash
 MARL_TUNE_HPARAMS=(
@@ -768,14 +773,69 @@ Monitor `train/approx_kl`, `train/clipfrac`, entropy, KL early stops, critic
 explained variance, and normalized critic MSE. Extra epochs are useful only if
 they improve held-out play without persistent KL clipping or policy collapse.
 
-### Promotion and confirmation
+T3 is the clear screen winner. T2 used the same 16 minibatches per rollout but
+retained policy LR `1e-4`; it peaked on the first evaluation and then degraded.
+Halving only the policy LR produced a steadily improving T3 curve while KL and
+clip fraction remained controlled. The critic configuration was identical in
+T2 and T3, so the main evidence points to actor step size rather than critic
+quality. T3 is not the old long-run configuration: the old run used one epoch,
+batch size 2,048, and policy LR `1e-4` (four minibatches per rollout).
 
-Promote at most one candidate. Retrain the winning configuration for the full
-16,384,000-timestep budget with training seeds 42 and 43. Then compare both
-resulting policies against `F` on the held-out seed-67 schedule (1,000 games per
-seat) and run balanced H2H against `m-sep-pub-full`. Resume IS-MCTS allocation
-ablations only if the new raw policy shows a repeatable improvement rather than
-a single favorable validation checkpoint.
+### T3 long-run confirmation
+
+Retrain T3 from the same `dagger-d-m` checkpoint for 16,384,000 environment
+timesteps with training seeds 42 and 43. These are independent self-play
+trajectories; both use seed 123 only for during-training validation. After both
+runs finish, compare their best policies against `F` on the common seed-67
+schedule (1,000 games per seat) and run balanced H2H against
+`m-sep-pub-full`. Resume IS-MCTS allocation ablations only if the new raw policy
+shows a repeatable improvement rather than a single favorable training seed.
+
+| ID | T3 training seed | Timesteps | Validation seed | Status |
+| -- | ---------------- | --------- | --------------- | ------ |
+| T3-long-s42 | 42 | 16,384,000 | 123 | planned |
+| T3-long-s43 | 43 | 16,384,000 | 123 | planned |
+
+```bash
+MARL_T3_LONG_HPARAMS=(
+  --total-timesteps 16384000
+  --rollout-steps 512
+  --train-epochs 2
+  --batch-size 1024
+  --num-envs 8
+  --policy-lr 5e-5
+  --critic-lr 1e-4
+  --gamma 0.99
+  --gae-lambda 0.95
+  --clip-epsilon 0.2
+  --value-coef 0.5
+  --entropy-coef 0.001
+  --activity-coef 0.0
+  --max-grad-norm 0.5
+  --target-kl 0.01
+  --reward-function shaped
+  --eval-every-updates 200
+  --save-every-updates 200
+  --fresh-eval-games-per-opponent 0
+  --trend-eval-games-per-opponent 500
+  --trend-eval-seed 123
+  --eval-baselines value
+  --h2h-eval-games 500
+  --h2h-eval-seed 123
+  --metric-window 200
+)
+
+for TRAIN_SEED in 42 43; do
+  PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+  uv run train-marl-cc \
+    --config configs/models/xdim-flat-2p-d-m.yaml \
+    --load-from-experiment dagger-d-m --load-from-which best \
+    --experiment-name "m-t3-long-s${TRAIN_SEED}" \
+    --seed "$TRAIN_SEED" \
+    --wandb --wandb-group marl-ppo-t3-confirmation \
+    "${MARL_T3_LONG_HPARAMS[@]}"
+done
+```
 
 ---
 
