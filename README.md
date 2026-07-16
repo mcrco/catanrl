@@ -652,33 +652,6 @@ for OTHER in d2-s256 d4-s128 d16-s32; do
 done
 ```
 
-### Belief-averaging: "train on perfect info, average over states at test time"
-
-The belief player **always wraps a `full/full` agent** — it marginalizes a
-perfect-info policy over the opponent dev-card belief, so a `public`/`private`
-net (which never sees full info) would make no sense here. Deploy it with
-`BeliefAveragedPolicyPlayer` (`scripts/eval_belief_policy.py --experiment <full-marl-exp> --also-oracle`); the belief is exact in 1v1. Compare three points
-to quantify how much hidden info matters to the net:
-
-- **oracle** — full-info net seeing true hidden cards (cheats; upper bound).
-- **belief-averaged** — same net, no cheating, averaged over the belief.
-- **public native** — the natively `public/public` MARL agent (reference).
-
-If belief-averaged ≈ public native, then training on perfect info + averaging is
-a viable substitute; the oracle − belief gap measures how much private info is
-worth to the bot.
-
-
-| ID       | agent (train info) | deploy / eval             | Status | Win% vs F (1st/2nd) | Notes       |
-| -------- | ------------------ | ------------------------- | ------ | ------------------- | ----------- |
-| B-oracle | full / full        | full-info oracle (cheats) | WIP    |                     | upper bound |
-| B-belief | full / full        | belief-averaged           | WIP    |                     | no cheating |
-| B-public | public / public    | direct (`NNPolicyPlayer`) | WIP    |                     | reference   |
-
-
-➡ Records: belief vs public answers "is perfect-info + averaging comparable?";
-oracle vs belief answers "how much does private info matter?".
-
 ---
 
 ## Phase 2.6 — strengthen the shaped-reward MARL policy
@@ -793,8 +766,13 @@ shows a repeatable improvement rather than a single favorable training seed.
 
 | ID | T3 training seed | Timesteps | Validation seed | Status |
 | -- | ---------------- | --------- | --------------- | ------ |
-| T3-long-s42 | 42 | 16,384,000 | 123 | planned |
-| T3-long-s43 | 43 | 16,384,000 | 123 | planned |
+| T3-long-s42 | 42 | 16,384,000 | 123 | done ([run](https://wandb.ai/myang2-california-institute-of-technology-caltech/catan/runs/e28ln908)); best/final/last-3 = 60.2%/54.6%/54.6% |
+| T3-long-s43 | 43 | 16,384,000 | 123 | done ([run](https://wandb.ai/myang2-california-institute-of-technology-caltech/catan/runs/u9xjpe3d)); best/final/last-3 = 55.2%/55.0%/53.5% |
+
+The two long runs confirm a stable 54-55% validation plateau but do not show a
+sustained gain over the short T3 run (54.7% last-three mean). Longer PPO training
+alone is therefore not the next direction; Phase 2.7 now tests whether a
+full-information actor creates a higher oracle ceiling.
 
 ```bash
 MARL_T3_LONG_HPARAMS=(
@@ -835,6 +813,131 @@ for TRAIN_SEED in 42 43; do
     --wandb --wandb-group marl-ppo-t3-confirmation \
     "${MARL_T3_LONG_HPARAMS[@]}"
 done
+```
+
+---
+
+## Phase 2.7 — full-information actor and deployment
+
+The belief player **always wraps a `full/full` agent**: it marginalizes a
+perfect-information policy over the opponent dev-card belief. In 1v1 that belief
+is enumerated exactly. Compare three points to determine whether privileged actor
+training creates a useful ceiling and whether it survives legal deployment:
+
+- **oracle** — full-info net seeing true hidden cards (cheats; upper bound).
+- **belief-averaged** — the same net averaged over the exact belief.
+- **public native** — the current `public/full` MARL actor deployed directly
+  (reference; its actor uses only public information).
+
+| ID       | agent (train info) | deploy / eval             | Status | Win% vs F (1st/2nd) | Notes       |
+| -------- | ------------------ | ------------------------- | ------ | ------------------- | ----------- |
+| B-oracle | full / full        | full-info oracle (cheats) | WIP    |                     | upper bound |
+| B-belief | full / full        | belief-averaged           | WIP    |                     | no cheating |
+| B-public | public / full      | direct (`NNPolicyPlayer`) | done   | 52.05% (54.1% / 50.0%) | current reference |
+
+Belief vs public answers whether perfect-info training plus marginalization is
+competitive with a native public actor. Oracle vs belief measures how much
+performance is lost when hidden information is removed at deployment.
+
+### Full/full training
+
+The full actor has a different input shape, so it cannot directly load the
+public `dagger-d-m` policy. Train a matched D-M-sized full/full DAgger model,
+then warm-start a short T3-style full/full MARL screen. Keep networks separate
+so this experiment changes information level without also changing gradient
+sharing.
+
+```bash
+FULL_DAGGER_HPARAMS=(
+  --iterations 40
+  --train-epochs 2
+  --steps-per-iter 8192
+  --num-envs 8
+  --max-dataset-size 1500000
+  --beta-decay 0.97
+  --beta-min 0.1
+  --seed 42
+  --eval-every-iterations 5
+  --save-every-updates 5
+  --fresh-eval-games-per-opponent 500
+)
+
+uv run train-dagger \
+  --config configs/models/xdim-flat-2p-full-sep.yaml \
+  --experiment-name dagger-d-m-full \
+  --expert F --opponents F \
+  --wandb --wandb-group dagger-full-info \
+  "${FULL_DAGGER_HPARAMS[@]}"
+```
+
+After DAgger completes:
+
+```bash
+FULL_MARL_SCREEN_HPARAMS=(
+  --total-timesteps 8192000
+  --rollout-steps 512
+  --train-epochs 2
+  --batch-size 1024
+  --num-envs 8
+  --policy-lr 5e-5
+  --critic-lr 1e-4
+  --gamma 0.99
+  --gae-lambda 0.95
+  --clip-epsilon 0.2
+  --value-coef 0.5
+  --entropy-coef 0.001
+  --activity-coef 0.0
+  --max-grad-norm 0.5
+  --target-kl 0.01
+  --reward-function shaped
+  --seed 42
+  --eval-every-updates 200
+  --save-every-updates 200
+  --fresh-eval-games-per-opponent 0
+  --trend-eval-games-per-opponent 500
+  --trend-eval-seed 123
+  --eval-baselines value
+  --h2h-eval-games 500
+  --h2h-eval-seed 123
+  --metric-window 200
+)
+
+uv run train-marl-cc \
+  --config configs/models/xdim-flat-2p-full-sep.yaml \
+  --load-from-experiment dagger-d-m-full --load-from-which best \
+  --experiment-name m-full-full-t3-screen-s42 \
+  --wandb --wandb-group marl-ppo-full-info \
+  "${FULL_MARL_SCREEN_HPARAMS[@]}"
+```
+
+### Oracle gate and deployment
+
+Evaluate the oracle and belief-marginalized policy on the same seed-67 games. If
+the oracle is not clearly stronger than the public actor, stop this branch. If
+it is stronger, the oracle-minus-belief gap measures how much performance is
+lost when hidden information is marginalized.
+
+```bash
+uv run scripts/eval_belief_policy.py \
+  --experiment m-full-full-t3-screen-s42 --which best \
+  --opponent-configs F --num-games 1000 --nn-seat both --seed 67 \
+  --also-oracle \
+  --wandb --wandb-group full-info-deployment \
+  --wandb-run-name full-full-belief-and-oracle-seed67
+```
+
+Only if the oracle establishes a useful ceiling, evaluate deployable full/full
+IS-MCTS with the already validated d8 x s64 search configuration:
+
+```bash
+uv run scripts/eval_mcts_vs_catanatron.py \
+  --experiment m-full-full-t3-screen-s42 --which best --opponents F \
+  --num-games 1000 --nn-seat both --seed 67 \
+  --num-simulations 64 --ismcts-determinizations 8 --c-puct 1.5 \
+  --num-game-workers 16 --inference-batch-size 64 --inference-wait-ms 2 \
+  --paired-results-out data/paired_eval/full-full-d8-s64-seed67.json \
+  --wandb --wandb-group full-info-deployment \
+  --wandb-run-name full-full-d8-s64-seed67
 ```
 
 ---
