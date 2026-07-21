@@ -1003,6 +1003,44 @@ against the original teacher. If distillation succeeds, use its best student to
 start `--mode iterate`; if it fails, do not spend a long run on recursive search
 training and move to checkpoint-population MARL instead.
 
+The first run of this command is invalid as a distillation result. The source
+policy started at 57.80% against `F`, fell to 16.00% after the first 128 student
+updates, and recovered only to 32.00% after iteration 8. Its final H2H win rate
+against the frozen teacher was 27.50%. The search targets were nearly one-hot
+(about 0.024 nats of entropy), but the primary implementation error was that
+student cross-entropy used an unmasked softmax over all 313 actions. PPO leaves
+currently illegal logits unconstrained because it masks them during training
+and inference, so including those logits in the distillation denominator
+produced a first-iteration loss of 14.52 and destroyed the warm start.
+
+As of July 21, search collection stores the legal-action mask and distillation
+uses it for loss, prediction entropy, and top-1 agreement. Treat the original
+[W&B run](https://wandb.ai/myang2-california-institute-of-technology-caltech/catan/runs/gu941nr2)
+as a pipeline failure, not evidence that the MCTS improvement cannot be
+distilled. Run a one-iteration mask-fixed canary before repeating the full gate.
+
+```bash
+uv run train-alphazero \
+  --mode distill \
+  --load-from-experiment m-full-full-t3-screen-s42 --load-from-which best \
+  --experiment-name mcts-distill-full-full-d8-s64-maskfix-canary-s42 \
+  --iterations 1 --games-per-iteration 64 --optimizer-steps 128 \
+  --simulations 64 --ismcts-determinizations 8 --c-puct 1.5 \
+  --noise-turns 0 \
+  --num-workers 16 --inference-batch-size 64 --inference-wait-ms 2 \
+  --buffer-size 50000 --batch-size 256 \
+  --policy-lr 5e-5 --value-loss-weight 0 \
+  --eval-every-iterations 1 --eval-games 500 --eval-seed 123 \
+  --h2h-games 200 --h2h-seed 123 \
+  --wandb --wandb-group mcts-distillation
+```
+
+This deliberately holds the original first-iteration settings fixed so the
+legal mask is the only experimental change. If strength is preserved but does
+not improve, the next isolated variable is target sharpness: the original
+schedule changes to `T=0.1` after 30 global action records and produced almost
+hard labels. Do not combine that change with the mask canary.
+
 ```bash
 mkdir -p data/paired_eval
 
@@ -1024,8 +1062,9 @@ uv run scripts/compare_paired_eval.py \
 
 | ID | mode | teacher | search | Status | Raw win% vs F | Notes |
 | -- | ---- | ------- | ------ | ------ | ------------- | ----- |
-| EX-1 | frozen distill | full/full update-2800 best | d8 x s64 | WIP | | policy-only feasibility gate |
-| EX-2 | gated iterate | best EX-1 | d8 x s64 | blocked on EX-1 | | policy + outcome value training |
+| EX-1 | frozen distill | full/full update-2800 best | d8 x s64 | invalid | 32.00% final; 57.80% source retained as best | unmasked student loss caused immediate collapse |
+| EX-1b | frozen distill | full/full update-2800 best | d8 x s64 | planned | | legal-mask fix; one-iteration canary first |
+| EX-2 | gated iterate | best EX-1b | d8 x s64 | blocked on EX-1b | | policy + outcome value training |
 
 
 ---

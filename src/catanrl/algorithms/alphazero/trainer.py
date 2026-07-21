@@ -343,8 +343,15 @@ class AlphaZeroTrainer:
         batch = random.sample(self.replay_buffer, self.config.batch_size)
         actor_states = torch.from_numpy(np.stack([exp.actor_state for exp in batch])).float()
         policy_targets = torch.from_numpy(np.stack([exp.policy for exp in batch])).float()
+        action_masks = torch.from_numpy(np.stack([exp.action_mask for exp in batch])).bool()
         actor_states = actor_states.to(self.device)
         policy_targets = policy_targets.to(self.device)
+        action_masks = action_masks.to(self.device)
+        if not bool(action_masks.any(dim=1).all()):
+            raise RuntimeError("Encountered a search target without any legal actions.")
+        illegal_target_mass = policy_targets.masked_select(~action_masks).abs().sum()
+        if float(illegal_target_mass.item()) > 1e-6:
+            raise RuntimeError("Search policy assigns probability to an illegal action.")
 
         critic_states: torch.Tensor | None = None
         value_targets: torch.Tensor | None = None
@@ -380,8 +387,17 @@ class AlphaZeroTrainer:
                 assert critic_states is not None
                 values = self.student_critic_model(critic_states).view(-1)
 
-        log_probs = torch.log_softmax(logits, dim=-1)
-        policy_loss = -(policy_targets * log_probs).sum(dim=1).mean()
+        masked_logits = logits.masked_fill(~action_masks, float("-inf"))
+        log_probs = torch.log_softmax(masked_logits, dim=-1)
+        policy_loss = (
+            -torch.where(
+                action_masks,
+                policy_targets * log_probs,
+                torch.zeros_like(log_probs),
+            )
+            .sum(dim=1)
+            .mean()
+        )
         if values is not None and value_targets is not None:
             value_loss = F.mse_loss(values, value_targets)
         else:
@@ -408,12 +424,19 @@ class AlphaZeroTrainer:
             target_entropy = (
                 -(policy_targets * torch.log(policy_targets.clamp_min(1e-12))).sum(dim=1).mean()
             )
+            probabilities = torch.softmax(masked_logits, dim=-1)
             prediction_entropy = (
-                -(torch.softmax(logits, dim=-1) * torch.log_softmax(logits, dim=-1))
+                -torch.where(
+                    action_masks,
+                    probabilities * log_probs,
+                    torch.zeros_like(log_probs),
+                )
                 .sum(dim=1)
                 .mean()
             )
-            top1_agreement = (logits.argmax(dim=-1) == policy_targets.argmax(dim=-1)).float().mean()
+            top1_agreement = (
+                (masked_logits.argmax(dim=-1) == policy_targets.argmax(dim=-1)).float().mean()
+            )
 
         return {
             "loss": float(loss.item()),

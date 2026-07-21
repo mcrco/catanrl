@@ -21,12 +21,11 @@ import random
 import traceback
 from collections import Counter
 from dataclasses import dataclass
-from typing import Callable, Literal, Sequence
+from typing import Callable, Literal, Sequence, cast
 
 import numpy as np
 import torch
 from catanatron.game import Game
-from catanatron.models.player import Color
 from tqdm import tqdm
 
 from catanrl.features.catanatron_utils import (
@@ -39,9 +38,11 @@ from catanrl.players.nn_mcts_player import (
     _CentralNNMCTSInferenceServer,
     _RemoteNNMCTSInferenceBackend,
 )
+from catanrl.utils.catanatron_action_space import MapType, get_action_space_size, to_action_space
 from catanrl.utils.catanatron_game import force_player_order
 from catanrl.utils.catanatron_map import build_catan_map
 from catanrl.utils.seeding import derive_map_and_game_seeds, derive_seed
+
 
 def run_inference_server_workers(
     *,
@@ -168,6 +169,7 @@ class SelfPlayExperience:
     actor_state: np.ndarray
     critic_state: np.ndarray
     policy: np.ndarray
+    action_mask: np.ndarray
     value: float
 
 
@@ -189,7 +191,7 @@ class _TrainingSelfPlayPlayer(NNMCTSPlayer):
         self._tr_final_temperature = float(final_temperature)
         self._tr_temperature_drop_move = int(temperature_drop_move)
         self._tr_noise_turns = int(noise_turns)
-        self.samples: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
+        self.samples: list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = []
 
     def reset_samples(self) -> None:
         self.samples = []
@@ -211,9 +213,23 @@ class _TrainingSelfPlayPlayer(NNMCTSPlayer):
             add_noise=add_noise,
         )
         # Record the decision state from this seat's (the mover's) perspective.
-        actor_state = self._observation_features(game, self.color, self.actor_observation_level)
-        critic_state = self._observation_features(game, self.color, self.critic_observation_level)
-        self.samples.append((actor_state.copy(), policy.copy(), critic_state.copy()))
+        actor_state = self._observation_features(
+            game,
+            self.color,
+            cast(ActorObservationLevel, self.actor_observation_level),
+        )
+        critic_state = self._observation_features(
+            game,
+            self.color,
+            cast(CriticObservationLevel, self.critic_observation_level),
+        )
+        num_players = len(game.state.colors)
+        game_colors = tuple(game.state.colors)
+        map_type = cast(MapType, self.map_type)
+        action_mask = np.zeros(get_action_space_size(num_players, map_type), dtype=np.bool_)
+        for playable_action in playable_actions:
+            action_mask[to_action_space(playable_action, num_players, map_type, game_colors)] = True
+        self.samples.append((actor_state.copy(), policy.copy(), critic_state.copy(), action_mask))
         return action
 
 
@@ -263,7 +279,7 @@ def _training_worker_main(
         vps_to_win = int(args_dict["vps_to_win"])
         discard_limit = int(args_dict["discard_limit"])
 
-        experiences: list[tuple[np.ndarray, np.ndarray, np.ndarray, float]] = []
+        experiences: list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]] = []
         stats: Counter[str] = Counter()
 
         for episode_seed in episode_seeds:
@@ -295,8 +311,8 @@ def _training_worker_main(
                     value = 0.0
                 else:
                     value = 1.0 if player.color == winner else -1.0
-                for actor_state, policy, critic_state in player.samples:
-                    experiences.append((actor_state, critic_state, policy, value))
+                for actor_state, policy, critic_state, action_mask in player.samples:
+                    experiences.append((actor_state, critic_state, policy, action_mask, value))
 
         result_queue.put(
             {
@@ -385,12 +401,13 @@ def generate_self_play_data(
     stats: Counter[str] = Counter()
 
     def handle_result(message: dict) -> None:
-        for actor_state, critic_state, policy, value in message["experiences"]:
+        for actor_state, critic_state, policy, action_mask, value in message["experiences"]:
             experiences.append(
                 SelfPlayExperience(
                     actor_state=actor_state,
                     critic_state=critic_state,
                     policy=policy,
+                    action_mask=action_mask,
                     value=float(value),
                 )
             )

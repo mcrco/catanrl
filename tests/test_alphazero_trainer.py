@@ -55,13 +55,21 @@ def _trainer(
     )
 
 
-def _experience(action: int, value: float) -> SelfPlayExperience:
+def _experience(
+    action: int,
+    value: float,
+    *,
+    legal_actions: tuple[int, ...] = (0, 1, 2, 3),
+) -> SelfPlayExperience:
     policy = np.zeros(4, dtype=np.float32)
     policy[action] = 1.0
+    action_mask = np.zeros(4, dtype=np.bool_)
+    action_mask[list(legal_actions)] = True
     return SelfPlayExperience(
         actor_state=np.asarray([1.0, -0.5, 0.25], dtype=np.float32),
         critic_state=np.asarray([0.5, -1.0], dtype=np.float32),
         policy=policy,
+        action_mask=action_mask,
         value=value,
     )
 
@@ -123,6 +131,31 @@ def test_value_training_updates_separate_critic() -> None:
         not torch.equal(before, after)
         for before, after in zip(critic_before, trainer.student_critic_model.parameters())
     )
+
+
+def test_distillation_loss_masks_illegal_action_logits() -> None:
+    trainer = _trainer(value_loss_weight=0.0)
+    policy_head = trainer.student_policy_model.policy_head
+    assert isinstance(policy_head, FlatPolicyHead)
+    with torch.no_grad():
+        head = policy_head.policy_head
+        head.weight.zero_()
+        head.bias.copy_(torch.tensor([1.0, 0.0, 100.0, -100.0]))
+    trainer.replay_buffer.extend(
+        [
+            _experience(0, 1.0, legal_actions=(0, 1)),
+            _experience(0, -1.0, legal_actions=(0, 1)),
+        ]
+    )
+
+    metrics = trainer.update_weights()
+
+    assert metrics is not None
+    assert metrics["policy_loss"] == pytest.approx(
+        -torch.log_softmax(torch.tensor([1.0, 0.0]), dim=0)[0].item(),
+        rel=1e-5,
+    )
+    assert metrics["top1_agreement"] == 1.0
 
 
 def test_promote_and_restore_keep_policy_critic_pairs_together() -> None:
