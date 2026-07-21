@@ -57,12 +57,15 @@ class BeliefAveragedPolicyPlayer(Player):
         num_samples: int = 100,
         sample: bool = False,
         seed: Optional[int] = None,
+        device: str | torch.device | None = None,
         **kwargs,
     ):
         super().__init__(color, is_bot=True, **kwargs)
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.device = (
+            str(device) if device is not None else ("cuda" if torch.cuda.is_available() else "cpu")
+        )
         self.model_type = model_type
-        self.map_type = map_type
+        self.map_type: Literal["BASE", "MINI", "TOURNAMENT"] = map_type
         self.num_samples = num_samples
         self.sample = sample
         self.model = model.to(self.device)
@@ -93,9 +96,7 @@ class BeliefAveragedPolicyPlayer(Player):
         # Build full-info features once, then patch opponent dev slots per
         # hypothesis. The board tensor and legal-action mask are identical across
         # hypotheses, so this is a single batched forward pass.
-        base_full = full_game_to_features(
-            game, num_players, self.map_type, base_color=self.color
-        )
+        base_full = full_game_to_features(game, num_players, self.map_type, base_color=self.color)
         numeric_index = self._numeric_name_to_index(num_players)
         batch = np.stack(
             [
@@ -116,9 +117,7 @@ class BeliefAveragedPolicyPlayer(Player):
                 logits = self.model(states)
             elif self.model_type == "hierarchical":
                 action_type_logits, param_logits = self.model(states)
-                logits = self.model.get_flat_action_logits(
-                    action_type_logits, param_logits
-                )
+                logits = self.model.get_flat_action_logits(action_type_logits, param_logits)
             else:
                 raise ValueError(f"Unknown model_type '{self.model_type}'")
         logits = logits.float().cpu().numpy()  # [H, A]

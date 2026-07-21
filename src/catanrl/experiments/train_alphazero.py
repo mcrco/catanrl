@@ -1,24 +1,51 @@
 #!/usr/bin/env python3
-"""
-Experiment script for training the AlphaZero-style agent.
+"""Train a policy from neural MCTS targets.
 
-This mirrors the structure we use for other RL entrypoints (e.g., PPO) and
-provides a convenient CLI for self-play + neural training loops.
+``distill`` keeps the warm-started search teacher frozen and answers the narrow
+question "can the raw policy absorb MCTS's improvement?". ``iterate`` treats an
+accepted student as the next teacher, with deployable candidate-vs-champion and
+fixed-opponent gates. Both modes use the same parallel MCTS collector.
 """
 
 from __future__ import annotations
 
 import argparse
 import os
-from typing import Dict, List, Optional
+from typing import Any, Iterable, Literal, cast
 
 import torch
 import wandb
 from tqdm import tqdm
 
-from catanatron.players.minimax import AlphaBetaPlayer
-from catanatron.players.value import ValueFunctionPlayer
-
+from catanrl.algorithms.alphazero.trainer import AlphaZeroConfig, AlphaZeroTrainer
+from catanrl.eval.search_training import (
+    PolicyEvalResult,
+    decide_promotion,
+    evaluate_candidate_vs_champion,
+    evaluate_policy_vs_value,
+)
+from catanrl.experiment_store import (
+    CHECKPOINTS_DIRNAME,
+    GameConfig,
+    KIND_POLICY,
+    KIND_POLICY_VALUE,
+    KIND_VALUE,
+    ResumeContext,
+    TrainingWarmStart,
+    add_load_from_experiment_arguments,
+    add_resume_argument,
+    build_checkpoint_registry,
+    default_checkpoints_dir,
+    experiment_dir,
+    make_experiment_name,
+    network_spec_from_model,
+    prepare_resume,
+    resolve_training_architecture_and_warm_start,
+    save_checkpoint_registry,
+    save_experiment,
+    training_state_file,
+    wandb_grouping_kwargs,
+)
 from catanrl.experiments.architecture_config import (
     ArchitecturePreset,
     add_config_argument,
@@ -32,561 +59,627 @@ from catanrl.experiments.common_args import (
     add_wandb_arguments,
 )
 from catanrl.experiments.network_config import validate_ismcts_observation_levels
+from catanrl.features.catanatron_utils import ActorObservationLevel, CriticObservationLevel
 from catanrl.models.model_builders import (
     build_critic_model,
     build_policy_model,
     build_policy_value_model,
 )
-from catanrl.algorithms.alphazero.trainer import AlphaZeroConfig, AlphaZeroTrainer
-from catanrl.experiment_store import (
-    GameConfig,
-    KIND_POLICY,
-    KIND_POLICY_VALUE,
-    KIND_VALUE,
-    ResumeContext,
-    TrainingWarmStart,
-    add_load_from_experiment_arguments,
-    add_resume_argument,
-    default_checkpoints_dir,
-    make_experiment_name,
-    network_spec_from_model,
-    prepare_resume,
-    resolve_training_architecture_and_warm_start,
-    save_experiment,
-    training_state_file,
-    wandb_grouping_kwargs,
-)
+from catanrl.models.wrappers import PolicyNetworkWrapper, PolicyValueNetworkWrapper
+from catanrl.models.wrappers import ValueNetworkWrapper
+
+PolicyModel = PolicyNetworkWrapper | PolicyValueNetworkWrapper
+CriticModel = ValueNetworkWrapper | None
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Train AlphaZero-style self-play agent for Catan",
+        description="Distill a frozen MCTS teacher or run gated Expert Iteration.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-
     parser.add_argument(
-        "--iterations", type=int, default=50, help="Outer self-play / SGD iterations"
+        "--mode",
+        choices=("distill", "iterate"),
+        default="distill",
+        help="Frozen teacher distillation or candidate/champion Expert Iteration.",
     )
-    parser.add_argument(
-        "--games-per-iteration", type=int, default=16, help="Self-play games per iteration"
-    )
-    parser.add_argument(
-        "--optimizer-steps", type=int, default=64, help="SGD mini-batches per iteration"
-    )
+    parser.add_argument("--iterations", type=int, default=8)
+    parser.add_argument("--games-per-iteration", type=int, default=64)
+    parser.add_argument("--optimizer-steps", type=int, default=128)
     parser.add_argument(
         "--num-workers",
         type=int,
         default=min(16, os.cpu_count() or 4),
-        help="Number of across-games self-play worker processes feeding a central batched "
-        "inference server (the default strategy). 1 keeps the single-process trainer. "
-        "Throughput on a single shared GPU saturates near the core count; oversubscribing "
-        "past it trades latency for a little more aggregate throughput.",
+        help="Across-game search workers sharing the central inference server.",
     )
     add_config_argument(parser)
-    parser.add_argument(
-        "--inference-batch-size",
-        type=int,
-        default=64,
-        help="Max batch size for the central self-play inference server.",
-    )
-    parser.add_argument(
-        "--inference-wait-ms",
-        type=float,
-        default=2.0,
-        help="Max time the inference server waits to fill a batch.",
-    )
-    parser.add_argument(
-        "--prunning",
-        action="store_true",
-        help="Prune clearly dominated actions before MCTS expansion.",
-    )
 
-    parser.add_argument("--simulations", type=int, default=64, help="MCTS simulations per move")
-    parser.add_argument(
+    search = parser.add_argument_group("search teacher")
+    search.add_argument("--simulations", type=int, default=64)
+    search.add_argument(
         "--ismcts-determinizations",
         "--is-mcts-determinizations",
         dest="ismcts_determinizations",
         type=int,
-        default=1,
-        help=(
-            "Information-Set MCTS: number of belief determinizations of opponents' "
-            "hidden dev cards searched per move. 1 disables IS-MCTS (plain search); "
-            ">1 requires actor/critic observation public (1v1) or full."
-        ),
+        default=8,
     )
-    parser.add_argument("--c-puct", type=float, default=1.5, help="PUCT exploration constant")
-    parser.add_argument(
-        "--temperature", type=float, default=1.0, help="Sampling temperature for early moves"
-    )
-    parser.add_argument(
-        "--final-temperature", type=float, default=0.1, help="Temperature after the drop move"
-    )
-    parser.add_argument(
-        "--temperature-drop-move",
-        type=int,
-        default=30,
-        help="Move index to drop exploration temperature",
-    )
-    parser.add_argument(
-        "--noise-turns", type=int, default=20, help="Turns to inject Dirichlet noise at the root"
-    )
-    parser.add_argument(
-        "--dirichlet-alpha",
-        type=float,
-        default=0.3,
-        help="Dirichlet alpha for root exploration noise",
-    )
-    parser.add_argument(
-        "--dirichlet-frac", type=float, default=0.25, help="Mixing fraction for exploration noise"
-    )
-    parser.add_argument("--buffer-size", type=int, default=50_000, help="Replay buffer size")
-    parser.add_argument("--batch-size", type=int, default=256, help="Mini-batch size for SGD")
-    parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
-    parser.add_argument("--weight-decay", type=float, default=0.0, help="Optimizer weight decay")
-    parser.add_argument(
-        "--policy-loss-weight", type=float, default=1.0, help="Policy loss multiplier"
-    )
-    parser.add_argument(
-        "--value-loss-weight", type=float, default=1.0, help="Value loss multiplier"
-    )
-    parser.add_argument("--max-grad-norm", type=float, default=DEFAULT_MAX_GRAD_NORM, help="Gradient clipping norm")
-    add_device_argument(parser)
-    parser.add_argument("--seed", type=int, default=42, help="Random seed (set <0 for random)")
+    search.add_argument("--c-puct", type=float, default=1.5)
+    search.add_argument("--prunning", action="store_true")
+    search.add_argument("--temperature", type=float, default=1.0)
+    search.add_argument("--final-temperature", type=float, default=0.1)
+    search.add_argument("--temperature-drop-move", type=int, default=30)
+    search.add_argument("--noise-turns", type=int, default=20)
+    search.add_argument("--dirichlet-alpha", type=float, default=0.3)
+    search.add_argument("--dirichlet-frac", type=float, default=0.25)
+    search.add_argument("--inference-batch-size", type=int, default=64)
+    search.add_argument("--inference-wait-ms", type=float, default=2.0)
 
-    # I/O
+    optimization = parser.add_argument_group("student optimization")
+    optimization.add_argument("--buffer-size", type=int, default=50_000)
+    optimization.add_argument("--batch-size", type=int, default=256)
+    optimization.add_argument("--policy-lr", type=float, default=5e-5)
+    optimization.add_argument("--critic-lr", type=float, default=1e-4)
+    optimization.add_argument("--weight-decay", type=float, default=0.0)
+    optimization.add_argument("--policy-loss-weight", type=float, default=1.0)
+    optimization.add_argument(
+        "--value-loss-weight",
+        type=float,
+        default=None,
+        help="Defaults to 0 for distill and 1 for iterate.",
+    )
+    optimization.add_argument("--max-grad-norm", type=float, default=DEFAULT_MAX_GRAD_NORM)
+    optimization.add_argument(
+        "--offload-inactive-models",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Move the inactive teacher/student pair and optimizer state to CPU.",
+    )
+
+    evaluation = parser.add_argument_group("strength evaluation")
+    evaluation.add_argument("--eval-every-iterations", type=int, default=1)
+    evaluation.add_argument(
+        "--eval-games",
+        type=int,
+        default=500,
+        help="Total fixed-seed games versus ValueFunctionPlayer, split across seats.",
+    )
+    evaluation.add_argument("--eval-seed", type=int, default=123)
+    evaluation.add_argument(
+        "--h2h-games",
+        type=int,
+        default=200,
+        help="Total candidate-vs-teacher games per evaluation, split across seats.",
+    )
+    evaluation.add_argument("--h2h-seed", type=int, default=123)
+    evaluation.add_argument("--promotion-threshold", type=float, default=0.52)
+    evaluation.add_argument("--max-baseline-regression", type=float, default=0.02)
+
     add_save_every_updates_argument(
         parser,
-        default=0,
-        help="Save checkpoint every N iterations (0 to disable periodic saves; best model always saved)",
-    )
-    parser.add_argument(
-        "--checkpoint-dir",
-        type=str,
-        default=None,
-        help="Directory for periodic checkpoints (defaults to save-path directory)",
+        default=1,
+        help="Save an iteration checkpoint every N iterations (0 disables periodic saves).",
     )
     add_load_from_experiment_arguments(parser)
     add_resume_argument(parser)
-
     add_experiment_name_argument(parser)
+    add_device_argument(parser)
+    parser.add_argument("--seed", type=int, default=42)
     add_wandb_arguments(parser)
-    parser.add_argument(
-        "--wandb-entity", type=str, default=None, help="Weights & Biases entity / team"
+    parser.add_argument("--wandb-entity", type=str, default=None)
+
+    args = parser.parse_args(list(argv) if argv is not None else None)
+    _validate_args(parser, args)
+    return args
+
+
+def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    positive = {
+        "iterations": args.iterations,
+        "games-per-iteration": args.games_per_iteration,
+        "optimizer-steps": args.optimizer_steps,
+        "num-workers": args.num_workers,
+        "simulations": args.simulations,
+        "ismcts-determinizations": args.ismcts_determinizations,
+        "batch-size": args.batch_size,
+        "buffer-size": args.buffer_size,
+        "eval-every-iterations": args.eval_every_iterations,
+    }
+    for name, value in positive.items():
+        if value < 1:
+            parser.error(f"--{name} must be at least 1")
+    for name in ("eval_games", "h2h_games"):
+        value = int(getattr(args, name))
+        if value < 2 or value % 2:
+            parser.error(f"--{name.replace('_', '-')} must be a positive even number")
+    if args.buffer_size < args.batch_size:
+        parser.error("--buffer-size must be at least --batch-size")
+    if args.mode == "distill" and not args.load_from_experiment:
+        parser.error("--mode distill requires --load-from-experiment as the frozen teacher")
+    if not 0.0 <= args.promotion_threshold <= 1.0:
+        parser.error("--promotion-threshold must be between 0 and 1")
+    if args.max_baseline_regression < 0:
+        parser.error("--max-baseline-regression cannot be negative")
+    if args.value_loss_weight is None:
+        args.value_loss_weight = 0.0 if args.mode == "distill" else 1.0
+
+
+def _build_model_pair(
+    arch: ArchitecturePreset,
+    *,
+    device: str | torch.device,
+) -> tuple[PolicyModel, CriticModel]:
+    if arch.num_players is None:
+        raise ValueError("Model construction requires a concrete player count.")
+    map_type = cast(Literal["BASE", "MINI", "TOURNAMENT"], arch.map_type)
+    actor_level = cast(ActorObservationLevel, arch.actor_observation_level)
+    critic_level = cast(CriticObservationLevel, arch.critic_observation_level)
+    if arch.network_mode == "shared":
+        policy = build_policy_value_model(
+            backbone_type=arch.backbone_type,
+            model_type=arch.model_type,
+            hidden_dims=arch.policy_hidden_dims,
+            num_players=arch.num_players,
+            map_type=map_type,
+            actor_observation_level=actor_level,
+            critic_observation_level=critic_level,
+            device=device,
+            xdim_cnn_channels=arch.xdim_cnn_channels,
+            xdim_cnn_kernel_size=arch.xdim_cnn_kernel_size,
+            xdim_fusion_hidden_dim=arch.xdim_policy_fusion_hidden_dim,
+        )
+        return policy, None
+
+    policy = build_policy_model(
+        backbone_type=arch.backbone_type,
+        model_type=arch.model_type,
+        hidden_dims=arch.policy_hidden_dims,
+        num_players=arch.num_players,
+        map_type=map_type,
+        actor_observation_level=actor_level,
+        device=device,
+        xdim_cnn_channels=arch.xdim_cnn_channels,
+        xdim_cnn_kernel_size=arch.xdim_cnn_kernel_size,
+        xdim_fusion_hidden_dim=arch.xdim_policy_fusion_hidden_dim,
     )
-
-    return parser.parse_args()
-
-
-
-def aggregate_metrics(metrics: List[Dict[str, float]]) -> Dict[str, float]:
-    if not metrics:
-        return {}
-    totals: Dict[str, float] = {key: 0.0 for key in metrics[0].keys()}
-    for metric in metrics:
-        for key, value in metric.items():
-            totals[key] += value
-    count = float(len(metrics))
-    return {key: totals[key] / count for key in totals.keys()}
+    critic = build_critic_model(
+        backbone_type=arch.backbone_type,
+        hidden_dims=arch.critic_hidden_dims,
+        num_players=arch.num_players,
+        map_type=map_type,
+        critic_observation_level=critic_level,
+        device=device,
+        xdim_cnn_channels=arch.xdim_cnn_channels,
+        xdim_cnn_kernel_size=arch.xdim_cnn_kernel_size,
+        xdim_fusion_hidden_dim=arch.xdim_critic_fusion_hidden_dim,
+    )
+    return policy, critic
 
 
-def maybe_load_from_experiment(
-    trainer: AlphaZeroTrainer, warm_start: Optional[TrainingWarmStart]
+def _load_initial_weights(
+    *,
+    student_policy: PolicyModel,
+    student_critic: CriticModel,
+    teacher_policy: PolicyModel,
+    teacher_critic: CriticModel,
+    warm_start: TrainingWarmStart | None,
 ) -> None:
-    if warm_start is None:
+    if warm_start is not None:
+        checkpoints = warm_start.checkpoints
+        policy_state = torch.load(checkpoints.policy, map_location="cpu")
+        student_policy.load_state_dict(policy_state)
+        teacher_policy.load_state_dict(policy_state)
+        if student_critic is not None:
+            if checkpoints.critic is None:
+                raise FileNotFoundError(
+                    f"Experiment '{checkpoints.experiment_name}' has no paired critic "
+                    f"for selector '{checkpoints.which}'."
+                )
+            critic_state = torch.load(checkpoints.critic, map_location="cpu")
+            student_critic.load_state_dict(critic_state)
+            assert teacher_critic is not None
+            teacher_critic.load_state_dict(critic_state)
         return
-    ckpts = warm_start.checkpoints
-    if trainer.uses_shared_network:
-        trainer.load(ckpts.policy)
-    else:
-        if ckpts.critic is None:
-            raise FileNotFoundError(
-                f"Experiment '{ckpts.experiment_name}' has no critic checkpoint "
-                f"for selector '{ckpts.which}'."
-            )
-        trainer.load(ckpts.policy, ckpts.critic)
-    print("  Weights loaded successfully")
+
+    teacher_policy.load_state_dict(student_policy.state_dict())
+    if student_critic is not None:
+        assert teacher_critic is not None
+        teacher_critic.load_state_dict(student_critic.state_dict())
 
 
-def build_train_config(
+def _build_train_config(
     args: argparse.Namespace,
     config: AlphaZeroConfig,
     arch: ArchitecturePreset,
     device: str,
-) -> Dict[str, object]:
+) -> dict[str, Any]:
     return {
-        "algorithm": "AlphaZero",
+        "algorithm": "mcts_distillation" if args.mode == "distill" else "expert_iteration",
         **architecture_train_config_fields(arch),
-        "iterations": args.iterations,
-        "games_per_iteration": args.games_per_iteration,
-        "optimizer_steps": args.optimizer_steps,
-        "num_workers": args.num_workers,
-        "inference_batch_size": args.inference_batch_size,
-        "inference_wait_ms": args.inference_wait_ms,
-        "num_players": config.num_players,
-        "simulations": config.simulations,
-        "ismcts_determinizations": config.ismcts_determinizations,
-        "c_puct": config.c_puct,
-        "prunning": config.prunning,
-        "temperature": config.temperature,
-        "final_temperature": config.final_temperature,
-        "temperature_drop_move": config.temperature_drop_move,
-        "noise_turns": config.noise_turns,
-        "dirichlet_alpha": config.dirichlet_alpha,
-        "dirichlet_frac": config.dirichlet_frac,
-        "buffer_size": config.buffer_size,
-        "batch_size": config.batch_size,
-        "lr": config.lr,
-        "weight_decay": config.weight_decay,
-        "policy_loss_weight": config.policy_loss_weight,
-        "value_loss_weight": config.value_loss_weight,
-        "max_grad_norm": config.max_grad_norm,
-        "save_every_updates": args.save_every_updates,
-        "load_from_experiment": args.load_from_experiment,
-        "load_from_which": args.load_from_which,
-        "seed": args.seed,
+        **{key: value for key, value in vars(args).items() if key not in {"config", "wandb_tags"}},
         "device": device,
-        "save_path": args.save_path,
+        "value_loss_weight": config.value_loss_weight,
     }
 
 
-def _wandb_info(args: argparse.Namespace) -> dict:
-    """Experiment metadata W&B block, including the live run id when available."""
+def _init_wandb(
+    args: argparse.Namespace,
+    train_config: dict[str, Any],
+    grouping: dict[str, Any],
+    resume: ResumeContext,
+) -> bool:
     if not args.wandb:
+        wandb.init(mode="disabled")
+        return False
+    kwargs: dict[str, Any] = {
+        "project": args.wandb_project,
+        "entity": args.wandb_entity,
+        "name": args.wandb_run_name,
+        "config": train_config,
+        "job_type": args.mode,
+        **grouping,
+    }
+    if resume.active and resume.wandb_run_id:
+        kwargs.update(id=resume.wandb_run_id, resume="must")
+    wandb.init(**kwargs)
+    return True
+
+
+def _wandb_info(args: argparse.Namespace) -> dict[str, Any]:
+    if not args.wandb or wandb.run is None:
         return {}
-    info = {"project": args.wandb_project, "name": args.wandb_run_name}
-    if wandb.run is not None:
-        info["id"] = wandb.run.id
-        if wandb.run.tags:
-            info["tags"] = list(wandb.run.tags)
+    info: dict[str, Any] = {
+        "project": args.wandb_project,
+        "name": args.wandb_run_name,
+        "id": wandb.run.id,
+    }
+    if wandb.run.tags:
+        info["tags"] = list(wandb.run.tags)
     return info
 
 
-def init_wandb(
-    args: argparse.Namespace,
-    train_config: Dict[str, object],
-    resume: Optional[ResumeContext] = None,
-    grouping: Optional[Dict[str, object]] = None,
-) -> bool:
-    if args.wandb:
-        init_kwargs: Dict[str, object] = dict(
-            project=args.wandb_project,
-            name=args.wandb_run_name,
-            entity=args.wandb_entity,
-            config=train_config,
-        )
-        if grouping:
-            init_kwargs.update(grouping)
-        if resume is not None and resume.active and resume.wandb_run_id:
-            init_kwargs["id"] = resume.wandb_run_id
-            init_kwargs["resume"] = "must"
-        wandb.init(**init_kwargs)
-        return True
-    wandb.init(mode="disabled")
-    return False
+def _network_specs(trainer: AlphaZeroTrainer, config: AlphaZeroConfig) -> dict[str, Any]:
+    if trainer.uses_shared_network:
+        return {
+            "policy": network_spec_from_model(
+                trainer.student_policy_model,
+                kind=KIND_POLICY_VALUE,
+                model_type=config.model_type,
+                observation_level=config.actor_observation_level,
+            )
+        }
+    assert trainer.student_critic_model is not None
+    return {
+        "policy": network_spec_from_model(
+            trainer.student_policy_model,
+            kind=KIND_POLICY,
+            model_type=config.model_type,
+            observation_level=config.actor_observation_level,
+        ),
+        "critic": network_spec_from_model(
+            trainer.student_critic_model,
+            kind=KIND_VALUE,
+            observation_level=config.critic_observation_level,
+        ),
+    }
 
 
-def _persist_az_training_state(
+def _refresh_checkpoint_registry(
+    experiment_name: str,
+    checkpoint_dir: str,
     trainer: AlphaZeroTrainer,
-    training_state_path: Optional[str],
+) -> None:
+    roles = ["policy"] if trainer.uses_shared_network else ["policy", "critic"]
+    registry = build_checkpoint_registry(
+        checkpoint_dir,
+        roles_present=roles,
+        relative_prefix=CHECKPOINTS_DIRNAME,
+    )
+    save_checkpoint_registry(experiment_dir(experiment_name), registry)
+
+
+def _evaluate_student(trainer: AlphaZeroTrainer, config: AlphaZeroConfig, args) -> PolicyEvalResult:
+    policy, _ = trainer.prepare_student_evaluation()
+    return evaluate_policy_vs_value(
+        policy_model=policy,
+        model_type=config.model_type,
+        map_type=config.map_type,
+        actor_observation_level=config.actor_observation_level,
+        num_players=config.num_players,
+        num_games=args.eval_games,
+        seed=args.eval_seed,
+        vps_to_win=config.vps_to_win,
+        discard_limit=config.discard_limit,
+        show_tqdm=False,
+    )
+
+
+def _evaluate_h2h(trainer: AlphaZeroTrainer, config: AlphaZeroConfig, args) -> PolicyEvalResult:
+    if config.num_players != 2:
+        raise ValueError("Candidate/champion promotion evaluation currently requires 2 players.")
+    candidate, _ = trainer.prepare_student_evaluation()
+    champion, _ = trainer.teacher_evaluation_models()
+    return evaluate_candidate_vs_champion(
+        candidate_model=candidate,
+        champion_model=champion,
+        model_type=config.model_type,
+        map_type=config.map_type,
+        actor_observation_level=config.actor_observation_level,
+        num_games=args.h2h_games,
+        seed=args.h2h_seed,
+        vps_to_win=config.vps_to_win,
+        discard_limit=config.discard_limit,
+        show_tqdm=False,
+    )
+
+
+def _mean_metrics(metrics: list[dict[str, float]]) -> dict[str, float]:
+    if not metrics:
+        return {}
+    keys = set().union(*(metric.keys() for metric in metrics))
+    return {key: sum(metric.get(key, 0.0) for metric in metrics) / len(metrics) for key in keys}
+
+
+def _persist_training_state(
     *,
+    path: str,
+    trainer: AlphaZeroTrainer,
+    mode: str,
     global_step: int,
     iteration: int,
-    best_loss: float,
+    best_eval_score: float,
+    best_iteration: int,
+    champion_eval_score: float,
+    promotions: int,
+    wandb_enabled: bool,
 ) -> None:
-    """Persist AlphaZero training state (weights/optimizer/counters) for --resume."""
-    if not training_state_path:
-        return
-    payload: Dict[str, object] = {
-        "algorithm": "alphazero",
+    payload = {
+        "algorithm": "search_guided_policy_iteration",
+        "mode": mode,
         "global_step": global_step,
         "iteration": iteration,
-        "best_loss": best_loss,
-        "policy_model": trainer.policy_model.state_dict(),
-        "critic_model": (
-            trainer.critic_model.state_dict()
-            if trainer.critic_model is not None
-            else None
-        ),
-        "optimizer": trainer.optimizer.state_dict(),
-        "wandb_run_id": wandb.run.id if wandb.run is not None else None,
+        "best_eval_score": best_eval_score,
+        "best_iteration": best_iteration,
+        "champion_eval_score": champion_eval_score,
+        "promotions": promotions,
+        "trainer": trainer.state_dict(),
+        "wandb_run_id": (wandb.run.id if wandb_enabled and wandb.run is not None else None),
+        # Replay data is intentionally omitted: a 50k full-state buffer can be
+        # multiple GB. Resumed runs refill it from the restored teacher.
+        "replay_buffer_persisted": False,
     }
-    os.makedirs(os.path.dirname(training_state_path), exist_ok=True)
-    tmp_path = training_state_path + ".tmp"
-    torch.save(payload, tmp_path)
-    os.replace(tmp_path, training_state_path)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    temporary = f"{path}.tmp"
+    torch.save(payload, temporary)
+    os.replace(temporary, path)
 
 
-def restore_az_training_state(
-    trainer: AlphaZeroTrainer, resume: ResumeContext
-) -> tuple[int, int, float]:
-    """Apply a resume context to the trainer. Returns (global_step, completed_iterations, best_loss)."""
+def _restore_training_state(
+    trainer: AlphaZeroTrainer,
+    resume: ResumeContext,
+    mode: str,
+) -> tuple[int, int, float, int, float, int] | None:
     state = resume.state
     if state is None:
-        return 0, 0, float("inf")
-    trainer.policy_model.load_state_dict(state["policy_model"])
-    if trainer.critic_model is not None and state.get("critic_model") is not None:
-        trainer.critic_model.load_state_dict(state["critic_model"])
-    if state.get("optimizer") is not None:
-        trainer.optimizer.load_state_dict(state["optimizer"])
-    global_step = int(state.get("global_step", 0))
-    completed_iterations = int(state.get("iteration", 0))
-    best_loss = float(state.get("best_loss", float("inf")))
-    print(
-        f"  Restored: global_step={global_step:,}, "
-        f"completed_iterations={completed_iterations}, best_loss={best_loss:.4f}"
-    )
-    return global_step, completed_iterations, best_loss
-
-
-def log_self_play_stats(stats: Dict[str, float], trainer: AlphaZeroTrainer) -> None:
-    games = int(stats.get("games", 0))
-    win_parts = []
-    for color in trainer.colors:
-        key = f"wins_{color.value}"
-        win_parts.append(f"{color.name}:{int(stats.get(key, 0))}")
-    win_summary = ", ".join(win_parts) if win_parts else "none"
-    print(f"  Self-play: {games} games | Wins -> {win_summary}")
-
-
-def _eval_win_rate(stats: Dict[str, float]) -> float:
-    games = float(stats.get("games", 0))
-    if games <= 0:
-        return 0.0
-    return float(stats.get("agent_wins", 0)) / games
-
-
-def log_eval_stats(name: str, stats: Dict[str, float]) -> None:
-    games = int(stats.get("games", 0))
-    agent_wins = int(stats.get("agent_wins", 0))
-    draws = int(stats.get("draws", 0))
-    win_rate = _eval_win_rate(stats)
-    print(
-        f"  Eval vs {name}: win_rate={win_rate:.2%} "
-        f"(agent wins {agent_wins}/{games}, draws={draws})"
+        return None
+    saved_mode = state.get("mode")
+    if saved_mode is not None and saved_mode != mode:
+        raise ValueError(f"Cannot resume mode '{saved_mode}' with --mode {mode}.")
+    trainer_state = state.get("trainer")
+    if not isinstance(trainer_state, dict):
+        raise ValueError("Training state predates the rewritten search trainer and cannot resume.")
+    trainer.load_state_dict(trainer_state)
+    return (
+        int(state.get("global_step", 0)),
+        int(state.get("iteration", 0)),
+        float(state.get("best_eval_score", float("-inf"))),
+        int(state.get("best_iteration", 0)),
+        float(state.get("champion_eval_score", float("-inf"))),
+        int(state.get("promotions", 0)),
     )
 
 
-def _close_trainer_if_needed(trainer: AlphaZeroTrainer) -> None:
-    close_fn = getattr(trainer, "close", None)
-    if callable(close_fn):
-        close_fn()
+def _print_eval(label: str, result: PolicyEvalResult) -> None:
+    print(
+        f"  {label}: {result.win_rate:.2%} ({result.wins}/{result.games}) | "
+        f"first={result.first_win_rate:.2%}, second={result.second_win_rate:.2%}, "
+        f"avg_vps={result.avg_vps:.3f}"
+    )
 
 
 def run_training(
-    args: argparse.Namespace,
-    trainer: AlphaZeroTrainer,
-    wandb_enabled: bool,
     *,
-    start_iteration: int = 0,
-    global_step: int = 0,
-    best_loss: float = float("inf"),
-    training_state_path: Optional[str] = None,
+    args: argparse.Namespace,
+    config: AlphaZeroConfig,
+    trainer: AlphaZeroTrainer,
+    checkpoint_dir: str,
+    experiment_name: str,
+    training_state_path: str,
+    resume: ResumeContext,
 ) -> None:
-    checkpoint_dir = args.checkpoint_dir or args.save_path
-    last_iteration = start_iteration + args.iterations
+    restored = _restore_training_state(trainer, resume, args.mode) if resume.active else None
+    if restored is None:
+        global_step = 0
+        start_iteration = 0
+        promotions = 0
+        initial_eval = _evaluate_student(trainer, config, args)
+        _print_eval("Initial deployable policy vs F", initial_eval)
+        best_eval_score = initial_eval.win_rate
+        best_iteration = 0
+        champion_eval_score = initial_eval.win_rate
+        trainer.save(checkpoint_dir, "best")
+        trainer.save(checkpoint_dir, "iter_0")
+        _refresh_checkpoint_registry(experiment_name, checkpoint_dir, trainer)
+        wandb.log(initial_eval.metrics("eval/candidate_vs_value") | {"iteration": 0}, step=0)
+    else:
+        (
+            global_step,
+            start_iteration,
+            best_eval_score,
+            best_iteration,
+            champion_eval_score,
+            promotions,
+        ) = restored
+        print(
+            f"Restored iteration={start_iteration}, optimizer_step={global_step}, "
+            f"best_eval={best_eval_score:.2%}, promotions={promotions}. "
+            "Replay buffer will refill from the restored teacher."
+        )
 
+    final_iteration = start_iteration + args.iterations
     try:
-        for iteration in range(start_iteration + 1, last_iteration + 1):
-            print("\n" + "=" * 80)
-            print(f"Iteration {iteration}/{last_iteration}")
-            stats = trainer.self_play(args.games_per_iteration)
-            log_self_play_stats(stats, trainer)
+        for iteration in range(start_iteration + 1, final_iteration + 1):
+            print(f"\nIteration {iteration}/{final_iteration}: collecting teacher search targets")
+            selfplay = trainer.collect_self_play(args.games_per_iteration)
+            print(
+                f"  collected {int(selfplay.get('experiences', 0)):,} decisions from "
+                f"{int(selfplay.get('games', 0))} games; replay={int(selfplay.get('replay_size', 0)):,}"
+            )
             wandb.log(
-                {
-                    "selfplay/games": stats.get("games", 0),
-                    **{f"selfplay/{k}": v for k, v in stats.items() if k != "games"},
-                    "iteration": iteration,
-                },
+                {f"selfplay/{key}": value for key, value in selfplay.items()}
+                | {"iteration": iteration},
                 step=global_step,
             )
 
-            iteration_metrics: List[Dict[str, float]] = []
-            skipped_steps = 0
-            with tqdm(
-                range(1, args.optimizer_steps + 1),
-                desc="Training",
-                leave=False,
-            ) as train_bar:
-                for step in train_bar:
-                    metrics = trainer.update_weights()
-                    if metrics is None:
-                        skipped_steps += 1
-                        train_bar.set_postfix({"skipped": skipped_steps})
-                        continue
-                    iteration_metrics.append(metrics)
-                    global_step += 1
-                    train_bar.set_postfix(
-                        {
-                            "loss": f"{metrics['loss']:.3f}",
-                            "policy": f"{metrics['policy_loss']:.3f}",
-                            "value": f"{metrics['value_loss']:.3f}",
-                        }
-                    )
-                    wandb.log(
-                        {
-                            "train/loss": metrics["loss"],
-                            "train/policy_loss": metrics["policy_loss"],
-                            "train/value_loss": metrics["value_loss"],
-                            "iteration": iteration,
-                            "optimizer_step": step,
-                        },
-                        step=global_step,
-                    )
-
-            if skipped_steps:
-                print(f"  Skipped {skipped_steps} optimizer steps (buffer warming up).")
-
-            summary = aggregate_metrics(iteration_metrics)
-            if summary:
-                print(
-                    "  SGD metrics | "
-                    f"loss: {summary['loss']:.4f} | "
-                    f"policy: {summary['policy_loss']:.4f} | "
-                    f"value: {summary['value_loss']:.4f}"
-                )
+            updates: list[dict[str, float]] = []
+            skipped = 0
+            for _ in tqdm(range(args.optimizer_steps), desc="Student SGD", leave=False):
+                metrics = trainer.update_weights()
+                if metrics is None:
+                    skipped += 1
+                    continue
+                global_step += 1
+                updates.append(metrics)
                 wandb.log(
-                    {
-                        "iteration/loss": summary["loss"],
-                        "iteration/policy_loss": summary["policy_loss"],
-                        "iteration/value_loss": summary["value_loss"],
-                        "iteration": iteration,
-                    },
+                    {f"train/{key}": value for key, value in metrics.items()}
+                    | {"iteration": iteration},
                     step=global_step,
                 )
-                if summary["loss"] < best_loss:
-                    best_loss = summary["loss"]
-                    trainer.save(args.save_path, stem="best")
-                    print(
-                        f"  → Saved new best model to {args.save_path} "
-                        f"({trainer.uses_shared_network and 'policy_value_best.pt' or 'policy_best.pt, critic_best.pt'}; "
-                        f"loss={best_loss:.4f})"
+            summary = _mean_metrics(updates)
+            if summary:
+                print(
+                    f"  SGD: policy_loss={summary['policy_loss']:.4f}, "
+                    f"value_loss={summary['value_loss']:.4f}, "
+                    f"top1={summary['top1_agreement']:.2%}"
+                )
+                wandb.log(
+                    {f"iteration/{key}": value for key, value in summary.items()}
+                    | {"iteration": iteration},
+                    step=global_step,
+                )
+            if skipped:
+                print(f"  skipped {skipped} optimizer steps while the replay buffer warmed up")
+
+            evaluation_due = (
+                iteration % args.eval_every_iterations == 0 or iteration == final_iteration
+            )
+            if evaluation_due:
+                candidate_eval = _evaluate_student(trainer, config, args)
+                _print_eval("Candidate deployable policy vs F", candidate_eval)
+                h2h_eval = _evaluate_h2h(trainer, config, args)
+                _print_eval("Candidate vs teacher", h2h_eval)
+                eval_metrics = (
+                    candidate_eval.metrics("eval/candidate_vs_value")
+                    | h2h_eval.metrics("eval/candidate_vs_teacher")
+                    | {"iteration": float(iteration)}
+                )
+
+                if candidate_eval.win_rate > best_eval_score:
+                    best_eval_score = candidate_eval.win_rate
+                    best_iteration = iteration
+                    trainer.save(checkpoint_dir, "best")
+                    print(f"  saved new best deployable checkpoint ({best_eval_score:.2%})")
+
+                if args.mode == "iterate":
+                    decision = decide_promotion(
+                        h2h_win_rate=h2h_eval.win_rate,
+                        candidate_baseline_win_rate=candidate_eval.win_rate,
+                        champion_baseline_win_rate=champion_eval_score,
+                        h2h_threshold=args.promotion_threshold,
+                        max_baseline_regression=args.max_baseline_regression,
                     )
-                    if wandb_enabled:
-                        wandb.run.summary["best_loss"] = best_loss
-                    _persist_az_training_state(
-                        trainer,
-                        training_state_path,
-                        global_step=global_step,
-                        iteration=iteration,
-                        best_loss=best_loss,
-                    )
-            else:
-                print("  No optimizer metrics collected this iteration.")
+                    eval_metrics["promotion/accepted"] = float(decision.promote)
+                    eval_metrics["promotion/count"] = float(promotions)
+                    print(f"  promotion: {decision.reason}")
+                    if decision.promote:
+                        trainer.promote_student()
+                        champion_eval_score = candidate_eval.win_rate
+                        promotions += 1
+                    else:
+                        trainer.restore_student_from_teacher()
+                wandb.log(eval_metrics, step=global_step)
 
             if args.save_every_updates and iteration % args.save_every_updates == 0:
-                trainer.save(checkpoint_dir, stem=f"iter_{iteration}")
-                print(
-                    f"  → Saved checkpoint to {checkpoint_dir} "
-                    f"({trainer.uses_shared_network and f'policy_value_iter_{iteration}.pt' or f'policy_iter_{iteration}.pt, critic_iter_{iteration}.pt'})"
-                )
-                _persist_az_training_state(
-                    trainer,
-                    training_state_path,
-                    global_step=global_step,
-                    iteration=iteration,
-                    best_loss=best_loss,
-                )
-
-            value_eval_stats = trainer.evaluate_against(
-                opponent_factory=lambda color: ValueFunctionPlayer(color),
-                num_games=100,
-                desc="Eval vs ValueFunctionPlayer",
+                trainer.save(checkpoint_dir, f"iter_{iteration}")
+            _refresh_checkpoint_registry(experiment_name, checkpoint_dir, trainer)
+            _persist_training_state(
+                path=training_state_path,
+                trainer=trainer,
+                mode=args.mode,
+                global_step=global_step,
+                iteration=iteration,
+                best_eval_score=best_eval_score,
+                best_iteration=best_iteration,
+                champion_eval_score=champion_eval_score,
+                promotions=promotions,
+                wandb_enabled=args.wandb,
             )
-            # alphabeta_eval_stats = trainer.evaluate_against(
-            #     opponent_factory=lambda color: AlphaBetaPlayer(color, depth=2, prunning=True),
-            #     num_games=25,
-            #     desc="Eval vs AlphaBetaPlayer",
-            # )
-            log_eval_stats("ValueFunctionPlayer", value_eval_stats)
-            # log_eval_stats("AlphaBetaPlayer", alphabeta_eval_stats)
-            wandb.log(
-                {
-                    "eval/value_function/win_rate": _eval_win_rate(value_eval_stats),
-                    "eval/value_function/agent_wins": value_eval_stats.get("agent_wins", 0),
-                    "eval/value_function/draws": value_eval_stats.get("draws", 0),
-                    # "eval/alphabeta/win_rate": _eval_win_rate(alphabeta_eval_stats),
-                    # "eval/alphabeta/agent_wins": alphabeta_eval_stats.get("agent_wins", 0),
-                    # "eval/alphabeta/draws": alphabeta_eval_stats.get("draws", 0),
-                    "iteration": iteration,
-                },
-                step=global_step,
-            )
-
-        if best_loss == float("inf"):
-            trainer.save(args.save_path, stem="best")
-            print(
-                f"\nTraining finished without SGD metrics; saved model to {args.save_path} "
-                f"({trainer.uses_shared_network and 'policy_value_best.pt' or 'policy_best.pt, critic_best.pt'})"
-            )
-        else:
-            print(f"\nBest loss achieved: {best_loss:.4f}")
-        _persist_az_training_state(
-            trainer,
-            training_state_path,
-            global_step=global_step,
-            iteration=last_iteration,
-            best_loss=best_loss,
-        )
+            if wandb.run is not None:
+                wandb.run.summary["best_eval/win_rate_vs_value"] = best_eval_score
+                wandb.run.summary["best_eval/iteration"] = best_iteration
+                wandb.run.summary["promotion/count"] = promotions
     finally:
-        _close_trainer_if_needed(trainer)
+        trainer.close()
 
 
 def main() -> None:
     args = parse_args()
-
     try:
         setup = resolve_training_architecture_and_warm_start(args)
+        arch = setup.arch
+        if arch.num_players is None:
+            raise ValueError("Search-guided training requires game.num_players in metadata.")
+        validate_ismcts_observation_levels(
+            ismcts_determinizations=args.ismcts_determinizations,
+            num_players=arch.num_players,
+            actor_observation_level=arch.actor_observation_level,
+            critic_observation_level=arch.critic_observation_level,
+        )
+        resume = prepare_resume(args, setup.warm_start)
     except (FileNotFoundError, ValueError) as exc:
-        print(f"Error: {exc}")
-        return
-
-    arch = setup.arch
-    warm_start = setup.warm_start
-    if arch.num_players is None:
-        print("Error: AlphaZero training requires game.num_players in the architecture preset.")
-        return
-
-    validate_ismcts_observation_levels(
-        ismcts_determinizations=args.ismcts_determinizations,
-        num_players=arch.num_players,
-        actor_observation_level=arch.actor_observation_level,
-        critic_observation_level=arch.critic_observation_level,
-    )
-
-    try:
-        resume = prepare_resume(args, warm_start)
-    except ValueError as exc:
-        print(f"Error: {exc}")
-        return
+        raise SystemExit(f"Error: {exc}") from exc
 
     if resume.active:
         experiment_name = resume.experiment_name
+        assert experiment_name is not None
         if args.wandb and not args.wandb_run_name:
             args.wandb_run_name = resume.wandb_run_name or experiment_name
     else:
         experiment_name = make_experiment_name(
-            "alphazero", args.wandb_run_name, args.experiment_name
+            "mcts-distill" if args.mode == "distill" else "expert-iteration",
+            args.wandb_run_name,
+            args.experiment_name,
         )
         if args.wandb and not args.wandb_run_name:
             args.wandb_run_name = experiment_name
-    args.save_path = default_checkpoints_dir(experiment_name)
-    os.makedirs(args.save_path, exist_ok=True)
-    training_state_path = training_state_file(experiment_name)
-    print(f"Architecture: {setup.architecture_source}")
 
+    checkpoint_dir = default_checkpoints_dir(experiment_name)
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    state_path = training_state_file(experiment_name)
+    device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     config = AlphaZeroConfig(
+        mode=args.mode,
         num_players=arch.num_players,
-        map_type=arch.map_type,
-        actor_observation_level=arch.actor_observation_level,
-        critic_observation_level=arch.critic_observation_level,
+        map_type=cast(Literal["BASE", "MINI", "TOURNAMENT"], arch.map_type),
+        actor_observation_level=cast(ActorObservationLevel, arch.actor_observation_level),
+        critic_observation_level=cast(CriticObservationLevel, arch.critic_observation_level),
         network_mode=arch.network_mode,
         model_type=arch.model_type,
         vps_to_win=arch.vps_to_win,
         discard_limit=arch.discard_limit,
         simulations=args.simulations,
-        ismcts_determinizations=args.ismcts_determinizations,
         c_puct=args.c_puct,
         prunning=args.prunning,
+        ismcts_determinizations=args.ismcts_determinizations,
         temperature=args.temperature,
         final_temperature=args.final_temperature,
         temperature_drop_move=args.temperature_drop_move,
@@ -598,149 +691,92 @@ def main() -> None:
         inference_wait_ms=args.inference_wait_ms,
         buffer_size=args.buffer_size,
         batch_size=args.batch_size,
-        lr=args.lr,
+        policy_lr=args.policy_lr,
+        critic_lr=args.critic_lr,
         weight_decay=args.weight_decay,
         policy_loss_weight=args.policy_loss_weight,
         value_loss_weight=args.value_loss_weight,
         max_grad_norm=args.max_grad_norm,
-        device=args.device,
+        offload_inactive_models=args.offload_inactive_models,
+        device=device,
         seed=None if args.seed < 0 else args.seed,
     )
 
-    device = config.device or ("cuda" if torch.cuda.is_available() else "cpu")
-    critic_model = None
-    if arch.network_mode == "shared":
-        policy_model = build_policy_value_model(
-            backbone_type=arch.backbone_type,
-            model_type=config.model_type,
-            hidden_dims=arch.policy_hidden_dims,
-            num_players=config.num_players,
-            map_type=config.map_type,
-            actor_observation_level=config.actor_observation_level,
-            critic_observation_level=config.critic_observation_level,
-            device=device,
-            network_mode=arch.network_mode,
-            xdim_cnn_channels=arch.xdim_cnn_channels,
-            xdim_cnn_kernel_size=arch.xdim_cnn_kernel_size,
-            xdim_fusion_hidden_dim=arch.xdim_policy_fusion_hidden_dim,
-        )
-    else:
-        policy_model = build_policy_model(
-            backbone_type=arch.backbone_type,
-            model_type=config.model_type,
-            hidden_dims=arch.policy_hidden_dims,
-            num_players=config.num_players,
-            map_type=config.map_type,
-            actor_observation_level=config.actor_observation_level,
-            device=device,
-            xdim_cnn_channels=arch.xdim_cnn_channels,
-            xdim_cnn_kernel_size=arch.xdim_cnn_kernel_size,
-            xdim_fusion_hidden_dim=arch.xdim_policy_fusion_hidden_dim,
-        )
-        critic_model = build_critic_model(
-            backbone_type=arch.backbone_type,
-            hidden_dims=arch.critic_hidden_dims,
-            num_players=config.num_players,
-            map_type=config.map_type,
-            critic_observation_level=config.critic_observation_level,
-            device=device,
-            xdim_cnn_channels=arch.xdim_cnn_channels,
-            xdim_cnn_kernel_size=arch.xdim_cnn_kernel_size,
-            xdim_fusion_hidden_dim=arch.xdim_critic_fusion_hidden_dim,
-        )
+    # Construct on CPU so four large networks are never materialized on CUDA at once.
+    student_policy, student_critic = _build_model_pair(arch, device="cpu")
+    teacher_policy, teacher_critic = _build_model_pair(arch, device="cpu")
+    _load_initial_weights(
+        student_policy=student_policy,
+        student_critic=student_critic,
+        teacher_policy=teacher_policy,
+        teacher_critic=teacher_critic,
+        warm_start=setup.warm_start,
+    )
+    trainer = AlphaZeroTrainer(
+        config,
+        student_policy,
+        student_critic,
+        teacher_policy,
+        teacher_critic,
+    )
 
-    trainer = AlphaZeroTrainer(config=config, policy_model=policy_model, critic_model=critic_model)
-    resume_global_step = 0
-    resume_start_iteration = 0
-    resume_best_loss = float("inf")
-    if resume.active:
-        print("Resuming AlphaZero training in place from saved training state...")
-        resume_global_step, resume_start_iteration, resume_best_loss = (
-            restore_az_training_state(trainer, resume)
-        )
-    else:
-        maybe_load_from_experiment(trainer, warm_start)
-
-    train_config = build_train_config(args, config, arch, device)
+    train_config = _build_train_config(args, config, arch, device)
     grouping = wandb_grouping_kwargs(
         args,
-        group_default="alphazero",
-        warm_start=warm_start,
+        group_default="mcts-distillation" if args.mode == "distill" else "expert-iteration",
+        warm_start=setup.warm_start,
         resume=resume,
     )
-    wandb_enabled = init_wandb(args, train_config, resume, grouping)
-    print("\nStarting AlphaZero training...")
-    print(f"  Device: {trainer.device}")
-    print(f"  Backbone: {arch.backbone_type} | model: {config.model_type}")
-    print(f"  Policy hidden dims: {list(arch.policy_hidden_dims)}")
-    print(f"  Critic hidden dims: {list(arch.critic_hidden_dims)}")
-    print(f"  Checkpoints: {args.save_path}")
-    print(f"  Network mode: {arch.network_mode}")
+    _init_wandb(args, train_config, grouping, resume)
 
+    if not resume.active:
+        trainer.save(checkpoint_dir, "best")
+        trainer.save(checkpoint_dir, "iter_0")
+        save_experiment(
+            experiment_name,
+            checkpoint_dir,
+            algorithm="mcts_distillation" if args.mode == "distill" else "expert_iteration",
+            game=GameConfig(
+                num_players=config.num_players,
+                map_type=config.map_type,
+                vps_to_win=config.vps_to_win,
+                discard_limit=config.discard_limit,
+            ),
+            networks=_network_specs(trainer, config),
+            train_config=train_config,
+            wandb_info=_wandb_info(args),
+            notes=(
+                "Frozen neural-MCTS teacher distillation."
+                if args.mode == "distill"
+                else "Gated neural-MCTS Expert Iteration."
+            ),
+        )
+
+    print("\nSearch-guided policy training")
+    print(f"  mode={args.mode} | device={device} | architecture={setup.architecture_source}")
+    print(
+        f"  teacher=d{args.ismcts_determinizations} x s{args.simulations} | "
+        f"games/iteration={args.games_per_iteration} | iterations={args.iterations}"
+    )
+    print(
+        f"  student policy_lr={args.policy_lr:g} | value_weight={args.value_loss_weight:g} | "
+        f"eval_seed={args.eval_seed}"
+    )
     run_training(
-        args,
-        trainer,
-        wandb_enabled,
-        start_iteration=resume_start_iteration,
-        global_step=resume_global_step,
-        best_loss=resume_best_loss,
-        training_state_path=training_state_path,
+        args=args,
+        config=config,
+        trainer=trainer,
+        checkpoint_dir=checkpoint_dir,
+        experiment_name=experiment_name,
+        training_state_path=state_path,
+        resume=resume,
     )
-
-    print(f"  Game workers: {args.num_workers}")
-
-    if trainer.uses_shared_network:
-        networks = {
-            "policy": network_spec_from_model(
-                policy_model,
-                kind=KIND_POLICY_VALUE,
-                model_type=config.model_type,
-                observation_level=config.actor_observation_level,
-            ),
-        }
-    else:
-        networks = {
-            "policy": network_spec_from_model(
-                policy_model,
-                kind=KIND_POLICY,
-                model_type=config.model_type,
-                observation_level=config.actor_observation_level,
-            ),
-            "critic": network_spec_from_model(
-                critic_model,
-                kind=KIND_VALUE,
-                observation_level=config.critic_observation_level,
-            ),
-        }
-    exp_path = save_experiment(
-        experiment_name,
-        args.save_path,
-        algorithm="alphazero",
-        game=GameConfig(
-            num_players=config.num_players,
-            map_type=config.map_type,
-            vps_to_win=config.vps_to_win,
-            discard_limit=config.discard_limit,
-        ),
-        networks=networks,
-        train_config=train_config,
-        wandb_info=_wandb_info(args),
-    )
-
-    print("\n" + "=" * 80)
-    print("AlphaZero training complete!")
-    print("=" * 80)
-    print(f"Checkpoints saved to: {args.save_path}")
-    if trainer.uses_shared_network:
-        print(f"  - Policy-value: {args.save_path}/policy_value_best.pt")
-    else:
-        print(f"  - Policy: {args.save_path}/policy_best.pt")
-        print(f"  - Critic: {args.save_path}/critic_best.pt")
-    if exp_path:
-        print(f"Experiment:  {exp_path}  (load via load_experiment('{experiment_name}'))")
-
+    _refresh_checkpoint_registry(experiment_name, checkpoint_dir, trainer)
     if args.wandb:
         wandb.finish()
+    print(
+        f"\nComplete. Experiment: {experiment_name}\nBest deployable checkpoint: {checkpoint_dir}"
+    )
 
 
 if __name__ == "__main__":

@@ -831,8 +831,8 @@ training creates a useful ceiling and whether it survives legal deployment:
 
 | ID       | agent (train info) | deploy / eval             | Status | Win% vs F (1st/2nd) | Notes       |
 | -------- | ------------------ | ------------------------- | ------ | ------------------- | ----------- |
-| B-oracle | full / full        | full-info oracle (cheats) | WIP    |                     | upper bound |
-| B-belief | full / full        | belief-averaged           | WIP    |                     | no cheating |
+| B-oracle | full / full        | full-info oracle (cheats) | done   | 58.50% (63.2% / 53.8%) | upper bound |
+| B-belief | full / full        | belief-averaged           | done   | 58.50% (63.4% / 53.6%) | no cheating |
 | B-public | public / full      | direct (`NNPolicyPlayer`) | done   | 52.05% (54.1% / 50.0%) | current reference |
 
 Belief vs public answers whether perfect-info training plus marginalization is
@@ -940,26 +940,92 @@ uv run scripts/eval_mcts_vs_catanatron.py \
   --wandb-run-name full-full-d8-s64-seed67
 ```
 
+The full/full run was extended and its paired best policy/critic checkpoint was
+selected at update 2,800. On the final seed-67 evaluation, oracle and exact
+belief averaging both won 58.50% over 2,000 games. The lack of an oracle-belief
+gap means hidden-card marginalization is not the current bottleneck.
+
+The subsequent high-compute d8 x s152 IS-MCTS evaluation won 60.70%
+(64.2% first / 57.2% second), versus 58.50% for the raw belief policy. The
++2.20-point estimate is encouraging but not independently conclusive; its
+unpaired difference interval includes zero. It took 59,855 seconds (16h 38m).
+This is enough evidence to use search as a teacher, but not a reason to spend
+the next research cycle on finer search-budget ablations.
+
 ---
 
-## Phase 3 — AlphaZero long runs (winning arch)
+## Phase 3 — search distillation and Expert Iteration
 
-Use the locked-in arch + winning real-game recipe from Phase 2 (expected: shared
-backbone). Warm-start from the best Phase 1/2 model. For a `full/full` model,
-IS-MCTS (`--ismcts-determinizations > 1`) is the search-time analog of belief
-averaging; a `public/public` model deploys directly.
+Do not begin with an unconstrained AlphaZero long run. The first question is
+whether the raw network can absorb the improvement already demonstrated by
+MCTS. `train-alphazero` has been rewritten around separate teacher and student
+model pairs and now exposes two explicit modes:
 
+- `distill`: keep the warm-started policy/critic frozen as the MCTS teacher;
+  train only the student policy by default. Select `best` by fixed-seed,
+  legally deployable win rate against `F`, not training loss.
+- `iterate`: train policy and value, then promote a candidate into the next
+  teacher only when it passes balanced deployable H2H and does not regress too
+  far against `F`. Rejected candidates are rolled back as policy/critic pairs.
+
+For full-info actors, both fixed-opponent and H2H evaluation use exact belief
+averaging. Seed 123 remains the selection set. Seed 67 is reserved for the
+post-training paired confirmation. The replay buffer is intentionally excluded
+from resume state because a 50k full-state buffer can occupy multiple GB;
+models, optimizers, teacher/champion state, RNG state, and counters are saved.
+
+### Frozen-teacher feasibility gate
+
+Generate 512 search games across eight iterations. d8 x s64 is preferred over
+s152 here because training benefits from broader state coverage under a fixed
+compute budget. Root noise is disabled for this first controlled distillation
+test so the target is the teacher's search policy rather than a deliberately
+perturbed exploration policy.
+
+```bash
+uv run train-alphazero \
+  --mode distill \
+  --load-from-experiment m-full-full-t3-screen-s42 --load-from-which best \
+  --experiment-name mcts-distill-full-full-d8-s64-s42 \
+  --iterations 8 --games-per-iteration 64 --optimizer-steps 128 \
+  --simulations 64 --ismcts-determinizations 8 --c-puct 1.5 \
+  --noise-turns 0 \
+  --num-workers 16 --inference-batch-size 64 --inference-wait-ms 2 \
+  --buffer-size 50000 --batch-size 256 \
+  --policy-lr 5e-5 --value-loss-weight 0 \
+  --eval-every-iterations 1 --eval-games 500 --eval-seed 123 \
+  --h2h-games 200 --h2h-seed 123 \
+  --wandb --wandb-group mcts-distillation
 ```
-uv run train-alphazero --load-from-experiment <best-model> --load-from-which best \
-  --experiment-name <id> --wandb
+
+Gate the branch on a paired seed-67 raw-policy improvement and balanced H2H
+against the original teacher. If distillation succeeds, use its best student to
+start `--mode iterate`; if it fails, do not spend a long run on recursive search
+training and move to checkpoint-population MARL instead.
+
+```bash
+mkdir -p data/paired_eval
+
+uv run scripts/eval_belief_policy.py \
+  --experiment m-full-full-t3-screen-s42 --which best \
+  --opponent-configs F --num-games 1000 --nn-seat both --seed 67 \
+  --paired-results-out data/paired_eval/distill-teacher-belief-seed67.json
+
+uv run scripts/eval_belief_policy.py \
+  --experiment mcts-distill-full-full-d8-s64-s42 --which best \
+  --opponent-configs F --num-games 1000 --nn-seat both --seed 67 \
+  --paired-results-out data/paired_eval/distill-student-belief-seed67.json
+
+uv run scripts/compare_paired_eval.py \
+  --a data/paired_eval/distill-student-belief-seed67.json \
+  --b data/paired_eval/distill-teacher-belief-seed67.json \
+  --output-json data/paired_eval/distill-student-vs-teacher-mcnemar.json
 ```
 
-
-| ID   | warm-start          | simulations | ismcts-determ. | c-puct | Status | Win% vs F (1st/2nd) | Notes                      |
-| ---- | ------------------- | ----------- | -------------- | ------ | ------ | ------------------- | -------------------------- |
-| AZ-1 | best Phase 2        | 64          | 1              | 1.5    | WIP    |                     | plain MCTS                 |
-| AZ-2 | best Phase 2        | 128         | 1              | 1.5    | WIP    |                     | more sims                  |
-| AZ-3 | best Phase 2 (full) | 64          | 8              | 1.5    | WIP    |                     | IS-MCTS (public/full only) |
+| ID | mode | teacher | search | Status | Raw win% vs F | Notes |
+| -- | ---- | ------- | ------ | ------ | ------------- | ----- |
+| EX-1 | frozen distill | full/full update-2800 best | d8 x s64 | WIP | | policy-only feasibility gate |
+| EX-2 | gated iterate | best EX-1 | d8 x s64 | blocked on EX-1 | | policy + outcome value training |
 
 
 ---

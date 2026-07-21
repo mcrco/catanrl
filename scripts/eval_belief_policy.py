@@ -13,11 +13,15 @@ oracle (which illegally sees the true opponent dev cards) as an upper bound.
 """
 
 import argparse
+from typing import Literal, cast
+
 import torch
 import wandb
+from catanatron.models.player import Player
 from catanatron.players.value import ValueFunctionPlayer
 
 from catanrl.eval.eval_nn_vs_catanatron import eval
+from catanrl.eval.paired_comparison import log_paired_games_to_wandb, write_paired_results
 from catanrl.eval.reporting import (
     EvalResult,
     log_wandb_eval_results,
@@ -30,6 +34,7 @@ from catanrl.experiment_store import (
     load_experiment,
 )
 from catanrl.features.catanatron_utils import COLOR_ORDER
+from catanrl.models.wrappers import PolicyNetworkWrapper
 from catanrl.experiments.common_args import DEFAULT_EVAL_SEED, DEFAULT_WANDB_PROJECT
 from catanrl.players import BeliefAveragedPolicyPlayer, NNPolicyPlayer
 from catanrl.utils.seeding import derive_seed
@@ -93,6 +98,12 @@ def main():
         action="store_true",
         help="Permit a model whose training observation level is not 'full' (not recommended).",
     )
+    parser.add_argument(
+        "--paired-results-out",
+        type=str,
+        default=None,
+        help="Write per-game belief-policy outcomes for an exact paired comparison.",
+    )
     parser.add_argument("--wandb", action="store_true", help="Log config and results to W&B.")
     parser.add_argument("--wandb-project", default=DEFAULT_WANDB_PROJECT)
     parser.add_argument("--wandb-run-name", default=None)
@@ -127,7 +138,10 @@ def main():
                 f"--opponent-configs implies {num_players} players but experiment "
                 f"'{args.experiment}' was trained for {exp.num_players}."
             )
-        experiment_model = exp.build_policy(which=args.which, device=device)
+        experiment_model = cast(
+            PolicyNetworkWrapper,
+            exp.build_policy(which=args.which, device=device),
+        )
 
     if observation_level != "full" and not args.allow_non_full:
         parser.error(
@@ -147,6 +161,7 @@ def main():
     print(f"NN seat: {args.nn_seat} | Games: {args.num_games}")
     print(f"VPs to win: {args.vps_to_win} | Discard limit: {args.discard_limit}")
 
+    map_type = cast(Literal["BASE", "MINI", "TOURNAMENT"], args.map_type)
     if experiment_model is not None:
         model = experiment_model
         print(f"Loaded policy from experiment '{args.experiment}' ({args.which})")
@@ -160,7 +175,7 @@ def main():
             model_type=args.model_type,
             hidden_dims=args.policy_hidden_dims,
             num_players=num_players,
-            map_type=args.map_type,
+            map_type=map_type,
             actor_observation_level="full",
             device=device,
         )
@@ -169,14 +184,14 @@ def main():
         model.eval()
         print(f"Loaded policy weights from {args.policy_weights}")
 
-    def make_opponents():
+    def make_opponents() -> list[Player]:
         return [ValueFunctionPlayer(COLOR_ORDER[i + 1]) for i in range(len(args.opponent_configs))]
 
     belief_player = BeliefAveragedPolicyPlayer(
         color=COLOR_ORDER[0],
         model_type=args.model_type,
         model=model,
-        map_type=args.map_type,
+        map_type=map_type,
         num_samples=args.num_samples,
         sample=args.sample,
         seed=args.seed,
@@ -184,6 +199,8 @@ def main():
 
     seat_modes = ("first", "second") if args.nn_seat == "both" else (args.nn_seat,)
     checkpoint = args.which if args.experiment else str(args.policy_weights)
+
+    paired_games: list[dict] = []
 
     def evaluate_player(player, variant: str) -> dict[str, EvalResult]:
         seat_results: dict[str, EvalResult] = {}
@@ -193,7 +210,7 @@ def main():
                 eval(
                     player,
                     make_opponents(),
-                    map_type=args.map_type,
+                    map_type=map_type,
                     num_games=args.num_games,
                     seed=(
                         derive_seed(args.seed, "seat", seat_mode)
@@ -204,6 +221,7 @@ def main():
                     discard_limit=args.discard_limit,
                     show_tqdm=True,
                     nn_seat=seat_mode,
+                    game_records=paired_games if variant == "belief" else None,
                 )
             )
         return seat_results
@@ -219,7 +237,7 @@ def main():
             color=COLOR_ORDER[0],
             model_type=args.model_type,
             model=model,
-            map_type=args.map_type,
+            map_type=map_type,
             actor_observation_level="full",
         )
         rows.append(
@@ -229,6 +247,24 @@ def main():
         )
 
     print_eval_rows(rows)
+    if args.paired_results_out:
+        write_paired_results(
+            args.paired_results_out,
+            agent=args.experiment or "belief-averaged-policy",
+            checkpoint=checkpoint,
+            base_seed=args.seed,
+            scenario={
+                "map_type": args.map_type,
+                "opponents": ",".join(args.opponent_configs),
+                "deployment": "belief-averaged",
+                "num_games_per_seat": args.num_games,
+                "seats": list(seat_modes),
+                "vps_to_win": args.vps_to_win,
+                "discard_limit": args.discard_limit,
+            },
+            games=paired_games,
+        )
+        print(f"Paired belief-policy outcomes: {args.paired_results_out}")
     if args.wandb:
         run = wandb.init(
             project=args.wandb_project,
@@ -238,6 +274,7 @@ def main():
             config=vars(args) | {"num_players": num_players},
         )
         log_wandb_eval_results(run, rows, wandb, chart_title="Belief-policy evaluation win rate")
+        log_paired_games_to_wandb(run, paired_games, wandb)
         run.finish()
 
 
