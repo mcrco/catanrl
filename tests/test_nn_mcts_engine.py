@@ -10,7 +10,7 @@ from catanatron.models.player import RandomPlayer
 
 from catanrl.features.catanatron_utils import COLOR_ORDER
 from catanrl.players import NNMCTSPlayer
-from catanrl.players.nn_mcts_player import _Node
+from catanrl.players.nn_mcts_player import _Node, _visit_distribution
 from catanrl.utils.catanatron_action_space import to_action_space
 from catanrl.utils.catanatron_game import force_player_order
 from catanrl.utils.catanatron_map import build_catan_map
@@ -21,9 +21,7 @@ NUM_PLAYERS = 2
 
 
 def _build_game(player: NNMCTSPlayer, seed: int = 0) -> Game:
-    players = [player] + [
-        RandomPlayer(color) for color in COLOR_ORDER[1:NUM_PLAYERS]
-    ]
+    players = [player] + [RandomPlayer(color) for color in COLOR_ORDER[1:NUM_PLAYERS]]
     game = Game(
         players=players,
         catan_map=build_catan_map(MAP_TYPE, seed=seed, number_placement="random"),
@@ -88,6 +86,43 @@ def test_zero_temperature_policy_is_argmax_onehot():
     assert np.count_nonzero(policy) == 1
     assert float(policy.max()) == 1.0
     assert action in game.playable_actions
+
+
+def test_target_temperature_can_be_decoupled_from_action_temperature():
+    visits = np.asarray([32.0, 16.0, 0.0])
+
+    action_probabilities = _visit_distribution(visits, temperature=0.0)
+    target_probabilities = _visit_distribution(visits, temperature=1.0)
+
+    np.testing.assert_array_equal(action_probabilities, np.asarray([1.0, 0.0, 0.0]))
+    np.testing.assert_allclose(
+        target_probabilities,
+        np.asarray([2.0 / 3.0, 1.0 / 3.0, 0.0]),
+    )
+
+
+def test_soft_target_temperature_does_not_change_sampled_action():
+    player = build_mock_player(num_simulations=16)
+    game = _build_game(player)
+
+    def run_once(target_temperature: float | None):
+        random.seed(9)
+        np.random.seed(9)
+        torch.manual_seed(9)
+        return player.run_search_policy(
+            game,
+            temperature=0.0,
+            target_temperature=target_temperature,
+            add_noise=False,
+        )
+
+    hard_policy, hard_action = run_once(None)
+    soft_policy, soft_action = run_once(1.0)
+
+    assert hard_action == soft_action
+    assert np.count_nonzero(hard_policy) == 1
+    assert np.count_nonzero(soft_policy) > 1
+    assert abs(float(soft_policy.sum()) - 1.0) < 1e-5
 
 
 def test_dirichlet_noise_perturbs_root_priors_only():

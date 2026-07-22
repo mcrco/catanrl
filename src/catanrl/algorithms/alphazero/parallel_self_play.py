@@ -182,6 +182,7 @@ class _TrainingSelfPlayPlayer(NNMCTSPlayer):
         *args,
         temperature: float,
         final_temperature: float,
+        target_temperature: float | None,
         temperature_drop_move: int,
         noise_turns: int,
         **kwargs,
@@ -189,6 +190,7 @@ class _TrainingSelfPlayPlayer(NNMCTSPlayer):
         super().__init__(*args, **kwargs)
         self._tr_temperature = float(temperature)
         self._tr_final_temperature = float(final_temperature)
+        self._tr_target_temperature = target_temperature
         self._tr_temperature_drop_move = int(temperature_drop_move)
         self._tr_noise_turns = int(noise_turns)
         self.samples: list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = []
@@ -211,6 +213,7 @@ class _TrainingSelfPlayPlayer(NNMCTSPlayer):
             game,
             temperature=max(temperature, 1e-3),
             add_noise=add_noise,
+            target_temperature=self._tr_target_temperature,
         )
         # Record the decision state from this seat's (the mover's) perspective.
         actor_state = self._observation_features(
@@ -253,6 +256,11 @@ def _build_training_seats(args_dict: dict, inference_backend) -> list[_TrainingS
             inference_backend=inference_backend,
             temperature=float(args_dict["temperature"]),
             final_temperature=float(args_dict["final_temperature"]),
+            target_temperature=(
+                None
+                if args_dict["target_temperature"] is None
+                else float(args_dict["target_temperature"])
+            ),
             temperature_drop_move=int(args_dict["temperature_drop_move"]),
             noise_turns=int(args_dict["noise_turns"]),
         )
@@ -355,6 +363,7 @@ def generate_self_play_data(
     inference_wait_ms: float,
     temperature: float,
     final_temperature: float,
+    target_temperature: float | None,
     temperature_drop_move: int,
     noise_turns: int,
     dirichlet_alpha: float,
@@ -390,6 +399,7 @@ def generate_self_play_data(
         "dirichlet_frac": dirichlet_frac,
         "temperature": temperature,
         "final_temperature": final_temperature,
+        "target_temperature": target_temperature,
         "temperature_drop_move": temperature_drop_move,
         "noise_turns": noise_turns,
         "vps_to_win": vps_to_win,

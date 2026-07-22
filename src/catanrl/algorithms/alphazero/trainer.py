@@ -55,6 +55,7 @@ class AlphaZeroConfig:
     ismcts_determinizations: int = 1
     temperature: float = 1.0
     final_temperature: float = 0.1
+    target_temperature: float | None = None
     temperature_drop_move: int = 30
     noise_turns: int = 20
     dirichlet_alpha: float = 0.3
@@ -308,6 +309,7 @@ class AlphaZeroTrainer:
             inference_wait_ms=self.config.inference_wait_ms,
             temperature=self.config.temperature,
             final_temperature=self.config.final_temperature,
+            target_temperature=self.config.target_temperature,
             temperature_drop_move=self.config.temperature_drop_move,
             noise_turns=self.config.noise_turns,
             dirichlet_alpha=self.config.dirichlet_alpha,

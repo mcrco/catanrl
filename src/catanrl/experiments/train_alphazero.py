@@ -107,6 +107,15 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     search.add_argument("--prunning", action="store_true")
     search.add_argument("--temperature", type=float, default=1.0)
     search.add_argument("--final-temperature", type=float, default=0.1)
+    search.add_argument(
+        "--target-temperature",
+        type=float,
+        default=None,
+        help=(
+            "Temperature for stored MCTS visit targets. By default it follows the "
+            "trajectory action-temperature schedule."
+        ),
+    )
     search.add_argument("--temperature-drop-move", type=int, default=30)
     search.add_argument("--noise-turns", type=int, default=20)
     search.add_argument("--dirichlet-alpha", type=float, default=0.3)
@@ -682,6 +691,7 @@ def main() -> None:
         ismcts_determinizations=args.ismcts_determinizations,
         temperature=args.temperature,
         final_temperature=args.final_temperature,
+        target_temperature=args.target_temperature,
         temperature_drop_move=args.temperature_drop_move,
         noise_turns=args.noise_turns,
         dirichlet_alpha=args.dirichlet_alpha,

@@ -12,6 +12,7 @@ from dataclasses import dataclass, field, replace
 from typing import Callable, Literal, Sequence, Tuple
 
 import numpy as np
+import numpy.typing as npt
 import torch
 from catanatron.game import Game
 from catanatron.models.player import Color, Player, RandomPlayer
@@ -40,6 +41,24 @@ EPSILON = 1e-8
 
 # Populated in the parent immediately before fork-based within-tree workers start.
 _FORK_SEARCH_CTX: dict[str, object] = {}
+
+
+def _visit_distribution(
+    visits: npt.NDArray[np.float64], temperature: float
+) -> npt.NDArray[np.float64]:
+    """Normalize visit counts at a temperature without changing the search."""
+    visit_counts = np.asarray(visits, dtype=np.float64)
+    if visit_counts.size == 0:
+        return visit_counts
+    if visit_counts.sum() <= 0:
+        return np.ones_like(visit_counts) / len(visit_counts)
+    if temperature <= 1e-3:
+        probabilities = np.zeros_like(visit_counts)
+        probabilities[int(np.argmax(visit_counts))] = 1.0
+        return probabilities
+    adjusted = visit_counts ** (1.0 / temperature)
+    total = adjusted.sum()
+    return adjusted / total if total > 0 else np.ones_like(adjusted) / len(adjusted)
 
 
 def _fork_search_worker_main(worker_idx: int) -> None:
@@ -263,7 +282,9 @@ class _SyncRemoteNNMCTSInferenceBackend(_NNMCTSInferenceBackend):
         self.worker_id = worker_id
         self.request_queue = request_queue
         self.response_queue = response_queue
-        self.response_queues = list(response_queues) if response_queues is not None else [response_queue]
+        self.response_queues = (
+            list(response_queues) if response_queues is not None else [response_queue]
+        )
         self.response_read_lock = response_read_lock
         self.shared_request_id = shared_request_id
         self.shared_request_id_lock = shared_request_id_lock
@@ -442,7 +463,9 @@ class NNMCTSPlayer(Player):
     ):
         super().__init__(color, is_bot=True, **kwargs)
 
-        self.device = str(device) if device is not None else ("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = (
+            str(device) if device is not None else ("cuda" if torch.cuda.is_available() else "cpu")
+        )
         self.model_type = model_type
         self.map_type = map_type
         self.num_simulations = int(num_simulations)
@@ -483,9 +506,7 @@ class NNMCTSPlayer(Player):
         self._owns_inference_backend = inference_backend is None
         if inference_backend is None:
             if policy_model is None:
-                raise ValueError(
-                    "policy_model is required when inference_backend is not supplied."
-                )
+                raise ValueError("policy_model is required when inference_backend is not supplied.")
             uses_shared_network = isinstance(policy_model, PolicyValueNetworkWrapper)
             if not uses_shared_network and critic_model is None:
                 raise ValueError(
@@ -531,9 +552,7 @@ class NNMCTSPlayer(Player):
             root.children.keys(),
             key=lambda action: sum(child.visits for child, _ in root.children[action]),
         )
-        return self._resolve_root_action(
-            best_action, playable_actions, num_players, game_colors
-        )
+        return self._resolve_root_action(best_action, playable_actions, num_players, game_colors)
 
     def _search_root(self, game, add_noise: bool = False) -> _Node:
         """Build the root, expand it, optionally add Dirichlet noise, and run
@@ -574,24 +593,17 @@ class NNMCTSPlayer(Player):
         if belief.num_players == 2:
             hypotheses = belief.enumerate_hypotheses()
             if len(hypotheses) > self.ismcts_determinizations:
-                hypotheses = self._subsample_hypotheses(
-                    hypotheses, self.ismcts_determinizations
-                )
+                hypotheses = self._subsample_hypotheses(hypotheses, self.ismcts_determinizations)
         else:
             hypotheses = belief.sample_hypotheses(self.ismcts_determinizations, random)
-        return [
-            (determinize_game(belief, hyp, rng=random), hyp.weight)
-            for hyp in hypotheses
-        ]
+        return [(determinize_game(belief, hyp, rng=random), hyp.weight) for hyp in hypotheses]
 
     @staticmethod
     def _subsample_hypotheses(hypotheses, k: int):
         """Sample ``k`` hypotheses without replacement by weight and renormalize."""
         weights = np.array([h.weight for h in hypotheses], dtype=np.float64)
         weights = weights / weights.sum()
-        chosen_idx = np.random.choice(
-            len(hypotheses), size=k, replace=False, p=weights
-        )
+        chosen_idx = np.random.choice(len(hypotheses), size=k, replace=False, p=weights)
         chosen = [hypotheses[i] for i in chosen_idx]
         total = sum(hypotheses[i].weight for i in chosen_idx)
         if total <= 0:
@@ -623,6 +635,7 @@ class NNMCTSPlayer(Player):
         self,
         game,
         temperature: float,
+        target_temperature: float | None,
         add_noise: bool,
         playable_actions: list,
     ) -> Tuple[np.ndarray, object]:
@@ -644,21 +657,16 @@ class NNMCTSPlayer(Player):
                 policy[idx] = uniform
             return policy, random.choice(playable_actions)
 
-        if temperature <= 1e-3:
-            best = int(visits.argmax())
-            policy[indices[best]] = 1.0
-            return policy, playable_actions[best]
-
-        adjusted = visits ** (1.0 / temperature)
-        total = adjusted.sum()
-        adjusted = (
-            adjusted / total
-            if total > 0
-            else np.ones_like(adjusted) / len(adjusted)
+        target_probabilities = _visit_distribution(
+            visits,
+            temperature if target_temperature is None else target_temperature,
         )
-        for idx, prob in zip(indices, adjusted):
+        action_probabilities = _visit_distribution(visits, temperature)
+        for idx, prob in zip(indices, target_probabilities):
             policy[idx] = prob
-        chosen = playable_actions[int(np.random.choice(len(playable_actions), p=adjusted))]
+        chosen = playable_actions[
+            int(np.random.choice(len(playable_actions), p=action_probabilities))
+        ]
         return policy, chosen
 
     def run_search_policy(
@@ -666,9 +674,11 @@ class NNMCTSPlayer(Player):
         game,
         temperature: float,
         add_noise: bool = True,
+        target_temperature: float | None = None,
     ) -> Tuple[np.ndarray, object]:
         """Run MCTS and return (visit-count policy target over the flat action
-        space, sampled action). Used to collect AlphaZero training targets."""
+        space, sampled action). ``temperature`` controls trajectory sampling;
+        ``target_temperature`` may independently soften the recorded target."""
         num_players = len(game.state.colors)
         game_colors = tuple(game.state.colors)
         action_space_size = get_action_space_size(num_players, self.map_type)
@@ -682,7 +692,11 @@ class NNMCTSPlayer(Player):
 
         if self.ismcts:
             return self._ismcts_search_policy(
-                game, temperature, add_noise, playable_actions
+                game,
+                temperature,
+                target_temperature,
+                add_noise,
+                playable_actions,
             )
 
         root = self._search_root(game, add_noise=add_noise)
@@ -697,24 +711,22 @@ class NNMCTSPlayer(Player):
             [sum(child.visits for child, _ in root.children[action]) for action in actions],
             dtype=np.float64,
         )
-        indices = [to_action_space(action, num_players, self.map_type, game_colors) for action in actions]
+        indices = [
+            to_action_space(action, num_players, self.map_type, game_colors) for action in actions
+        ]
 
-        if temperature <= 1e-3:
-            best = int(visits.argmax())
-            policy[indices[best]] = 1.0
-            chosen_action = actions[best]
-        else:
-            adjusted = visits ** (1.0 / temperature)
-            total = adjusted.sum()
-            if total <= 0:
-                adjusted = np.ones_like(adjusted) / len(adjusted)
-            else:
-                adjusted = adjusted / total
-            for idx, prob in zip(indices, adjusted):
-                policy[idx] = prob
-            chosen_action = actions[int(np.random.choice(len(actions), p=adjusted))]
+        target_probabilities = _visit_distribution(
+            visits,
+            temperature if target_temperature is None else target_temperature,
+        )
+        action_probabilities = _visit_distribution(visits, temperature)
+        for idx, prob in zip(indices, target_probabilities):
+            policy[idx] = prob
+        chosen_action = actions[int(np.random.choice(len(actions), p=action_probabilities))]
 
-        resolved = self._resolve_root_action(chosen_action, playable_actions, num_players, game_colors)
+        resolved = self._resolve_root_action(
+            chosen_action, playable_actions, num_players, game_colors
+        )
         return policy, resolved
 
     def _run_simulation(
@@ -908,9 +920,7 @@ class NNMCTSPlayer(Player):
             return _LeafEvaluation(policy_logits=np.array([], dtype=np.float32), value=0.0)
 
         actions = (
-            list_prunned_actions(node.game)
-            if self.prunning
-            else list(node.game.playable_actions)
+            list_prunned_actions(node.game) if self.prunning else list(node.game.playable_actions)
         )
         if not actions:
             return _LeafEvaluation(policy_logits=np.array([], dtype=np.float32), value=0.0)
@@ -1025,7 +1035,9 @@ class NNMCTSPlayer(Player):
     ) -> dict[object, float]:
         num_players = len(game.state.colors)
         game_colors = tuple(game.state.colors)
-        indices = [to_action_space(action, num_players, self.map_type, game_colors) for action in actions]
+        indices = [
+            to_action_space(action, num_players, self.map_type, game_colors) for action in actions
+        ]
         action_logits = np.array([logits[idx] for idx in indices], dtype=np.float32)
         action_logits = action_logits - float(np.max(action_logits))
         exp_logits = np.exp(action_logits)
@@ -1118,4 +1130,3 @@ class NNMCTSInformationSetPlayer(NNMCTSPlayer):
         kwargs.setdefault("ismcts_determinizations", 8)
         kwargs.setdefault("actor_observation_level", "full")
         super().__init__(*args, **kwargs)
-

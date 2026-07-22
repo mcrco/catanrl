@@ -1041,6 +1041,37 @@ not improve, the next isolated variable is target sharpness: the original
 schedule changes to `T=0.1` after 30 global action records and produced almost
 hard labels. Do not combine that change with the mask canary.
 
+The mask-fixed canary completed without collapse. The source scored 57.00%
+against `F`; after 128 updates the candidate scored 56.00%, an inconclusive
+-1.00-point change over 500 games. Candidate H2H against the source was 55.50%
+over 200 games, also inconclusive. The corrected training loss was only 0.0593
+and top-1 agreement was already 98.75%, confirming that the original collapse
+was fixed. However, target entropy remained just 0.0217 nats, so the update
+mostly increased confidence in actions the raw policy already selected.
+
+The next canary decouples trajectory sampling from the supervised label. Search
+still uses the original `T=1.0` then `T=0.1` action schedule, preserving the
+collected trajectory distribution, while `--target-temperature 1.0` records raw
+normalized visit counts throughout the game:
+
+```bash
+uv run train-alphazero \
+  --mode distill \
+  --load-from-experiment m-full-full-t3-screen-s42 --load-from-which best \
+  --experiment-name mcts-distill-full-full-d8-s64-soft-target-canary-s42 \
+  --iterations 1 --games-per-iteration 64 --optimizer-steps 128 \
+  --simulations 64 --ismcts-determinizations 8 --c-puct 1.5 \
+  --temperature 1.0 --final-temperature 0.1 --target-temperature 1.0 \
+  --noise-turns 0 \
+  --num-workers 16 --inference-batch-size 64 --inference-wait-ms 2 \
+  --buffer-size 50000 --batch-size 256 \
+  --policy-lr 5e-5 --value-loss-weight 0 \
+  --eval-every-iterations 1 --eval-games 500 --eval-seed 123 \
+  --h2h-games 200 --h2h-seed 123 \
+  --save-every-updates 0 \
+  --wandb --wandb-group mcts-distillation
+```
+
 ```bash
 mkdir -p data/paired_eval
 
@@ -1063,8 +1094,9 @@ uv run scripts/compare_paired_eval.py \
 | ID | mode | teacher | search | Status | Raw win% vs F | Notes |
 | -- | ---- | ------- | ------ | ------ | ------------- | ----- |
 | EX-1 | frozen distill | full/full update-2800 best | d8 x s64 | invalid | 32.00% final; 57.80% source retained as best | unmasked student loss caused immediate collapse |
-| EX-1b | frozen distill | full/full update-2800 best | d8 x s64 | planned | | legal-mask fix; one-iteration canary first |
-| EX-2 | gated iterate | best EX-1b | d8 x s64 | blocked on EX-1b | | policy + outcome value training |
+| EX-1b | frozen distill | full/full update-2800 best | d8 x s64 | inconclusive | 56.00%; source 57.00% | mask fixed; 55.50% H2H; labels still almost hard |
+| EX-1c | frozen distill | full/full update-2800 best | d8 x s64 | planned | | raw `T=1` visit targets; original action schedule |
+| EX-2 | gated iterate | best EX-1c | d8 x s64 | blocked on EX-1c | | policy + outcome value training |
 
 
 ---
