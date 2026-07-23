@@ -29,6 +29,8 @@ class PolicyEvalResult:
     second_games: int
     avg_vps: float
     avg_turns: float
+    first_avg_turns: float
+    second_avg_turns: float
 
     @property
     def win_rate(self) -> float:
@@ -153,6 +155,8 @@ def _combine_seats(
         second_games=len(second_turns),
         avg_vps=sum(all_vps) / len(all_vps) if all_vps else 0.0,
         avg_turns=sum(all_turns) / len(all_turns) if all_turns else 0.0,
+        first_avg_turns=sum(first_turns) / len(first_turns) if first_turns else 0.0,
+        second_avg_turns=sum(second_turns) / len(second_turns) if second_turns else 0.0,
     )
 
 

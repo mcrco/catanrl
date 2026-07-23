@@ -3,15 +3,18 @@
 import argparse
 import math
 import re
-from typing import Any
+from typing import Any, Literal, cast
 
 import torch
 import wandb
 from tqdm import tqdm
 
+from catanrl.eval.search_training import PolicyEvalResult, evaluate_candidate_vs_champion
 from catanrl.eval.vectorized_rollout import run_policy_h2h_eval_vectorized
 from catanrl.experiment_store import Experiment, load_experiment
 from catanrl.experiments.common_args import DEFAULT_EVAL_SEED, DEFAULT_WANDB_PROJECT
+from catanrl.features.catanatron_utils import ActorObservationLevel
+from catanrl.models import PolicyNetworkWrapper
 
 
 def validate_compatible_experiments(experiment_a: Experiment, experiment_b: Experiment) -> None:
@@ -50,6 +53,22 @@ def summarize_seat_results(seat_results: dict[str, tuple[int, list[int]]]) -> di
     metrics["wins_a"] = float(total_wins)
     metrics["wins_b"] = float(total_games - total_wins)
     return metrics
+
+
+def summarize_deployable_result(result: PolicyEvalResult) -> dict[str, float]:
+    """Convert the serial deployment evaluator result to the shared report shape."""
+    return {
+        "win_rate_a_first": result.first_win_rate,
+        "win_rate_a_second": result.second_win_rate,
+        "win_rate_a": result.win_rate,
+        "win_rate_b": 1.0 - result.win_rate,
+        "avg_turns_first": result.first_avg_turns,
+        "avg_turns_second": result.second_avg_turns,
+        "avg_turns": result.avg_turns,
+        "games": float(result.games),
+        "wins_a": float(result.wins),
+        "wins_b": float(result.games - result.wins),
+    }
 
 
 def wilson_interval(wins: int, games: int, z: float = 1.96) -> tuple[float, float]:
@@ -179,6 +198,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Sample policy actions instead of taking deterministic argmax actions.",
     )
+    parser.add_argument(
+        "--deployable",
+        action="store_true",
+        help=(
+            "Evaluate through deployment wrappers. Full-information actors use exact "
+            "belief averaging instead of receiving hidden state. This path is serial."
+        ),
+    )
     parser.add_argument("--wandb", action="store_true", help="Log config and results to W&B.")
     parser.add_argument("--wandb-project", default=DEFAULT_WANDB_PROJECT)
     parser.add_argument("--wandb-run-name", default=None)
@@ -202,11 +229,24 @@ def main() -> None:
     experiment_b = load_experiment(args.experiment_b)
     validate_compatible_experiments(experiment_a, experiment_b)
 
-    policy_a = experiment_a.build_policy(which=args.which_a, device=device)
-    policy_b = experiment_b.build_policy(which=args.which_b, device=device)
+    policy_a = cast(
+        PolicyNetworkWrapper,
+        experiment_a.build_policy(which=args.which_a, device=device),
+    )
+    policy_b = cast(
+        PolicyNetworkWrapper,
+        experiment_b.build_policy(which=args.which_b, device=device),
+    )
     game = experiment_a.metadata.game
-    observation_level_a = experiment_a.policy_spec.observation_level or "private"
-    observation_level_b = experiment_b.policy_spec.observation_level or "private"
+    map_type = cast(Literal["BASE", "MINI", "TOURNAMENT"], game.map_type)
+    observation_level_a = cast(
+        ActorObservationLevel,
+        experiment_a.policy_spec.observation_level or "private",
+    )
+    observation_level_b = cast(
+        ActorObservationLevel,
+        experiment_b.policy_spec.observation_level or "private",
+    )
 
     print(f"A: {experiment_a.metadata.name} ({args.which_a})")
     print(f"B: {experiment_b.metadata.name} ({args.which_b})")
@@ -214,30 +254,59 @@ def main() -> None:
     print(f"Device: {device} | Games per seat: {args.games_per_seat}")
     print(f"Action selection: {'sample' if args.sample_actions else 'argmax'}")
 
-    seat_results: dict[str, tuple[int, list[int]]] = {}
-    with tqdm(total=2 * args.games_per_seat, desc="Policy H2H games") as progress:
-        for seat_mode in ("first", "second"):
-            seat_results[seat_mode] = run_policy_h2h_eval_vectorized(
-                policy_model=policy_a,
-                champion_model=policy_b,
-                model_type=experiment_a.model_type or "flat",
-                map_type=game.map_type,
-                num_players=game.num_players,
-                num_envs=args.num_envs,
-                num_games=args.games_per_seat,
-                device=device,
-                vps_to_win=game.vps_to_win or 15,
-                discard_limit=game.discard_limit or 9,
-                deterministic=not args.sample_actions,
-                nn_seat=seat_mode,
-                actor_observation_level=observation_level_a,
-                champion_model_type=experiment_b.model_type or "flat",
-                champion_actor_observation_level=observation_level_b,
-                seed=args.seed,
-                progress_callback=progress.update,
+    if args.deployable:
+        if args.sample_actions:
+            raise ValueError("--sample-actions is not supported with --deployable")
+        if (experiment_a.model_type or "flat") != (experiment_b.model_type or "flat"):
+            raise ValueError("--deployable currently requires matching policy model types")
+        if observation_level_a != observation_level_b:
+            raise ValueError("--deployable currently requires matching observation levels")
+        print("Evaluation semantics: deployable (belief-averaged for full actors)")
+        result = evaluate_candidate_vs_champion(
+            candidate_model=policy_a,
+            champion_model=policy_b,
+            model_type=experiment_a.model_type or "flat",
+            map_type=map_type,
+            actor_observation_level=observation_level_a,
+            num_games=2 * args.games_per_seat,
+            seed=args.seed,
+            vps_to_win=game.vps_to_win or 15,
+            discard_limit=game.discard_limit or 9,
+            show_tqdm=True,
+        )
+        metrics = summarize_deployable_result(result)
+    else:
+        if "full" in {observation_level_a, observation_level_b}:
+            print(
+                "WARNING: full-information actor receives hidden state on the vectorized path; "
+                "pass --deployable for legal belief-averaged evaluation."
             )
+        seat_results: dict[str, tuple[int, list[int]]] = {}
+        with tqdm(total=2 * args.games_per_seat, desc="Policy H2H games") as progress:
+            def update_progress(count: int) -> None:
+                progress.update(count)
 
-    metrics = summarize_seat_results(seat_results)
+            for seat_mode in ("first", "second"):
+                seat_results[seat_mode] = run_policy_h2h_eval_vectorized(
+                    policy_model=policy_a,
+                    champion_model=policy_b,
+                    model_type=experiment_a.model_type or "flat",
+                    map_type=map_type,
+                    num_players=game.num_players,
+                    num_envs=args.num_envs,
+                    num_games=args.games_per_seat,
+                    device=device,
+                    vps_to_win=game.vps_to_win or 15,
+                    discard_limit=game.discard_limit or 9,
+                    deterministic=not args.sample_actions,
+                    nn_seat=seat_mode,
+                    actor_observation_level=observation_level_a,
+                    champion_model_type=experiment_b.model_type or "flat",
+                    champion_actor_observation_level=observation_level_b,
+                    seed=args.seed,
+                    progress_callback=update_progress,
+                )
+        metrics = summarize_seat_results(seat_results)
     rows = build_policy_rows(
         metrics,
         experiment_a.metadata.name,
