@@ -1187,6 +1187,98 @@ student to sole champion on these results.
 | EX-1d | frozen distill full gate | full/full update-2800 best | d8 x s64 | completed; small gain unconfirmed | 59.10%; source 57.80% | paired delta +1.30 points, p=0.247; H2H 50.60%, p=0.607 |
 | EX-2 | gated iterate | best EX-1d | d8 x s64 | stopped | | feasibility gate did not establish a teacher improvement |
 
+---
+
+## Phase 4 — MARL rollout and credit-horizon screen
+
+Before adding checkpoint-population opponents, test whether the current
+full/full policy is limited by noisy short rollouts or by short-horizon GAE.
+Each new run starts from the paired policy/critic selected as `best` in
+`m-full-full-t3-screen-s42`, uses shaped reward, and collects the same 8,192,000
+new environment timesteps. The existing full/full training trajectory already
+used the 512-step, H17 setting, so use it as the exploratory control instead of
+rerunning it now. This is not a perfectly matched branch because a new
+warm-start resets optimizer state; rerun the control from the same checkpoint
+only if a changed setting looks strong enough to require confirmation.
+
+The buffer stores both player rows at every environment step. At eight
+environments, a 512-step rollout contains 4,096 game transitions and 8,192
+agent rows; a 2,048-step rollout contains 16,384 game transitions and 32,768
+agent rows. With batch size 1,024 and two epochs, these correspond to 16 and 64
+planned optimizer minibatches. Based on the preceding run's 312 game steps per
+completed episode, they should contain approximately 13 and 52 completed games,
+respectively.
+
+`gamma=0.99, lambda=0.95` gives a GAE trace coefficient of `0.9405` and an
+effective TD-residual horizon of about 16.8 steps. The longer setting,
+`gamma=0.999, lambda=0.99`, raises that horizon to about 91.0 steps. This is a
+credit-assignment change, not just a reward discount change, so the combined
+run is included to detect an interaction with rollout length.
+
+| ID | rollout steps / env | gamma / lambda | expected games / rollout | planned minibatches | Status |
+| -- | ------------------- | -------------- | ------------------------ | ------------------- | ------ |
+| R512-H17 | 512 | 0.99 / 0.95 | ~13 | 16 | existing approximate control; do not rerun |
+| R2048-H17 | 2,048 | 0.99 / 0.95 | ~52 | 64 | WIP |
+| R512-H91 | 512 | 0.999 / 0.99 | ~13 | 16 | WIP |
+| R2048-H91 | 2,048 | 0.999 / 0.99 | ~52 | 64 | WIP |
+
+Evaluation cadence is divided by four for the 2,048-step runs, so all three new
+variants are measured every 819,200 collected environment timesteps. Checkpoint
+only at the final update while retaining the rolling `best` pair; a full/full
+policy/critic snapshot is about 626 MB. The resumable training state is about
+1.88 GB and is retained under the existing experiment-store behavior, so budget
+roughly 3.1 GB per run or 9.4 GB for all three new runs. Rank the variants by
+the last-three mean fixed-seed win rate against `F`, using peak win rate only as
+a secondary checkpoint-selection signal. Also inspect
+`train/rollout_episodes_completed`, `train/decision_sample_fraction`,
+`train/minibatches_processed`, `train/minibatch_completion_fraction`,
+`train/early_stop_kl`, critic explained variance, and average episode length.
+If the 2,048-step variants process far fewer than their 64 planned minibatches,
+KL stopping is confounding the rollout comparison.
+
+```bash
+MARL_ROLLOUT_HORIZON_HPARAMS=(
+  --total-timesteps 8192000
+  --train-epochs 2
+  --batch-size 1024
+  --num-envs 8
+  --policy-lr 5e-5
+  --critic-lr 1e-4
+  --clip-epsilon 0.2
+  --value-coef 0.5
+  --entropy-coef 0.001
+  --activity-coef 0.0
+  --max-grad-norm 0.5
+  --target-kl 0.01
+  --reward-function shaped
+  --seed 42
+  --fresh-eval-games-per-opponent 0
+  --trend-eval-games-per-opponent 500
+  --trend-eval-seed 123
+  --eval-baselines value
+  --h2h-eval-games 500
+  --h2h-eval-seed 123
+  --metric-window 200
+)
+
+# ID rollout_steps gamma lambda eval_cadence save_cadence
+for SPEC in \
+  "r2048-h17 2048 0.99 0.95 50 500" \
+  "r512-h91 512 0.999 0.99 200 2000" \
+  "r2048-h91 2048 0.999 0.99 50 500"; do
+  read -r ID ROLLOUT GAMMA LAMBDA EVAL_CADENCE SAVE_CADENCE <<< "$SPEC"
+  uv run train-marl-cc \
+    --config configs/models/xdim-flat-2p-full-sep.yaml \
+    --load-from-experiment m-full-full-t3-screen-s42 --load-from-which best \
+    --experiment-name "m-full-full-${ID}-s42" \
+    --rollout-steps "$ROLLOUT" \
+    --gamma "$GAMMA" --gae-lambda "$LAMBDA" \
+    --eval-every-updates "$EVAL_CADENCE" --save-every-updates "$SAVE_CADENCE" \
+    --wandb --wandb-group marl-ppo-rollout-horizon \
+    "${MARL_ROLLOUT_HORIZON_HPARAMS[@]}"
+done
+```
+
 
 ---
 
