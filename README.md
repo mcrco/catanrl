@@ -1072,6 +1072,56 @@ uv run train-alphazero \
   --wandb --wandb-group mcts-distillation
 ```
 
+The soft-target canary also completed without collapse. Target entropy increased
+from 0.0217 to 0.2206 nats and prediction entropy increased from 0.0854 to
+0.1954, so the new control is exposing substantially more of the search visit
+distribution. Top-1 agreement remained high at 96.32%. Strength was unchanged
+within evaluation noise: the candidate scored 56.20% against `F` versus the
+57.00% source baseline, and 51.50% in 200 balanced games against the source.
+This is not evidence of improvement after one iteration, but it is sufficient to
+run the originally planned 512-game feasibility gate because the student is now
+stable and the targets contain a nontrivial learning signal.
+
+Run the full frozen-teacher gate from the original source rather than from either
+canary candidate. Saving at update 1,000 keeps one periodic checkpoint near the
+end of the 1,024 optimizer updates without changing experiment-store semantics:
+
+```bash
+uv run train-alphazero \
+  --mode distill \
+  --load-from-experiment m-full-full-t3-screen-s42 --load-from-which best \
+  --experiment-name mcts-distill-full-full-d8-s64-soft-target-s42 \
+  --iterations 8 --games-per-iteration 64 --optimizer-steps 128 \
+  --simulations 64 --ismcts-determinizations 8 --c-puct 1.5 \
+  --temperature 1.0 --final-temperature 0.1 --target-temperature 1.0 \
+  --noise-turns 0 \
+  --num-workers 16 --inference-batch-size 64 --inference-wait-ms 2 \
+  --buffer-size 50000 --batch-size 256 \
+  --policy-lr 5e-5 --value-loss-weight 0 \
+  --eval-every-iterations 1 --eval-games 500 --eval-seed 123 \
+  --h2h-games 200 --h2h-seed 123 \
+  --save-every-updates 1000 \
+  --wandb --wandb-group mcts-distillation
+```
+
+The full soft-target gate completed in 7h 17m. The source checkpoint scored
+59.40% on the run's initial 500-game selection evaluation. Candidate win rates
+after iterations 1 through 8 were 57.60%, 57.20%, 56.80%, 57.20%, 58.60%,
+60.40%, 57.60%, and 60.00%. Iteration 6 was therefore saved as `best`. Its
+seat split against `F` was 65.20% / 55.60%, while its 200-game deployable H2H
+against the source was 54.00% (60.00% / 48.00%). The final candidate's H2H was
+56.00% with a more balanced 59.00% / 53.00% split, but it was not the selected
+checkpoint.
+
+This is encouraging but not yet a confirmed gain. The same unchanged source
+checkpoint has now scored 57.00%, 59.40%, and 58.20% in separate nominally
+seed-123 evaluations, so the evaluator is not bitwise reproducible across
+processes. In addition, selecting the maximum of eight noisy 500-game results
+introduces winner's-curse bias. Do not start Expert Iteration from the 60.40%
+selection score alone. Confirm the saved student and source on the same held-out
+seed-67 game set first. Here `--num-games 1000 --nn-seat both` means 1,000
+games per seat, or 2,000 total per policy:
+
 ```bash
 mkdir -p data/paired_eval
 
@@ -1081,7 +1131,7 @@ uv run scripts/eval_belief_policy.py \
   --paired-results-out data/paired_eval/distill-teacher-belief-seed67.json
 
 uv run scripts/eval_belief_policy.py \
-  --experiment mcts-distill-full-full-d8-s64-s42 --which best \
+  --experiment mcts-distill-full-full-d8-s64-soft-target-s42 --which best \
   --opponent-configs F --num-games 1000 --nn-seat both --seed 67 \
   --paired-results-out data/paired_eval/distill-student-belief-seed67.json
 
@@ -1091,12 +1141,51 @@ uv run scripts/compare_paired_eval.py \
   --output-json data/paired_eval/distill-student-vs-teacher-mcnemar.json
 ```
 
+The held-out paired evaluation was directionally positive but inconclusive. The
+student won 59.10% and the source 57.80%, a +1.30-point paired difference
+(`p=0.247`, exact two-sided McNemar). The first-seat difference was +0.40 points
+(`p=0.845`); the second-seat difference was +2.20 points (`p=0.166`). Thus the
+result is not a confirmed improvement, but neither seat regressed. Combined
+with the selected checkpoint's 54.00% H2H estimate, this warrants one final
+held-out direct H2H rather than starting Expert Iteration or discarding the
+branch immediately.
+
+The ordinary vectorized H2H path supplies full hidden state to a `full` actor.
+Use `--deployable` here so both policies instead use exact belief averaging.
+This path is serial; 1,000 games per seat gives 2,000 total games:
+
+```bash
+uv run scripts/eval_policy_h2h.py \
+  --experiment-a mcts-distill-full-full-d8-s64-soft-target-s42 --which-a best \
+  --experiment-b m-full-full-t3-screen-s42 --which-b best \
+  --games-per-seat 1000 --seed 67 --deployable \
+  --wandb --wandb-group mcts-distillation \
+  --wandb-run-name distill-student-vs-source-deployable-h2h-seed67
+```
+
+The direct deployable H2H also failed to confirm an improvement. The student
+won 50.60% over 2,000 games (95% Wilson interval 48.41%-52.79%; exact binomial
+`p=0.607`). It scored 58.30% when seated first and 42.90% when seated second;
+the source's corresponding rates were 57.10% and 41.70%. Thus the student's
+relative result was +1.20 points in both seat roles, consistent with the
++1.30-point paired advantage against `F`, but neither evaluation excludes a
+tie.
+
+Close the frozen-distillation feasibility branch here and do not start Expert
+Iteration. The most defensible interpretation is that soft-target distillation
+may have captured a roughly one-point gain, but the effect is too small to
+establish with the allocated evaluation budget and too weak to justify recursive
+search training. Keep both the original source and distilled checkpoint as
+members of the next checkpoint-population MARL opponent pool; do not promote the
+student to sole champion on these results.
+
 | ID | mode | teacher | search | Status | Raw win% vs F | Notes |
 | -- | ---- | ------- | ------ | ------ | ------------- | ----- |
 | EX-1 | frozen distill | full/full update-2800 best | d8 x s64 | invalid | 32.00% final; 57.80% source retained as best | unmasked student loss caused immediate collapse |
 | EX-1b | frozen distill | full/full update-2800 best | d8 x s64 | inconclusive | 56.00%; source 57.00% | mask fixed; 55.50% H2H; labels still almost hard |
-| EX-1c | frozen distill | full/full update-2800 best | d8 x s64 | planned | | raw `T=1` visit targets; original action schedule |
-| EX-2 | gated iterate | best EX-1c | d8 x s64 | blocked on EX-1c | | policy + outcome value training |
+| EX-1c | frozen distill canary | full/full update-2800 best | d8 x s64 | stable, inconclusive | 56.20%; source 57.00% | raw `T=1` visit targets; 51.50% H2H; target entropy 0.2206 |
+| EX-1d | frozen distill full gate | full/full update-2800 best | d8 x s64 | completed; small gain unconfirmed | 59.10%; source 57.80% | paired delta +1.30 points, p=0.247; H2H 50.60%, p=0.607 |
+| EX-2 | gated iterate | best EX-1d | d8 x s64 | stopped | | feasibility gate did not establish a teacher improvement |
 
 
 ---
