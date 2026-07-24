@@ -411,6 +411,7 @@ def train(
             f"updates={ppo_update_count}, episodes={total_episodes}"
         )
     target_timesteps = global_step + total_timesteps
+    episodes_at_last_update = total_episodes
     episode_lengths: list[int] = [0 for _ in range(num_envs)]
     length_window = deque(maxlen=metric_window)
 
@@ -643,9 +644,15 @@ def train(
                 observations = next_observations
 
                 if buffer.steps_collected >= rollout_steps and len(buffer) >= batch_size * 2:
+                    rollout_samples = len(buffer)
+                    rollout_episodes = total_episodes - episodes_at_last_update
+                    minibatches_planned = train_epochs * (
+                        (rollout_samples + batch_size - 1) // batch_size
+                    )
                     played_action_log: Dict[str, Any] = {
                         "train/rollout_steps_collected": float(buffer.steps_collected),
-                        "train/rollout_samples_collected": float(len(buffer)),
+                        "train/rollout_samples_collected": float(rollout_samples),
+                        "train/rollout_episodes_completed": float(rollout_episodes),
                     }
                     if played_action_buffer:
                         played_actions = np.concatenate(played_action_buffer)
@@ -694,15 +701,28 @@ def train(
                         gae_lambda=gae_lambda,
                         max_grad_norm=max_grad_norm,
                         target_kl=target_kl,
+                        include_single_action_fraction=True,
                     )
                     buffer.clear()
+                    episodes_at_last_update = total_episodes
                     policy_agent.model.eval()
                     if critic_model is not None:
                         critic_model.eval()
                     ppo_update_count += 1
 
+                    decision_sample_fraction = 1.0 - metrics["single_action_fraction"]
+                    minibatches_processed = metrics["num_updates"]
                     wandb.log(
                         {
+                            "train/decision_sample_fraction": decision_sample_fraction,
+                            "train/decision_samples_collected": float(
+                                round(decision_sample_fraction * rollout_samples)
+                            ),
+                            "train/minibatches_planned": float(minibatches_planned),
+                            "train/minibatches_processed": minibatches_processed,
+                            "train/minibatch_completion_fraction": (
+                                minibatches_processed / minibatches_planned
+                            ),
                             "train/policy_loss": metrics["policy_loss"],
                             "train/value_loss": metrics["value_loss"],
                             "train/return_mean": metrics["return_mean"],
