@@ -2,6 +2,7 @@
 
 from .binding import NativeGame, NativePlayerState, find_cppanatron_library
 from .features import full_native_features, native_board_tensor, native_numeric_features
+from .puffer_env import SingleAgentCppanatronPufferEnv
 
 __all__ = [
     "NativeGame",
@@ -10,4 +11,5 @@ __all__ = [
     "full_native_features",
     "native_board_tensor",
     "native_numeric_features",
+    "SingleAgentCppanatronPufferEnv",
 ]
