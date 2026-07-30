@@ -258,6 +258,7 @@ class SingleAgentCppanatronPufferEnv(PufferEnv):
                 self.map_type,
                 seed=game_seed,
                 map_seed=map_seed,
+                number_placement="random",
                 discard_limit=self.discard_limit,
                 vps_to_win=self.vps_to_win,
             )

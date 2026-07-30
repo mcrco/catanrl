@@ -9,6 +9,7 @@ from typing import Literal
 import numpy as np
 
 MapType = Literal["BASE", "MINI", "TOURNAMENT"]
+NumberPlacement = Literal["official_spiral", "random"]
 
 
 class _PlayerState(ctypes.Structure):
@@ -161,6 +162,17 @@ def _load_library(path: Path | None = None) -> ctypes.CDLL:
         ctypes.c_int32,
     ]
     library.cppanatron_game_create_seeded.restype = handle
+    library.cppanatron_game_create_seeded_with_number_placement.argtypes = [
+        ctypes.c_int32,
+        ctypes.c_int32,
+        ctypes.c_uint64,
+        ctypes.c_uint64,
+        ctypes.c_int32,
+        ctypes.c_int32,
+        ctypes.c_int32,
+        ctypes.c_int32,
+    ]
+    library.cppanatron_game_create_seeded_with_number_placement.restype = handle
     library.cppanatron_game_destroy.argtypes = [handle]
     library.cppanatron_game_reset.argtypes = [handle, ctypes.c_uint64]
     library.cppanatron_game_reset_seeded.argtypes = [
@@ -245,6 +257,7 @@ class NativeGame:
     """Owned Python handle for one cppanatron game."""
 
     _MAP_TYPES = {"BASE": 0, "MINI": 1, "TOURNAMENT": 2}
+    _NUMBER_PLACEMENTS = {"official_spiral": 0, "random": 1}
 
     def __init__(
         self,
@@ -252,6 +265,7 @@ class NativeGame:
         map_type: MapType = "BASE",
         seed: int = 0,
         map_seed: int | None = None,
+        number_placement: NumberPlacement = "random",
         discard_limit: int = 7,
         friendly_robber: bool = False,
         vps_to_win: int = 10,
@@ -262,25 +276,24 @@ class NativeGame:
             native_map_type = self._MAP_TYPES[map_type]
         except KeyError as exc:
             raise ValueError(f"Unknown map type: {map_type}") from exc
-        if map_seed is None:
-            self._handle = self._library.cppanatron_game_create(
+        try:
+            native_number_placement = self._NUMBER_PLACEMENTS[number_placement]
+        except KeyError as exc:
+            raise ValueError(
+                f"Unknown number placement: {number_placement}"
+            ) from exc
+        self._handle = (
+            self._library.cppanatron_game_create_seeded_with_number_placement(
                 num_players,
                 native_map_type,
+                seed if map_seed is None else map_seed,
                 seed,
                 discard_limit,
                 int(friendly_robber),
                 vps_to_win,
+                native_number_placement,
             )
-        else:
-            self._handle = self._library.cppanatron_game_create_seeded(
-                num_players,
-                native_map_type,
-                map_seed,
-                seed,
-                discard_limit,
-                int(friendly_robber),
-                vps_to_win,
-            )
+        )
         if not self._handle:
             self._raise_last_error()
         self.num_players = int(self._library.cppanatron_game_num_players(self._handle))
