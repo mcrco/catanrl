@@ -2,3 +2,7 @@
 	path = catanatron
 	url = https://github.com/mcrco/catanatron
 	branch = master
+[submodule "cppanatron"]
+	path = cppanatron
+	url = https://github.com/mcrco/cppanatron
+	branch = main
