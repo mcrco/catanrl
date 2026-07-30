@@ -11,6 +11,7 @@ from catanatron.models.enums import (
 )
 from catanatron.models.map import build_map
 from catanatron.models.player import Color, RandomPlayer
+from catanatron.players.value import ValueFunctionPlayer, base_fn
 
 from catanrl.envs.cppanatron import (
     NativeGame,
@@ -166,6 +167,50 @@ def test_replayed_python_and_native_transitions_match():
                 atol=1e-7,
                 err_msg=f"feature mismatch before replay step {step}",
             )
+            for index, color in enumerate(colors):
+                assert native_game.value_score(index) == pytest.approx(
+                    base_fn()(python_game, color),
+                    rel=1e-14,
+                    abs=1e-6,
+                )
+            stochastic_types = {
+                ActionType.ROLL,
+                ActionType.BUY_DEVELOPMENT_CARD,
+                ActionType.MOVE_ROBBER,
+            }
+            if not any(
+                action.action_type in stochastic_types
+                for action in python_game.playable_actions
+            ):
+                python_expert = ValueFunctionPlayer(python_game.state.current_color())
+                expert_action = python_expert.decide(
+                    python_game, python_game.playable_actions
+                )
+                python_expert_index = to_action_space(
+                    expert_action,
+                    2,
+                    "TOURNAMENT",
+                    tuple(python_game.state.colors),
+                )
+                native_expert_index = native_game.value_action()
+                if native_expert_index != python_expert_index:
+                    native_expert_action = from_action_space(
+                        native_expert_index,
+                        python_game.state.current_color(),
+                        2,
+                        "TOURNAMENT",
+                        tuple(python_game.state.colors),
+                        python_game.playable_actions,
+                    )
+                    python_candidate = python_game.copy()
+                    python_candidate.execute(expert_action)
+                    native_candidate = python_game.copy()
+                    native_candidate.execute(native_expert_action)
+                    assert base_fn()(native_candidate, native_expert_action.color) == pytest.approx(
+                        base_fn()(python_candidate, expert_action.color),
+                        rel=1e-14,
+                        abs=1e-6,
+                    )
 
             if python_game.winning_color() is not None or python_game.state.num_turns >= 1_000:
                 break
