@@ -92,6 +92,42 @@ def test_native_puffer_reset_and_steps_preserve_contract():
         env.close()
 
 
+def test_native_puffer_completes_and_autoresets_episode():
+    env = SingleAgentCppanatronPufferEnv(
+        config={
+            "map_type": "MINI",
+            "vps_to_win": 3,
+            "discard_limit": 7,
+            "opponent_configs": ["F"],
+            "reward_function": "shaped",
+            "expert_config": "F",
+            "nn_seat": "first",
+        }
+    )
+    try:
+        _, infos = env.reset(seed=123)
+
+        for _ in range(2_000):
+            action = int(infos[0]["expert_action"])
+            _, _, terminals, truncations, infos = env.step(
+                np.asarray([action], dtype=np.int32)
+            )
+            if terminals[0] or truncations[0]:
+                break
+        else:
+            pytest.fail("native expert episode did not finish")
+
+        assert bool(terminals[0])
+        assert not bool(truncations[0])
+        assert "final_info" in infos[0]
+        assert "nn_won" in infos[0]["final_info"]
+        assert int(infos[0]["expert_action"]) in infos[0]["valid_actions"]
+        assert env.game is not None
+        assert env.game.current_player == env.controlled_player
+    finally:
+        env.close()
+
+
 def test_native_puffer_reset_is_seed_reproducible():
     env = _make_env()
     try:
