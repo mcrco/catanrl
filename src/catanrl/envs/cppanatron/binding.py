@@ -151,8 +151,23 @@ def _load_library(path: Path | None = None) -> ctypes.CDLL:
         ctypes.c_int32,
     ]
     library.cppanatron_game_create.restype = handle
+    library.cppanatron_game_create_seeded.argtypes = [
+        ctypes.c_int32,
+        ctypes.c_int32,
+        ctypes.c_uint64,
+        ctypes.c_uint64,
+        ctypes.c_int32,
+        ctypes.c_int32,
+        ctypes.c_int32,
+    ]
+    library.cppanatron_game_create_seeded.restype = handle
     library.cppanatron_game_destroy.argtypes = [handle]
     library.cppanatron_game_reset.argtypes = [handle, ctypes.c_uint64]
+    library.cppanatron_game_reset_seeded.argtypes = [
+        handle,
+        ctypes.c_uint64,
+        ctypes.c_uint64,
+    ]
     library.cppanatron_game_action_space_size.argtypes = [handle]
     library.cppanatron_game_action_space_size.restype = ctypes.c_int32
     library.cppanatron_game_valid_action_mask.argtypes = [
@@ -236,6 +251,7 @@ class NativeGame:
         num_players: int = 2,
         map_type: MapType = "BASE",
         seed: int = 0,
+        map_seed: int | None = None,
         discard_limit: int = 7,
         friendly_robber: bool = False,
         vps_to_win: int = 10,
@@ -246,14 +262,25 @@ class NativeGame:
             native_map_type = self._MAP_TYPES[map_type]
         except KeyError as exc:
             raise ValueError(f"Unknown map type: {map_type}") from exc
-        self._handle = self._library.cppanatron_game_create(
-            num_players,
-            native_map_type,
-            seed,
-            discard_limit,
-            int(friendly_robber),
-            vps_to_win,
-        )
+        if map_seed is None:
+            self._handle = self._library.cppanatron_game_create(
+                num_players,
+                native_map_type,
+                seed,
+                discard_limit,
+                int(friendly_robber),
+                vps_to_win,
+            )
+        else:
+            self._handle = self._library.cppanatron_game_create_seeded(
+                num_players,
+                native_map_type,
+                map_seed,
+                seed,
+                discard_limit,
+                int(friendly_robber),
+                vps_to_win,
+            )
         if not self._handle:
             self._raise_last_error()
         self.num_players = int(self._library.cppanatron_game_num_players(self._handle))
@@ -320,8 +347,17 @@ class NativeGame:
         )
         return tuple(int(value) for value in values)  # type: ignore[return-value]
 
-    def reset(self, seed: int) -> None:
-        self._check(self._library.cppanatron_game_reset(self._handle, seed))
+    def reset(self, seed: int, *, map_seed: int | None = None) -> None:
+        if map_seed is None:
+            self._check(self._library.cppanatron_game_reset(self._handle, seed))
+        else:
+            self._check(
+                self._library.cppanatron_game_reset_seeded(
+                    self._handle,
+                    map_seed,
+                    seed,
+                )
+            )
 
     def valid_action_mask(self) -> np.ndarray:
         mask = np.zeros(self.action_space_size, dtype=np.uint8)
