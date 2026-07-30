@@ -10,6 +10,7 @@ from catanatron.models.coordinate_system import Direction
 from catanatron.models.enums import (
     DEVELOPMENT_CARDS,
     RESOURCES,
+    SETTLEMENT,
     ActionRecord,
     ActionType,
 )
@@ -317,6 +318,47 @@ def test_replayed_python_and_native_transitions_match(map_type, num_players):
                 assert _native_player_tuple(native_game, index) == _python_player_tuple(
                     python_game, color
                 )
+            python_winner = python_game.winning_color()
+            assert native_game.winner == (
+                None if python_winner is None else colors.index(python_winner)
+            )
+            assert native_game.resource_bank == tuple(
+                python_game.state.resource_freqdeck
+            )
+            assert native_game.development_cards_remaining == len(
+                python_game.state.development_listdeck
+            )
+            flags = native_game.flags
+            assert flags[:6] == (
+                python_game.state.is_initial_build_phase,
+                python_game.state.is_discarding,
+                python_game.state.current_prompt.name == "MOVE_ROBBER",
+                python_game.state.is_road_building,
+                python_game.state.current_player_index,
+                python_game.state.current_turn_index,
+            )
+            assert flags[6] == sum(
+                record.action.action_type == ActionType.END_TURN
+                for record in python_game.state.action_records
+            )
+            python_buildings = {
+                (
+                    node,
+                    colors.index(color),
+                    0 if building == SETTLEMENT else 1,
+                )
+                for node, (color, building) in python_game.state.board.buildings.items()
+            }
+            assert set(native_game.buildings()) == python_buildings
+            python_roads = {
+                (
+                    min(edge),
+                    max(edge),
+                    colors.index(color),
+                )
+                for edge, color in python_game.state.board.roads.items()
+            }
+            assert set(native_game.roads()) == python_roads
             np.testing.assert_allclose(
                 full_native_features(native_game, map_type, base_player=0),
                 full_game_to_features(
