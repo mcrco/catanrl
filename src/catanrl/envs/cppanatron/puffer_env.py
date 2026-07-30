@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
+import pufferlib.vector as puffer_vector
 from gymnasium import spaces
 from pufferlib.emulation import (
     emulate,
@@ -321,3 +322,57 @@ class SingleAgentCppanatronPufferEnv(PufferEnv):
         if self.game is not None:
             self.game.close()
             self.game = None
+
+
+def _make_cppanatron_puffer_env(
+    reward_function: str,
+    map_type: MapType,
+    opponent_configs: List[str],
+    nn_seat: str = "random",
+    vps_to_win: int = 15,
+    discard_limit: int = 9,
+    expert_config: str | None = None,
+    actor_observation_level: ActorObservationLevel = "private",
+) -> Callable[..., SingleAgentCppanatronPufferEnv]:
+    def _config() -> Dict[str, Any]:
+        return {
+            "map_type": map_type,
+            "vps_to_win": vps_to_win,
+            "discard_limit": discard_limit,
+            "opponent_configs": opponent_configs,
+            "reward_function": reward_function,
+            "expert_config": expert_config,
+            "actor_observation_level": actor_observation_level,
+            "nn_seat": nn_seat,
+        }
+
+    return lambda **kwargs: SingleAgentCppanatronPufferEnv(
+        config=_config(), **kwargs
+    )
+
+
+def make_cppanatron_vectorized_envs(
+    reward_function: str,
+    map_type: MapType,
+    opponent_configs: List[str],
+    num_envs: int,
+    nn_seat: str = "random",
+    vps_to_win: int = 15,
+    discard_limit: int = 9,
+    expert_config: str | None = None,
+    actor_observation_level: ActorObservationLevel = "private",
+):
+    return puffer_vector.make(
+        _make_cppanatron_puffer_env(
+            reward_function,
+            map_type,
+            opponent_configs,
+            nn_seat,
+            vps_to_win,
+            discard_limit,
+            expert_config,
+            actor_observation_level,
+        ),
+        num_envs=num_envs,
+        backend=puffer_vector.Multiprocessing,
+    )
