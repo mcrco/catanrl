@@ -1,7 +1,7 @@
 [submodule "catanatron"]
 	path = catanatron
 	url = https://github.com/mcrco/catanatron
-	branch = master
+	branch = main
 [submodule "cppanatron"]
 	path = cppanatron
 	url = https://github.com/mcrco/cppanatron
