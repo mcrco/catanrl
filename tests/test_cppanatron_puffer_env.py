@@ -13,6 +13,7 @@ from catanrl.envs.cppanatron import (
     SingleAgentCppanatronPufferEnv,
     find_cppanatron_library,
     make_cppanatron_marl_vectorized_envs,
+    make_cppanatron_native_marl_vectorized_envs,
     make_cppanatron_vectorized_envs,
 )
 from catanrl.envs.cppanatron.puffer_env import _native_production_sum
@@ -311,5 +312,9 @@ def test_native_marl_vectorized_factory_decodes_batch():
 def test_marl_backend_factory_selection():
     assert _resolve_marl_env_factory("python") is make_marl_vectorized_envs
     assert _resolve_marl_env_factory("cppanatron") is make_cppanatron_marl_vectorized_envs
+    assert (
+        _resolve_marl_env_factory("cppanatron-native")
+        is make_cppanatron_native_marl_vectorized_envs
+    )
     with pytest.raises(ValueError, match="Unknown MARL environment backend"):
         _resolve_marl_env_factory("other")  # type: ignore[arg-type]
