@@ -23,6 +23,7 @@ import wandb
 from catanrl.algorithms.common import PolicyAgent, mask_action_logits
 from catanrl.models.backbone_builder import build_backbone_config
 from ...envs import decode_puffer_batch, extract_expert_actions_from_infos
+from ...envs.cppanatron.puffer_env import make_cppanatron_vectorized_envs
 from ...envs.puffer.single_agent_env import compute_single_agent_dims, make_puffer_vectorized_envs
 from ...eval.dagger_eval import (
     FrozenImitationEvalSet,
@@ -49,6 +50,16 @@ from ...features.catanatron_utils import (
 from ...utils.catanatron_action_space import get_action_array, get_action_space_size
 from ...utils.seeding import derive_seed
 from .dataset import AggregatedDataset, EvictionStrategy
+
+DAggerEnvBackend = Literal["python", "cppanatron"]
+
+
+def _resolve_env_factory(env_backend: DAggerEnvBackend) -> Callable[..., Any]:
+    if env_backend == "python":
+        return make_puffer_vectorized_envs
+    if env_backend == "cppanatron":
+        return make_cppanatron_vectorized_envs
+    raise ValueError(f"Unknown DAgger environment backend: {env_backend!r}")
 
 
 def _predict_critic_values(
@@ -580,6 +591,7 @@ def train(
     seed: int = 42,
     num_envs: int = 4,
     reward_function: Literal["shaped", "win"] = "shaped",
+    env_backend: DAggerEnvBackend = "python",
     max_grad_norm: float = 1.0,
     resume_state: Optional[Dict[str, Any]] = None,
     training_state_path: Optional[str] = None,
@@ -633,6 +645,7 @@ def train(
         seed: Random seed
         num_envs: Number of parallel environments
         reward_function: Reward function type ("shaped" or "win")
+        env_backend: Game engine used for collection ("python" or "cppanatron")
         max_grad_norm: Maximum gradient norm for clipping
 
     Returns:
@@ -660,6 +673,7 @@ def train(
         raise ValueError("eval_every_iterations must be >= 1")
     if save_every_updates < 1:
         raise ValueError("save_every_updates must be >= 1")
+    env_factory = _resolve_env_factory(env_backend)
 
     update_every_iterations = 1
     if save_every_updates % update_every_iterations != 0:
@@ -750,6 +764,7 @@ def train(
             f"policy_fusion={xdim_policy_fusion_hidden_dim}, critic_fusion={xdim_critic_fusion_hidden_dim}"
         )
     print(f"Parallel environments: {num_envs}")
+    print(f"Environment backend: {env_backend}")
     print(f"Steps per iteration: {steps_per_iteration}")
     print(f"Eval cadence: every {eval_every_iterations} iteration(s)")
     print(f"Save cadence: every {save_every_updates} iteration(s)")
@@ -863,7 +878,7 @@ def train(
 
     # Create vectorized environments with expert player embedded
     # Each env will compute expert actions and include them in info dict
-    envs = make_puffer_vectorized_envs(
+    envs = env_factory(
         reward_function=reward_function,
         map_type=map_type,
         opponent_configs=list(opponent_configs),
