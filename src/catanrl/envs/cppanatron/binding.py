@@ -27,6 +27,38 @@ class _PlayerState(ctypes.Structure):
         ("development_cards", ctypes.c_int32 * 5),
         ("played_development_cards", ctypes.c_int32 * 5),
         ("development_card_owned_at_start", ctypes.c_int32 * 4),
+        ("turns_since_last_knight", ctypes.c_int32),
+        ("turns_since_last_development_card_bought", ctypes.c_int32),
+    ]
+
+
+class _Building(ctypes.Structure):
+    _fields_ = [
+        ("node", ctypes.c_int32),
+        ("color", ctypes.c_int32),
+        ("building", ctypes.c_int32),
+    ]
+
+
+class _Road(ctypes.Structure):
+    _fields_ = [
+        ("a", ctypes.c_int32),
+        ("b", ctypes.c_int32),
+        ("color", ctypes.c_int32),
+    ]
+
+
+class _Tile(ctypes.Structure):
+    _fields_ = [
+        ("x", ctypes.c_int32),
+        ("y", ctypes.c_int32),
+        ("z", ctypes.c_int32),
+        ("id", ctypes.c_int32),
+        ("kind", ctypes.c_int32),
+        ("resource", ctypes.c_int32),
+        ("number", ctypes.c_int32),
+        ("port_direction", ctypes.c_int32),
+        ("nodes", ctypes.c_int32 * 6),
     ]
 
 
@@ -46,6 +78,8 @@ class NativePlayerState:
     development_cards: tuple[int, ...]
     played_development_cards: tuple[int, ...]
     development_card_owned_at_start: tuple[bool, ...]
+    turns_since_last_knight: int
+    turns_since_last_development_card_bought: int
 
     @classmethod
     def from_c(cls, state: _PlayerState) -> NativePlayerState:
@@ -69,6 +103,10 @@ class NativePlayerState:
             ),
             development_card_owned_at_start=tuple(
                 bool(value) for value in state.development_card_owned_at_start
+            ),
+            turns_since_last_knight=int(state.turns_since_last_knight),
+            turns_since_last_development_card_bought=int(
+                state.turns_since_last_development_card_bought
             ),
         )
 
@@ -141,11 +179,43 @@ def _load_library(path: Path | None = None) -> ctypes.CDLL:
     library.cppanatron_game_num_turns.restype = ctypes.c_int32
     library.cppanatron_game_winner.argtypes = [handle]
     library.cppanatron_game_winner.restype = ctypes.c_int32
+    library.cppanatron_game_development_cards_remaining.argtypes = [handle]
+    library.cppanatron_game_development_cards_remaining.restype = ctypes.c_int32
+    library.cppanatron_game_resource_bank.argtypes = [
+        handle,
+        ctypes.POINTER(ctypes.c_int32),
+    ]
+    library.cppanatron_game_flags.argtypes = [
+        handle,
+        ctypes.POINTER(ctypes.c_int32),
+    ]
+    library.cppanatron_game_robber_coordinate.argtypes = [
+        handle,
+        ctypes.POINTER(ctypes.c_int32),
+    ]
     library.cppanatron_game_player_state.argtypes = [
         handle,
         ctypes.c_int32,
         ctypes.POINTER(_PlayerState),
     ]
+    library.cppanatron_game_buildings.argtypes = [
+        handle,
+        ctypes.POINTER(_Building),
+        ctypes.c_size_t,
+    ]
+    library.cppanatron_game_buildings.restype = ctypes.c_int32
+    library.cppanatron_game_roads.argtypes = [
+        handle,
+        ctypes.POINTER(_Road),
+        ctypes.c_size_t,
+    ]
+    library.cppanatron_game_roads.restype = ctypes.c_int32
+    library.cppanatron_game_tiles.argtypes = [
+        handle,
+        ctypes.POINTER(_Tile),
+        ctypes.c_size_t,
+    ]
+    library.cppanatron_game_tiles.restype = ctypes.c_int32
     return library
 
 
@@ -209,6 +279,40 @@ class NativeGame:
         value = int(self._library.cppanatron_game_winner(self._handle))
         return None if value == -1 else value
 
+    @property
+    def development_cards_remaining(self) -> int:
+        return int(
+            self._library.cppanatron_game_development_cards_remaining(self._handle)
+        )
+
+    @property
+    def resource_bank(self) -> tuple[int, ...]:
+        values = (ctypes.c_int32 * 5)()
+        self._check(self._library.cppanatron_game_resource_bank(self._handle, values))
+        return tuple(int(value) for value in values)
+
+    @property
+    def flags(self) -> tuple[bool, bool, bool, bool, int, int, int]:
+        values = (ctypes.c_int32 * 7)()
+        self._check(self._library.cppanatron_game_flags(self._handle, values))
+        return (
+            bool(values[0]),
+            bool(values[1]),
+            bool(values[2]),
+            bool(values[3]),
+            int(values[4]),
+            int(values[5]),
+            int(values[6]),
+        )
+
+    @property
+    def robber_coordinate(self) -> tuple[int, int, int]:
+        values = (ctypes.c_int32 * 3)()
+        self._check(
+            self._library.cppanatron_game_robber_coordinate(self._handle, values)
+        )
+        return tuple(int(value) for value in values)  # type: ignore[return-value]
+
     def reset(self, seed: int) -> None:
         self._check(self._library.cppanatron_game_reset(self._handle, seed))
 
@@ -254,6 +358,55 @@ class NativeGame:
             )
         )
         return NativePlayerState.from_c(state)
+
+    def buildings(self) -> tuple[tuple[int, int, int], ...]:
+        count = int(self._library.cppanatron_game_buildings(self._handle, None, 0))
+        if count < 0:
+            self._raise_last_error()
+        values = (_Building * count)()
+        result = int(
+            self._library.cppanatron_game_buildings(self._handle, values, count)
+        )
+        if result < 0:
+            self._raise_last_error()
+        return tuple((int(v.node), int(v.color), int(v.building)) for v in values)
+
+    def roads(self) -> tuple[tuple[int, int, int], ...]:
+        count = int(self._library.cppanatron_game_roads(self._handle, None, 0))
+        if count < 0:
+            self._raise_last_error()
+        values = (_Road * count)()
+        result = int(self._library.cppanatron_game_roads(self._handle, values, count))
+        if result < 0:
+            self._raise_last_error()
+        return tuple((int(v.a), int(v.b), int(v.color)) for v in values)
+
+    def tiles(
+        self,
+    ) -> tuple[
+        tuple[int, int, int, int, int, int, int, int, tuple[int, ...]], ...
+    ]:
+        count = int(self._library.cppanatron_game_tiles(self._handle, None, 0))
+        if count < 0:
+            self._raise_last_error()
+        values = (_Tile * count)()
+        result = int(self._library.cppanatron_game_tiles(self._handle, values, count))
+        if result < 0:
+            self._raise_last_error()
+        return tuple(
+            (
+                int(v.x),
+                int(v.y),
+                int(v.z),
+                int(v.id),
+                int(v.kind),
+                int(v.resource),
+                int(v.number),
+                int(v.port_direction),
+                tuple(int(node) for node in v.nodes),
+            )
+            for v in values
+        )
 
     def close(self) -> None:
         if getattr(self, "_handle", None):
