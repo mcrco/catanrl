@@ -69,6 +69,35 @@ def test_native_binding_reports_invalid_actions():
             game.step(game.action_space_size - 1)
 
 
+def test_native_binding_supports_independent_map_and_game_seeds():
+    with (
+        NativeGame(
+            num_players=2,
+            map_type="BASE",
+            seed=11,
+            map_seed=101,
+        ) as first,
+        NativeGame(
+            num_players=2,
+            map_type="BASE",
+            seed=22,
+            map_seed=101,
+        ) as same_map,
+        NativeGame(
+            num_players=2,
+            map_type="BASE",
+            seed=11,
+            map_seed=202,
+        ) as other_map,
+    ):
+        assert first.tiles() == same_map.tiles()
+        assert first.tiles() != other_map.tiles()
+
+        original_tiles = first.tiles()
+        first.reset(seed=33, map_seed=101)
+        assert first.tiles() == original_tiles
+
+
 @pytest.mark.parametrize("map_type", ["MINI", "BASE"])
 @pytest.mark.parametrize("seed", [0, 1, 42])
 def test_native_random_maps_match_python_template_contract(map_type, seed):
