@@ -139,6 +139,7 @@ class SingleAgentCppanatronPufferEnv(PufferEnv):
         self._rng = np.random.default_rng()
         self.game: NativeGame | None = None
         self.controlled_player = 0
+        self._opponent_configs_by_player: list[str | None] = []
         self.initialized = False
         self._episode_done = True
         self._prev_vps = 0
@@ -159,14 +160,16 @@ class SingleAgentCppanatronPufferEnv(PufferEnv):
 
     def _opponent_action(self, player: int) -> int:
         assert self.game is not None
-        config_index = player if player < self.controlled_player else player - 1
-        config = self.opponent_configs[config_index].split(":", 1)[0].upper()
+        configured_opponent = self._opponent_configs_by_player[player]
+        if configured_opponent is None:
+            raise RuntimeError("Requested an opponent action for the controlled player")
+        config = configured_opponent.split(":", 1)[0].upper()
         if config in {"F", "VALUE", "VALUEFUNCTION"}:
             return self.game.value_action()
         if config in {"R", "RANDOM"}:
             valid = np.flatnonzero(self.game.valid_action_mask())
             return int(self._rng.choice(valid))
-        raise ValueError(f"Unsupported native opponent: {self.opponent_configs[config_index]}")
+        raise ValueError(f"Unsupported native opponent: {configured_opponent}")
 
     def _advance_until_controlled_decision(self) -> None:
         assert self.game is not None
@@ -238,6 +241,15 @@ class SingleAgentCppanatronPufferEnv(PufferEnv):
             self.controlled_player = int(self._rng.integers(self.num_players))
         else:
             raise ValueError(f"Unknown nn_seat: {self.nn_seat}")
+
+        opponent_configs = list(self.opponent_configs)
+        if self.nn_seat == "random":
+            self._rng.shuffle(opponent_configs)
+        config_iterator = iter(opponent_configs)
+        self._opponent_configs_by_player = [
+            None if player == self.controlled_player else next(config_iterator)
+            for player in range(self.num_players)
+        ]
 
         map_seed, game_seed = derive_map_and_game_seeds(episode_seed)
         if self.game is None:
