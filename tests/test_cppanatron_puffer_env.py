@@ -5,13 +5,24 @@ import pytest
 from pufferlib.emulation import nativize
 
 from catanrl.algorithms.imitation_learning.dagger import _resolve_env_factory
+from catanrl.algorithms.ppo.marl_ppo_central_critic import (
+    _resolve_marl_env_factory,
+)
 from catanrl.envs.cppanatron import (
+    ParallelCppanatronPufferEnv,
     SingleAgentCppanatronPufferEnv,
     find_cppanatron_library,
+    make_cppanatron_marl_vectorized_envs,
     make_cppanatron_vectorized_envs,
 )
 from catanrl.envs.cppanatron.puffer_env import _native_production_sum
-from catanrl.envs.puffer.common import compute_single_agent_dims
+from catanrl.envs.puffer.common import (
+    compute_multiagent_input_dim,
+    compute_single_agent_dims,
+)
+from catanrl.envs.puffer.multi_agent_env import (
+    make_vectorized_envs as make_marl_vectorized_envs,
+)
 from catanrl.envs.puffer.rollout_utils import decode_puffer_batch
 from catanrl.envs.puffer.single_agent_env import make_puffer_vectorized_envs
 from catanrl.features.catanatron_utils import get_actor_indices_from_full
@@ -110,9 +121,7 @@ def test_native_puffer_completes_and_autoresets_episode():
 
         for _ in range(2_000):
             action = int(infos[0]["expert_action"])
-            _, _, terminals, truncations, infos = env.step(
-                np.asarray([action], dtype=np.int32)
-            )
+            _, _, terminals, truncations, infos = env.step(np.asarray([action], dtype=np.int32))
             if terminals[0] or truncations[0]:
                 break
         else:
@@ -226,8 +235,81 @@ def test_native_random_seating_preserves_mixed_opponent_identities():
             env.reset(seed=seed)
             assignments = env._opponent_configs_by_player
             assert assignments[env.controlled_player] is None
-            assert sorted(
-                config for config in assignments if config is not None
-            ) == ["F", "RANDOM"]
+            assert sorted(config for config in assignments if config is not None) == ["F", "RANDOM"]
     finally:
         env.close()
+
+
+def test_native_marl_reset_exposes_one_active_player_mask():
+    env = ParallelCppanatronPufferEnv(
+        config={
+            "num_players": 2,
+            "map_type": "MINI",
+            "vps_to_win": 6,
+            "discard_limit": 7,
+            "shared_critic": True,
+            "reward_function": "shaped",
+            "actor_observation_level": "public",
+        }
+    )
+    try:
+        observations, infos = env.reset(seed=17)
+        assert observations.shape[0] == 2
+        assert len(infos) == 2
+        assert env.game is not None
+        for player, info in enumerate(infos):
+            valid_actions = np.asarray(info["valid_actions"])
+            if player == env.game.current_player:
+                assert len(valid_actions) > 1
+            else:
+                assert valid_actions.tolist() == [env.end_turn_idx]
+            assert info["critic_observation"].shape == (env.critic_vector_dim,)
+    finally:
+        env.close()
+
+
+def test_native_marl_vectorized_factory_decodes_batch():
+    envs = make_cppanatron_marl_vectorized_envs(
+        num_players=2,
+        map_type="MINI",
+        vps_to_win=6,
+        discard_limit=7,
+        shared_critic=True,
+        reward_function="shaped",
+        num_envs=2,
+        actor_observation_level="public",
+    )
+    try:
+        observations, _ = envs.reset(seed=[101, 202])
+        driver = envs.driver_env
+        actor_dim, _, _ = compute_multiagent_input_dim(
+            2,
+            "MINI",
+            actor_observation_level="public",
+        )
+        critic_dim = compute_single_agent_dims(2, "MINI")["critic_dim"]
+        actor, critic, masks = decode_puffer_batch(
+            observations,
+            driver.env_single_observation_space,
+            driver.obs_dtype,
+            actor_dim=actor_dim,
+            critic_dim=critic_dim,
+            actor_indices=get_actor_indices_from_full(
+                2,
+                "MINI",
+                level="public",
+            ),
+        )
+        assert actor.shape == (4, actor_dim)
+        assert critic is not None
+        assert critic.shape == (4, critic_dim)
+        assert masks.shape == (4, driver.action_space_size)
+    finally:
+        envs.close()
+
+
+def test_marl_backend_factory_selection():
+    assert _resolve_marl_env_factory("python") is make_marl_vectorized_envs
+    assert _resolve_marl_env_factory("cppanatron") is make_cppanatron_marl_vectorized_envs
+    with pytest.raises(ValueError, match="Unknown MARL environment backend"):
+        _resolve_marl_env_factory("other")  # type: ignore[arg-type]

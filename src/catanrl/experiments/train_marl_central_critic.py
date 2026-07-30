@@ -149,6 +149,12 @@ def main():
     add_wandb_arguments(parser)
     add_reward_function_argument(parser)
     parser.add_argument("--num-envs", type=int, default=4)
+    parser.add_argument(
+        "--env-backend",
+        choices=["python", "cppanatron"],
+        default="python",
+        help="Game engine used for MARL collection.",
+    )
     parser.add_argument("--metric-window", type=int, default=DEFAULT_METRIC_WINDOW)
 
     args = parser.parse_args()
@@ -233,6 +239,7 @@ def main():
         "load_from_which": args.load_from_which,
         "reward_function": args.reward_function,
         "num_envs": args.num_envs,
+        "env_backend": args.env_backend,
         "metric_window": args.metric_window,
     }
     if args.wandb:
@@ -298,6 +305,7 @@ def main():
         save_every_updates=args.save_every_updates,
         target_kl=args.target_kl,
         num_envs=args.num_envs,
+        env_backend=args.env_backend,
         reward_function=args.reward_function,
         vps_to_win=arch.vps_to_win,
         discard_limit=arch.discard_limit,

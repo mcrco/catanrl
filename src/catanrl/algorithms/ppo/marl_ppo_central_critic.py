@@ -4,7 +4,7 @@ import os
 import random
 import sys
 from collections import deque
-from typing import Any, Dict, Literal, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Literal, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -14,6 +14,7 @@ from tqdm import tqdm
 import wandb
 
 from ...envs import compute_multiagent_input_dim, compute_single_agent_dims, decode_puffer_batch
+from ...envs.cppanatron import make_cppanatron_marl_vectorized_envs
 from ...envs.puffer.multi_agent_env import make_vectorized_envs as make_marl_vectorized_envs
 from ...eval.training_eval import (
     EvalBaseline,
@@ -43,6 +44,15 @@ from .buffers import CentralCriticExperienceBuffer
 from .ppo_update import run_ppo_update
 
 CriticWarmStartMode = Literal["full", "backbone", "none"]
+MarlEnvBackend = Literal["python", "cppanatron"]
+
+
+def _resolve_marl_env_factory(backend: MarlEnvBackend) -> Callable[..., Any]:
+    if backend == "python":
+        return make_marl_vectorized_envs
+    if backend == "cppanatron":
+        return make_cppanatron_marl_vectorized_envs
+    raise ValueError(f"Unknown MARL environment backend: {backend!r}")
 
 
 def save_best_checkpoint_pair(
@@ -135,6 +145,7 @@ def train(
     vps_to_win: int = 15,
     discard_limit: int = 9,
     metric_window: int = 200,
+    env_backend: MarlEnvBackend = "python",
     resume_state: Optional[Dict] = None,
     training_state_path: Optional[str] = None,
 ) -> Tuple[PolicyNetworkWrapper, ValueNetworkWrapper]:
@@ -332,7 +343,9 @@ def train(
         num_envs=num_envs * num_players,
     )
 
-    envs = make_marl_vectorized_envs(
+    env_factory = _resolve_marl_env_factory(env_backend)
+    print(f"Environment backend: {env_backend}")
+    envs = env_factory(
         num_players=num_players,
         map_type=map_type,
         vps_to_win=vps_to_win,
