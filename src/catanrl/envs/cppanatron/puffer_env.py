@@ -34,9 +34,13 @@ from .features import full_native_features
 TURNS_LIMIT = 1_000
 
 
-def _native_production_sum(game: NativeGame) -> float:
+def _native_production_sum(game: NativeGame, player: int) -> float:
     robber = game.robber_coordinate
-    buildings = {node: building for node, _color, building in game.buildings()}
+    buildings = {
+        node: building
+        for node, color, building in game.buildings()
+        if color == player
+    }
     probability = {
         number: (6 - abs(7 - number)) / 36.0 for number in range(2, 13)
     }
@@ -220,7 +224,7 @@ class SingleAgentCppanatronPufferEnv(PufferEnv):
         if self.reward_function != "shaped":
             raise ValueError(f"Unsupported native reward: {self.reward_function}")
         vps = self.game.player_state(self.controlled_player).actual_victory_points
-        production = _native_production_sum(self.game)
+        production = _native_production_sum(self.game, self.controlled_player)
         reward = 0.01 * ((vps - self._prev_vps) / self.vps_to_win)
         reward += 0.0025 * (production - self._prev_production)
         self._prev_vps = vps

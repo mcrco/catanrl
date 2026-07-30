@@ -10,6 +10,7 @@ from catanrl.envs.cppanatron import (
     find_cppanatron_library,
     make_cppanatron_vectorized_envs,
 )
+from catanrl.envs.cppanatron.puffer_env import _native_production_sum
 from catanrl.envs.puffer.common import compute_single_agent_dims
 from catanrl.envs.puffer.rollout_utils import decode_puffer_batch
 from catanrl.envs.puffer.single_agent_env import make_puffer_vectorized_envs
@@ -189,6 +190,23 @@ def test_native_puffer_rejects_unsupported_player_types():
                 "expert_config": "F",
             }
         )
+
+
+def test_native_production_sum_is_scoped_to_player():
+    class FakeGame:
+        robber_coordinate = (99, 99, 99)
+
+        @staticmethod
+        def buildings():
+            return [(0, 0, 0), (1, 1, 1)]
+
+        @staticmethod
+        def tiles():
+            return [(0, 0, 0, 0, 0, 0, 6, 0, (0, 1, 2, 3, 4, 5))]
+
+    probability_six = 5.0 / 36.0
+    assert _native_production_sum(FakeGame(), 0) == probability_six
+    assert _native_production_sum(FakeGame(), 1) == 2.0 * probability_six
 
 
 def test_native_random_seating_preserves_mixed_opponent_identities():
