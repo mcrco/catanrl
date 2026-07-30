@@ -149,6 +149,12 @@ def main():
         default=4,
         help="Number of parallel environments (default: 4)",
     )
+    parser.add_argument(
+        "--env-backend",
+        choices=["python", "cppanatron"],
+        default="python",
+        help="Game engine used for DAgger collection (default: python)",
+    )
     add_reward_function_argument(parser)
     parser.add_argument(
         "--fresh-eval-games-per-opponent",
@@ -273,6 +279,7 @@ def main():
         "expert": args.expert,
         "opponents": args.opponents,
         "num_envs": args.num_envs,
+        "env_backend": args.env_backend,
         "reward_function": args.reward_function,
         "beta_init": args.beta_init,
         "beta_decay": args.beta_decay,
@@ -351,6 +358,7 @@ def main():
         seed=args.seed,
         num_envs=args.num_envs,
         reward_function=args.reward_function,
+        env_backend=args.env_backend,
         max_grad_norm=args.max_grad_norm,
         resume_state=resume.state,
         training_state_path=training_state_path,
