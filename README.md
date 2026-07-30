@@ -14,7 +14,8 @@ Disclaimer: I initially implemented SL and the PPO variants by hand, but over ti
 
 The project is a `uv`-managed Python package (`catanrl`) that builds on a custom fork of a vendored
 [Catanatron](https://github.com/bcollazo/catanatron) fork (in `catanatron/`, tracked as a
-submodule) for the game engine and baseline opponents.
+submodule) for the reference game engine and baseline opponents. `cppanatron/`
+is a C++20 rewrite, also tracked as a submodule, with a native PufferLib backend.
 
 ```
 src/catanrl/
@@ -27,6 +28,7 @@ src/catanrl/
   experiment_store.py  # save/load self-describing experiments (see below)
   models/              # network components: backbones, heads, builders, wrappers
   envs/puffer/         # PufferLib env wrappers (single- and multi-agent), rewards, rollouts
+  envs/cppanatron/     # C ABI binding, feature adapter, and native PufferLib env
   features/            # turn Catanatron game states into model observations
   beliefs/             # opponent hidden-info modeling (dev-card belief, determinization)
   players/             # bots that plug into Catanatron (policy, value, MCTS, alpha-beta)
@@ -46,6 +48,34 @@ Training entrypoints are exposed as console scripts (see `pyproject.toml`):
 - `train-sarl-ppo` — single-agent PPO
 - `train-marl-cc` — multi-agent self-play PPO with a centralized critic
 - `train-alphazero` — AlphaZero-style training
+
+### cppanatron backend
+
+Initialize both engine submodules and build the native shared library:
+
+```bash
+git submodule update --init --recursive
+cmake -S cppanatron -B cppanatron/build -DCMAKE_BUILD_TYPE=Release
+cmake --build cppanatron/build --parallel
+ctest --test-dir cppanatron/build --output-on-failure
+```
+
+DAgger collection defaults to the Python engine. Select the C++ engine with
+`--env-backend cppanatron`:
+
+```bash
+uv run train-dagger \
+  --config configs/models/xdim-flat-2p-d-m.yaml \
+  --experiment-name dagger-cppanatron \
+  --expert F --opponents F \
+  --env-backend cppanatron
+```
+
+The native backend currently embeds the pinned `F`/`ValueFunctionPlayer`
+heuristic and random opponents. It uses the same flat actions, full feature
+layout, reward definitions, actor/critic slicing, and independent map/game seed
+scheme as the Python Puffer environment. Exact replay parity is tested for
+MINI, BASE, and TOURNAMENT with 2–4 players.
 
 ### Experiments
 
