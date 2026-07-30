@@ -6,14 +6,20 @@ from collections import Counter
 import numpy as np
 import pytest
 from catanatron.game import Game
+from catanatron.models.coordinate_system import Direction
 from catanatron.models.enums import (
     DEVELOPMENT_CARDS,
     RESOURCES,
     ActionRecord,
     ActionType,
 )
-from catanatron.models.map import build_map
-from catanatron.models.coordinate_system import Direction
+from catanatron.models.map import (
+    BASE_MAP_TEMPLATE,
+    MINI_MAP_TEMPLATE,
+    CatanMap,
+    build_map,
+    initialize_tiles,
+)
 from catanatron.models.player import Color, RandomPlayer
 from catanatron.models.tiles import LandTile, Port, Water
 from catanatron.players.value import ValueFunctionPlayer, base_fn
@@ -201,25 +207,61 @@ def _native_player_tuple(game: NativeGame, index: int):
     )
 
 
+def _python_map_matching_native(
+    native_game: NativeGame,
+    map_type: str,
+) -> CatanMap:
+    if map_type == "TOURNAMENT":
+        return build_map("TOURNAMENT")
+
+    template = MINI_MAP_TEMPLATE if map_type == "MINI" else BASE_MAP_TEMPLATE
+    native_tiles = {
+        (tile[0], tile[1], tile[2]): tile[3:] for tile in native_game.tiles()
+    }
+    placed_land_resources = []
+    placed_port_resources = []
+    for coordinate, tile_type in template.topology.items():
+        _id, kind, resource, _number, _direction, _nodes = native_tiles[coordinate]
+        if tile_type is LandTile:
+            assert kind == 0
+            placed_land_resources.append(
+                None if resource < 0 else RESOURCES[resource]
+            )
+        elif isinstance(tile_type, tuple):
+            assert kind == 2
+            placed_port_resources.append(
+                None if resource < 0 else RESOURCES[resource]
+            )
+
+    tiles = initialize_tiles(
+        template,
+        shuffled_port_resources_param=list(reversed(placed_port_resources)),
+        shuffled_tile_resources_param=list(reversed(placed_land_resources)),
+        number_placement="official_spiral",
+    )
+    return CatanMap.from_tiles(tiles)
+
+
+@pytest.mark.parametrize("map_type", ["MINI", "BASE", "TOURNAMENT"])
 @pytest.mark.parametrize("num_players", [2, 3, 4])
-def test_replayed_python_and_native_transitions_match(num_players):
+def test_replayed_python_and_native_transitions_match(map_type, num_players):
     colors = (Color.RED, Color.BLUE, Color.WHITE, Color.ORANGE)[:num_players]
     players = [RandomPlayer(color) for color in colors]
-    python_game = Game(
-        players,
-        seed=777,
-        catan_map=build_map("TOURNAMENT"),
-        vps_to_win=6,
-    )
-    force_player_order(python_game, players)
     rng = np.random.default_rng(991)
 
     with NativeGame(
         num_players=num_players,
-        map_type="TOURNAMENT",
+        map_type=map_type,
         seed=777,
         vps_to_win=6,
     ) as native_game:
+        python_game = Game(
+            players,
+            seed=777,
+            catan_map=_python_map_matching_native(native_game, map_type),
+            vps_to_win=6,
+        )
+        force_player_order(python_game, players)
         for step in range(2_000):
             python_mask = np.zeros(native_game.action_space_size, dtype=np.bool_)
             for action in python_game.playable_actions:
@@ -227,7 +269,7 @@ def test_replayed_python_and_native_transitions_match(num_players):
                     to_action_space(
                         action,
                         num_players,
-                        "TOURNAMENT",
+                        map_type,
                         tuple(python_game.state.colors),
                     )
                 ] = True
@@ -247,11 +289,11 @@ def test_replayed_python_and_native_transitions_match(num_players):
                     python_game, color
                 )
             np.testing.assert_allclose(
-                full_native_features(native_game, "TOURNAMENT", base_player=0),
+                full_native_features(native_game, map_type, base_player=0),
                 full_game_to_features(
                     python_game,
                     num_players,
-                    "TOURNAMENT",
+                    map_type,
                     base_color=Color.RED,
                 ),
                 rtol=0,
@@ -280,7 +322,7 @@ def test_replayed_python_and_native_transitions_match(num_players):
                 python_expert_index = to_action_space(
                     expert_action,
                     num_players,
-                    "TOURNAMENT",
+                    map_type,
                     tuple(python_game.state.colors),
                 )
                 native_expert_index = native_game.value_action()
@@ -289,7 +331,7 @@ def test_replayed_python_and_native_transitions_match(num_players):
                         native_expert_index,
                         python_game.state.current_color(),
                         num_players,
-                        "TOURNAMENT",
+                        map_type,
                         tuple(python_game.state.colors),
                         python_game.playable_actions,
                     )
@@ -312,7 +354,7 @@ def test_replayed_python_and_native_transitions_match(num_players):
                 action_index,
                 python_game.state.current_color(),
                 num_players,
-                "TOURNAMENT",
+                map_type,
                 tuple(python_game.state.colors),
                 python_game.playable_actions,
             )
