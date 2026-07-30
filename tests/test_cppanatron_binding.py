@@ -116,8 +116,9 @@ def _native_player_tuple(game: NativeGame, index: int):
     )
 
 
-def test_replayed_python_and_native_transitions_match():
-    colors = (Color.RED, Color.BLUE)
+@pytest.mark.parametrize("num_players", [2, 3, 4])
+def test_replayed_python_and_native_transitions_match(num_players):
+    colors = (Color.RED, Color.BLUE, Color.WHITE, Color.ORANGE)[:num_players]
     players = [RandomPlayer(color) for color in colors]
     python_game = Game(
         players,
@@ -129,7 +130,7 @@ def test_replayed_python_and_native_transitions_match():
     rng = np.random.default_rng(991)
 
     with NativeGame(
-        num_players=2,
+        num_players=num_players,
         map_type="TOURNAMENT",
         seed=777,
         vps_to_win=6,
@@ -138,7 +139,12 @@ def test_replayed_python_and_native_transitions_match():
             python_mask = np.zeros(native_game.action_space_size, dtype=np.bool_)
             for action in python_game.playable_actions:
                 python_mask[
-                    to_action_space(action, 2, "TOURNAMENT", tuple(python_game.state.colors))
+                    to_action_space(
+                        action,
+                        num_players,
+                        "TOURNAMENT",
+                        tuple(python_game.state.colors),
+                    )
                 ] = True
             native_mask = native_game.valid_action_mask()
             np.testing.assert_array_equal(
@@ -159,7 +165,7 @@ def test_replayed_python_and_native_transitions_match():
                 full_native_features(native_game, "TOURNAMENT", base_player=0),
                 full_game_to_features(
                     python_game,
-                    2,
+                    num_players,
                     "TOURNAMENT",
                     base_color=Color.RED,
                 ),
@@ -188,7 +194,7 @@ def test_replayed_python_and_native_transitions_match():
                 )
                 python_expert_index = to_action_space(
                     expert_action,
-                    2,
+                    num_players,
                     "TOURNAMENT",
                     tuple(python_game.state.colors),
                 )
@@ -197,7 +203,7 @@ def test_replayed_python_and_native_transitions_match():
                     native_expert_action = from_action_space(
                         native_expert_index,
                         python_game.state.current_color(),
-                        2,
+                        num_players,
                         "TOURNAMENT",
                         tuple(python_game.state.colors),
                         python_game.playable_actions,
@@ -220,7 +226,7 @@ def test_replayed_python_and_native_transitions_match():
             action = from_action_space(
                 action_index,
                 python_game.state.current_color(),
-                2,
+                num_players,
                 "TOURNAMENT",
                 tuple(python_game.state.colors),
                 python_game.playable_actions,
