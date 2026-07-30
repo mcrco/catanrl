@@ -169,6 +169,13 @@ def _load_library(path: Path | None = None) -> ctypes.CDLL:
         ctypes.c_int32,
         ctypes.c_int32,
     ]
+    library.cppanatron_game_value_action.argtypes = [handle]
+    library.cppanatron_game_value_action.restype = ctypes.c_int32
+    library.cppanatron_game_value_score.argtypes = [
+        handle,
+        ctypes.c_int32,
+        ctypes.POINTER(ctypes.c_double),
+    ]
     library.cppanatron_game_num_players.argtypes = [handle]
     library.cppanatron_game_num_players.restype = ctypes.c_int32
     library.cppanatron_game_current_player.argtypes = [handle]
@@ -349,6 +356,21 @@ class NativeGame:
                 -1 if stolen_resource is None else stolen_resource,
             )
         )
+
+    def value_action(self) -> int:
+        result = int(self._library.cppanatron_game_value_action(self._handle))
+        if result < 0:
+            self._raise_last_error()
+        return result
+
+    def value_score(self, player: int) -> float:
+        result = ctypes.c_double()
+        self._check(
+            self._library.cppanatron_game_value_score(
+                self._handle, player, ctypes.byref(result)
+            )
+        )
+        return float(result.value)
 
     def player_state(self, player: int) -> NativePlayerState:
         state = _PlayerState()
