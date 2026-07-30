@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 from pufferlib.emulation import nativize
 
+from catanrl.algorithms.imitation_learning.dagger import _resolve_env_factory
 from catanrl.envs.cppanatron import (
     SingleAgentCppanatronPufferEnv,
     find_cppanatron_library,
@@ -11,6 +12,7 @@ from catanrl.envs.cppanatron import (
 )
 from catanrl.envs.puffer.common import compute_single_agent_dims
 from catanrl.envs.puffer.rollout_utils import decode_puffer_batch
+from catanrl.envs.puffer.single_agent_env import make_puffer_vectorized_envs
 from catanrl.features.catanatron_utils import get_actor_indices_from_full
 
 
@@ -133,3 +135,21 @@ def test_native_puffer_vectorized_factory_decodes_batch():
         assert all(int(info["expert_action"]) in info["valid_actions"] for info in infos)
     finally:
         envs.close()
+
+
+def test_dagger_backend_factory_selection():
+    assert _resolve_env_factory("python") is make_puffer_vectorized_envs
+    assert _resolve_env_factory("cppanatron") is make_cppanatron_vectorized_envs
+    with pytest.raises(ValueError, match="Unknown DAgger environment backend"):
+        _resolve_env_factory("other")  # type: ignore[arg-type]
+
+
+def test_native_puffer_rejects_unsupported_player_types():
+    with pytest.raises(ValueError, match="Native opponents"):
+        SingleAgentCppanatronPufferEnv(
+            config={
+                "map_type": "MINI",
+                "opponent_configs": ["AB:2"],
+                "expert_config": "F",
+            }
+        )
