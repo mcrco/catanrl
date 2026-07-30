@@ -99,11 +99,53 @@ def test_native_binding_supports_independent_map_and_game_seeds():
         assert first.tiles() == original_tiles
 
 
+def test_native_binding_selects_number_placement():
+    with (
+        NativeGame(
+            num_players=2,
+            map_type="BASE",
+            seed=29,
+            map_seed=17,
+            number_placement="official_spiral",
+        ) as official,
+        NativeGame(
+            num_players=2,
+            map_type="BASE",
+            seed=29,
+            map_seed=17,
+            number_placement="random",
+        ) as randomized,
+    ):
+        official_tiles = {
+            tile[:3]: (tile[5], tile[6]) for tile in official.tiles() if tile[4] == 0
+        }
+        randomized_tiles = {
+            tile[:3]: (tile[5], tile[6])
+            for tile in randomized.tiles()
+            if tile[4] == 0
+        }
+
+        assert {
+            coordinate: resource
+            for coordinate, (resource, _number) in official_tiles.items()
+        } == {
+            coordinate: resource
+            for coordinate, (resource, _number) in randomized_tiles.items()
+        }
+        assert {
+            coordinate: number
+            for coordinate, (_resource, number) in official_tiles.items()
+        } != {
+            coordinate: number
+            for coordinate, (_resource, number) in randomized_tiles.items()
+        }
+
+
 @pytest.mark.parametrize("map_type", ["MINI", "BASE"])
 @pytest.mark.parametrize("seed", [0, 1, 42])
 def test_native_random_maps_match_python_template_contract(map_type, seed):
     random.seed(seed)
-    python_map = build_map(map_type)
+    python_map = build_map(map_type, number_placement="random")
 
     with NativeGame(num_players=2, map_type=map_type, seed=seed) as native_game:
         native_tiles = {
@@ -158,10 +200,17 @@ def test_native_random_maps_match_python_template_contract(map_type, seed):
             for _id, kind, _resource, number, _direction, _nodes in native_tiles.values()
             if kind == 0
         )
-        assert native_numbers == Counter(
-            {-1 if number is None else number: count
-             for number, count in python_numbers.items()}
-        )
+        if map_type == "MINI":
+            assert native_numbers[-1] == 1
+            assert sum(native_numbers.values()) == len(MINI_MAP_TEMPLATE.tile_resources)
+            assert set(native_numbers) - {-1} <= set(MINI_MAP_TEMPLATE.numbers)
+        else:
+            assert native_numbers == Counter(
+                {
+                    -1 if number is None else number: count
+                    for number, count in python_numbers.items()
+                }
+            )
 
         python_ports = Counter(
             None if tile.resource is None else RESOURCES.index(tile.resource)
@@ -249,14 +298,17 @@ def _python_map_matching_native(
         (tile[0], tile[1], tile[2]): tile[3:] for tile in native_game.tiles()
     }
     placed_land_resources = []
+    placed_numbers = []
     placed_port_resources = []
     for coordinate, tile_type in template.topology.items():
-        _id, kind, resource, _number, _direction, _nodes = native_tiles[coordinate]
+        _id, kind, resource, number, _direction, _nodes = native_tiles[coordinate]
         if tile_type is LandTile:
             assert kind == 0
             placed_land_resources.append(
                 None if resource < 0 else RESOURCES[resource]
             )
+            if resource >= 0:
+                placed_numbers.append(number)
         elif isinstance(tile_type, tuple):
             assert kind == 2
             placed_port_resources.append(
@@ -267,7 +319,8 @@ def _python_map_matching_native(
         template,
         shuffled_port_resources_param=list(reversed(placed_port_resources)),
         shuffled_tile_resources_param=list(reversed(placed_land_resources)),
-        number_placement="official_spiral",
+        shuffled_numbers_param=list(reversed(placed_numbers)),
+        number_placement="random",
     )
     return CatanMap.from_tiles(tiles)
 
@@ -310,13 +363,18 @@ def test_replayed_python_and_native_transitions_match(map_type, num_players):
                 err_msg=f"legal-action mismatch before replay step {step}",
             )
             assert native_game.current_player == python_game.state.current_player_index
-            assert native_game.current_prompt == list(type(python_game.state.current_prompt)).index(
-                python_game.state.current_prompt
-            )
+            assert native_game.current_prompt == list(
+                type(python_game.state.current_prompt)
+            ).index(python_game.state.current_prompt)
             assert native_game.num_turns == python_game.state.num_turns
             for index, color in enumerate(colors):
-                assert _native_player_tuple(native_game, index) == _python_player_tuple(
-                    python_game, color
+                native_player = _native_player_tuple(native_game, index)
+                python_player = _python_player_tuple(python_game, color)
+                assert native_player == python_player, (
+                    f"player-state mismatch for player {index} before replay step "
+                    f"{step}; native_roads={native_game.roads()}; "
+                    f"python_roads={python_game.state.board.roads}; "
+                    f"buildings={python_game.state.board.buildings}"
                 )
             python_winner = python_game.winning_color()
             assert native_game.winner == (
