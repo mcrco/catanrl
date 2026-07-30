@@ -26,7 +26,7 @@ from catanrl.features.catanatron_utils import (
     ActorObservationLevel,
     get_actor_indices_from_full,
 )
-from catanrl.utils.seeding import derive_seed
+from catanrl.utils.seeding import derive_map_and_game_seeds, derive_seed
 
 from .binding import NativeGame
 from .features import full_native_features
@@ -239,16 +239,18 @@ class SingleAgentCppanatronPufferEnv(PufferEnv):
         else:
             raise ValueError(f"Unknown nn_seat: {self.nn_seat}")
 
+        map_seed, game_seed = derive_map_and_game_seeds(episode_seed)
         if self.game is None:
             self.game = NativeGame(
                 self.num_players,
                 self.map_type,
-                seed=episode_seed,
+                seed=game_seed,
+                map_seed=map_seed,
                 discard_limit=self.discard_limit,
                 vps_to_win=self.vps_to_win,
             )
         else:
-            self.game.reset(episode_seed)
+            self.game.reset(game_seed, map_seed=map_seed)
         self._advance_until_controlled_decision()
         observation = self._get_observation()
         info = self._build_info()
