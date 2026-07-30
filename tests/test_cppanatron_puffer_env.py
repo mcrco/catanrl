@@ -153,3 +153,27 @@ def test_native_puffer_rejects_unsupported_player_types():
                 "expert_config": "F",
             }
         )
+
+
+def test_native_random_seating_preserves_mixed_opponent_identities():
+    env = SingleAgentCppanatronPufferEnv(
+        config={
+            "map_type": "MINI",
+            "vps_to_win": 6,
+            "discard_limit": 7,
+            "opponent_configs": ["F", "RANDOM"],
+            "reward_function": "win",
+            "expert_config": "F",
+            "nn_seat": "random",
+        }
+    )
+    try:
+        for seed in range(8):
+            env.reset(seed=seed)
+            assignments = env._opponent_configs_by_player
+            assert assignments[env.controlled_player] is None
+            assert sorted(
+                config for config in assignments if config is not None
+            ) == ["F", "RANDOM"]
+    finally:
+        env.close()
