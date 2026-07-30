@@ -77,6 +77,17 @@ class SingleAgentCppanatronPufferEnv(PufferEnv):
             "VALUEFUNCTION",
         }:
             raise ValueError("Native expert currently supports only F/ValueFunction")
+        supported_opponents = {"F", "VALUE", "VALUEFUNCTION", "R", "RANDOM"}
+        unsupported_opponents = [
+            config
+            for config in self.opponent_configs
+            if config.split(":", 1)[0].upper() not in supported_opponents
+        ]
+        if unsupported_opponents:
+            raise ValueError(
+                "Native opponents currently support only F/ValueFunction and Random; "
+                f"got {unsupported_opponents}"
+            )
 
         dims = compute_single_agent_dims(
             self.num_players,
