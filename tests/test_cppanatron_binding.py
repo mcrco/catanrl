@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import random
+from collections import Counter
+
 import numpy as np
 import pytest
 from catanatron.game import Game
@@ -10,7 +13,9 @@ from catanatron.models.enums import (
     ActionType,
 )
 from catanatron.models.map import build_map
+from catanatron.models.coordinate_system import Direction
 from catanatron.models.player import Color, RandomPlayer
+from catanatron.models.tiles import LandTile, Port, Water
 from catanatron.players.value import ValueFunctionPlayer, base_fn
 
 from catanrl.envs.cppanatron import (
@@ -56,6 +61,86 @@ def test_native_binding_reports_invalid_actions():
     with NativeGame(num_players=2, map_type="BASE", seed=3) as game:
         with pytest.raises(RuntimeError, match="not currently playable"):
             game.step(game.action_space_size - 1)
+
+
+@pytest.mark.parametrize("map_type", ["MINI", "BASE"])
+@pytest.mark.parametrize("seed", [0, 1, 42])
+def test_native_random_maps_match_python_template_contract(map_type, seed):
+    random.seed(seed)
+    python_map = build_map(map_type)
+
+    with NativeGame(num_players=2, map_type=map_type, seed=seed) as native_game:
+        native_tiles = {
+            (tile[0], tile[1], tile[2]): tile[3:] for tile in native_game.tiles()
+        }
+        assert set(native_tiles) == set(python_map.tiles)
+
+        for coordinate, python_tile in python_map.tiles.items():
+            (
+                tile_id,
+                kind,
+                _resource,
+                _number,
+                direction,
+                nodes,
+            ) = native_tiles[coordinate]
+            assert nodes == tuple(python_tile.nodes.values())
+            if isinstance(python_tile, LandTile):
+                assert kind == 0
+                assert tile_id == python_tile.id
+                assert direction == -1
+            elif isinstance(python_tile, Water):
+                assert kind == 1
+                assert tile_id == -1
+                assert direction == -1
+            elif isinstance(python_tile, Port):
+                assert kind == 2
+                assert tile_id == python_tile.id
+                assert direction == list(Direction).index(python_tile.direction)
+            else:  # pragma: no cover - guards an upstream tile-type addition
+                raise AssertionError(f"Unknown Python tile type: {type(python_tile)}")
+
+        python_land_resources = Counter(
+            None if tile.resource is None else RESOURCES.index(tile.resource)
+            for tile in python_map.land_tiles.values()
+        )
+        native_land_resources = Counter(
+            resource
+            for _id, kind, resource, _number, _direction, _nodes in native_tiles.values()
+            if kind == 0
+        )
+        assert native_land_resources == Counter(
+            {-1 if resource is None else resource: count
+             for resource, count in python_land_resources.items()}
+        )
+
+        python_numbers = Counter(
+            tile.number for tile in python_map.land_tiles.values()
+        )
+        native_numbers = Counter(
+            number
+            for _id, kind, _resource, number, _direction, _nodes in native_tiles.values()
+            if kind == 0
+        )
+        assert native_numbers == Counter(
+            {-1 if number is None else number: count
+             for number, count in python_numbers.items()}
+        )
+
+        python_ports = Counter(
+            None if tile.resource is None else RESOURCES.index(tile.resource)
+            for tile in python_map.tiles.values()
+            if isinstance(tile, Port)
+        )
+        native_ports = Counter(
+            resource
+            for _id, kind, resource, _number, _direction, _nodes in native_tiles.values()
+            if kind == 2
+        )
+        assert native_ports == Counter(
+            {-1 if resource is None else resource: count
+             for resource, count in python_ports.items()}
+        )
 
 
 @pytest.mark.parametrize("map_type", ["MINI", "BASE", "TOURNAMENT"])
