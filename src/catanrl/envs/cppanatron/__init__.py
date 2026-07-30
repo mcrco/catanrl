@@ -10,6 +10,10 @@ from .multi_agent_puffer_env import (
     ParallelCppanatronPufferEnv,
     make_cppanatron_marl_vectorized_envs,
 )
+from .native_vector_puffer_env import (
+    NativeVectorCppanatronPufferEnv,
+    make_cppanatron_native_marl_vectorized_envs,
+)
 
 __all__ = [
     "NativeGame",
@@ -19,7 +23,9 @@ __all__ = [
     "native_board_tensor",
     "native_numeric_features",
     "ParallelCppanatronPufferEnv",
+    "NativeVectorCppanatronPufferEnv",
     "SingleAgentCppanatronPufferEnv",
     "make_cppanatron_marl_vectorized_envs",
+    "make_cppanatron_native_marl_vectorized_envs",
     "make_cppanatron_vectorized_envs",
 ]
