@@ -151,7 +151,7 @@ def main():
     parser.add_argument("--num-envs", type=int, default=4)
     parser.add_argument(
         "--env-backend",
-        choices=["python", "cppanatron"],
+        choices=["python", "cppanatron", "cppanatron-native"],
         default="python",
         help="Game engine used for MARL collection.",
     )

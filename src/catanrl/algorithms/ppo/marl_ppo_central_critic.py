@@ -14,7 +14,10 @@ from tqdm import tqdm
 import wandb
 
 from ...envs import compute_multiagent_input_dim, compute_single_agent_dims, decode_puffer_batch
-from ...envs.cppanatron import make_cppanatron_marl_vectorized_envs
+from ...envs.cppanatron import (
+    make_cppanatron_marl_vectorized_envs,
+    make_cppanatron_native_marl_vectorized_envs,
+)
 from ...envs.puffer.multi_agent_env import make_vectorized_envs as make_marl_vectorized_envs
 from ...eval.training_eval import (
     EvalBaseline,
@@ -44,7 +47,7 @@ from .buffers import CentralCriticExperienceBuffer
 from .ppo_update import run_ppo_update
 
 CriticWarmStartMode = Literal["full", "backbone", "none"]
-MarlEnvBackend = Literal["python", "cppanatron"]
+MarlEnvBackend = Literal["python", "cppanatron", "cppanatron-native"]
 
 
 def _resolve_marl_env_factory(backend: MarlEnvBackend) -> Callable[..., Any]:
@@ -52,6 +55,8 @@ def _resolve_marl_env_factory(backend: MarlEnvBackend) -> Callable[..., Any]:
         return make_marl_vectorized_envs
     if backend == "cppanatron":
         return make_cppanatron_marl_vectorized_envs
+    if backend == "cppanatron-native":
+        return make_cppanatron_native_marl_vectorized_envs
     raise ValueError(f"Unknown MARL environment backend: {backend!r}")
 
 
