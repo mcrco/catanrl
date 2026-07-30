@@ -12,7 +12,12 @@ from catanatron.models.enums import (
 from catanatron.models.map import build_map
 from catanatron.models.player import Color, RandomPlayer
 
-from catanrl.envs.cppanatron import NativeGame, find_cppanatron_library
+from catanrl.envs.cppanatron import (
+    NativeGame,
+    find_cppanatron_library,
+    full_native_features,
+)
+from catanrl.features.catanatron_utils import full_game_to_features
 from catanrl.utils.catanatron_action_space import from_action_space, to_action_space
 from catanrl.utils.catanatron_game import force_player_order
 
@@ -149,6 +154,18 @@ def test_replayed_python_and_native_transitions_match():
                 assert _native_player_tuple(native_game, index) == _python_player_tuple(
                     python_game, color
                 )
+            np.testing.assert_allclose(
+                full_native_features(native_game, "TOURNAMENT", base_player=0),
+                full_game_to_features(
+                    python_game,
+                    2,
+                    "TOURNAMENT",
+                    base_color=Color.RED,
+                ),
+                rtol=0,
+                atol=1e-7,
+                err_msg=f"feature mismatch before replay step {step}",
+            )
 
             if python_game.winning_color() is not None or python_game.state.num_turns >= 1_000:
                 break
