@@ -10,6 +10,7 @@ from .multi_agent_puffer_env import (
     ParallelCppanatronPufferEnv,
     make_cppanatron_marl_vectorized_envs,
 )
+from .mcts_binding import NativeMCTSSearch
 from .native_vector_puffer_env import (
     NativeVectorCppanatronPufferEnv,
     make_cppanatron_native_marl_vectorized_envs,
@@ -17,6 +18,7 @@ from .native_vector_puffer_env import (
 
 __all__ = [
     "NativeGame",
+    "NativeMCTSSearch",
     "NativePlayerState",
     "find_cppanatron_library",
     "full_native_features",
