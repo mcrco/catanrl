@@ -1004,6 +1004,37 @@ post-training paired confirmation. The replay buffer is intentionally excluded
 from resume state because a 50k full-state buffer can occupy multiple GB;
 models, optimizers, teacher/champion state, RNG state, and counters are saved.
 
+### Native cppanatron self-play
+
+Search-guided collection can use the native C++ rules engine and stochastic
+PUCT tree while retaining the existing PyTorch models, central batched
+inference server, replay buffer, optimizer, checkpoint, and promotion logic:
+
+```bash
+cmake -S cppanatron -B cppanatron/build-make -G "Unix Makefiles"
+cmake --build cppanatron/build-make
+
+uv run train-alphazero \
+  --mode iterate --config configs/models/xdim-flat-2p-full-sep.yaml \
+  --self-play-backend cppanatron \
+  --ismcts-determinizations 1 \
+  --simulations 64
+```
+
+The native search owns game copies, legal-action expansion, exact dice,
+development-card, and robber-steal chance outcomes, PUCT selection, and
+perspective-aware backup. C++ writes root and leaf full observations directly;
+worker processes select the configured actor/critic views and submit them to
+the same across-games inference batcher as Python MCTS. Both collectors emit
+the same `SelfPlayExperience` fields, including the full flat visit policy and
+legal-action mask.
+
+The Python backend remains the default. Native collection currently implements
+plain perfect-information MCTS only, so it requires
+`--ismcts-determinizations 1` and does not accept `--prunning`. Use the Python
+backend for belief-weighted development-card determinizations until native
+information-set search is implemented.
+
 ### Frozen-teacher feasibility gate
 
 Generate 512 search games across eight iterations. d8 x s64 is preferred over
