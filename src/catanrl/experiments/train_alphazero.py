@@ -95,6 +95,15 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     add_config_argument(parser)
 
     search = parser.add_argument_group("search teacher")
+    search.add_argument(
+        "--self-play-backend",
+        choices=("python", "cppanatron"),
+        default="python",
+        help=(
+            "Game/search implementation used to collect replay targets. "
+            "cppanatron keeps tree traversal and game copies in native C++."
+        ),
+    )
     search.add_argument("--simulations", type=int, default=64)
     search.add_argument(
         "--ismcts-determinizations",
@@ -210,6 +219,13 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         parser.error("--max-baseline-regression cannot be negative")
     if args.value_loss_weight is None:
         args.value_loss_weight = 0.0 if args.mode == "distill" else 1.0
+    if args.self_play_backend == "cppanatron":
+        if args.ismcts_determinizations != 1:
+            parser.error(
+                "--self-play-backend cppanatron currently requires --ismcts-determinizations 1"
+            )
+        if args.prunning:
+            parser.error("--self-play-backend cppanatron does not support --prunning")
 
 
 def _build_model_pair(
@@ -685,6 +701,7 @@ def main() -> None:
         model_type=arch.model_type,
         vps_to_win=arch.vps_to_win,
         discard_limit=arch.discard_limit,
+        self_play_backend=args.self_play_backend,
         simulations=args.simulations,
         c_puct=args.c_puct,
         prunning=args.prunning,
@@ -765,7 +782,8 @@ def main() -> None:
     print("\nSearch-guided policy training")
     print(f"  mode={args.mode} | device={device} | architecture={setup.architecture_source}")
     print(
-        f"  teacher=d{args.ismcts_determinizations} x s{args.simulations} | "
+        f"  teacher={args.self_play_backend} "
+        f"d{args.ismcts_determinizations} x s{args.simulations} | "
         f"games/iteration={args.games_per_iteration} | iterations={args.iterations}"
     )
     print(

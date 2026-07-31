@@ -27,6 +27,7 @@ import torch.nn.functional as F
 from ...features.catanatron_utils import ActorObservationLevel, COLOR_ORDER, CriticObservationLevel
 from ...models.inference_utils import forward_policy_value
 from ...models.wrappers import PolicyNetworkWrapper, PolicyValueNetworkWrapper, ValueNetworkWrapper
+from .native_self_play import generate_native_self_play_data
 from .parallel_self_play import SelfPlayExperience, generate_self_play_data
 
 TrainingMode = Literal["distill", "iterate"]
@@ -47,6 +48,7 @@ class AlphaZeroConfig:
     model_type: str = "flat"
     vps_to_win: int = 15
     discard_limit: int = 9
+    self_play_backend: Literal["python", "cppanatron"] = "python"
 
     # Search teacher.
     simulations: int = 64
@@ -124,6 +126,8 @@ class AlphaZeroTrainer:
             raise ValueError("Search-guided training supports between 2 and 4 players.")
         if config.mode not in ("distill", "iterate"):
             raise ValueError(f"Unknown training mode '{config.mode}'.")
+        if config.self_play_backend not in ("python", "cppanatron"):
+            raise ValueError(f"Unknown self-play backend '{config.self_play_backend}'.")
         if config.batch_size <= 0 or config.buffer_size < config.batch_size:
             raise ValueError("buffer_size must be at least batch_size, and both must be positive.")
         if config.policy_loss_weight <= 0:
@@ -291,7 +295,12 @@ class AlphaZeroTrainer:
         base_seed = (self.config.seed or 0) + self._self_play_calls * 1_000_003
         self._self_play_calls += 1
 
-        experiences, stats = generate_self_play_data(
+        self_play_generator = (
+            generate_native_self_play_data
+            if self.config.self_play_backend == "cppanatron"
+            else generate_self_play_data
+        )
+        experiences, stats = self_play_generator(
             policy_model=self.teacher_policy_model,
             critic_model=self.teacher_critic_model,
             model_type=self.config.model_type,

@@ -206,6 +206,29 @@ def test_collect_self_play_uses_teacher_models(monkeypatch: pytest.MonkeyPatch) 
     assert stats["replay_size"] == 1.0
 
 
+def test_collect_self_play_can_dispatch_to_native_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trainer = _trainer()
+    trainer.config.self_play_backend = "cppanatron"
+    called = {}
+
+    def fake_generate_native_self_play_data(**kwargs):
+        called.update(kwargs)
+        return [_experience(1, -1.0)], {"games": 1}
+
+    monkeypatch.setattr(
+        "catanrl.algorithms.alphazero.trainer.generate_native_self_play_data",
+        fake_generate_native_self_play_data,
+    )
+
+    stats = trainer.collect_self_play(1)
+
+    assert called["policy_model"] is trainer.teacher_policy_model
+    assert stats["experiences"] == 1.0
+    assert len(trainer.replay_buffer) == 1
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
 def test_cuda_offload_preserves_optimizer_parameter_bindings(
     monkeypatch: pytest.MonkeyPatch,
@@ -265,6 +288,34 @@ def test_cli_mode_defaults_freeze_value_only_for_distillation() -> None:
 
     assert distill.value_loss_weight == 0.0
     assert iterate.value_loss_weight == 1.0
+
+
+def test_cli_native_self_play_requires_plain_mcts() -> None:
+    args = parse_args(
+        [
+            "--mode",
+            "iterate",
+            "--config",
+            "model.yaml",
+            "--self-play-backend",
+            "cppanatron",
+            "--ismcts-determinizations",
+            "1",
+        ]
+    )
+    assert args.self_play_backend == "cppanatron"
+
+    with pytest.raises(SystemExit):
+        parse_args(
+            [
+                "--mode",
+                "iterate",
+                "--config",
+                "model.yaml",
+                "--self-play-backend",
+                "cppanatron",
+            ]
+        )
 
 
 def test_policy_players_respect_existing_model_device() -> None:

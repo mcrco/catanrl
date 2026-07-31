@@ -2,12 +2,22 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+import torch
+from torch import nn
 
+from catanrl.algorithms.alphazero.native_self_play import (
+    _play_native_self_play_game,
+    generate_native_self_play_data,
+)
 from catanrl.envs.cppanatron import (
     NativeGame,
     NativeMCTSSearch,
     find_cppanatron_library,
 )
+from catanrl.features.catanatron_utils import get_observation_indices_from_full
+from catanrl.models.heads import FlatPolicyHead
+from catanrl.models.wrappers import PolicyNetworkWrapper, ValueNetworkWrapper
+from nn_mcts_helpers import MockInferenceBackend
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -73,3 +83,97 @@ def test_native_mcts_rejects_wrong_policy_shape():
                 search.initialize_root(np.zeros(game.action_space_size - 1))
     finally:
         game.close()
+
+
+def test_native_self_play_game_emits_standard_legal_training_fields():
+    action_space_size = 187
+    backend = MockInferenceBackend(action_space_size)
+    args = {
+        "map_type": "MINI",
+        "num_players": 2,
+        "num_simulations": 2,
+        "c_puct": 1.5,
+        "actor_observation_level": "private",
+        "critic_observation_level": "full",
+        "temperature": 1.0,
+        "final_temperature": 0.1,
+        "target_temperature": 1.0,
+        "temperature_drop_move": 30,
+        "noise_turns": 20,
+        "dirichlet_alpha": 0.3,
+        "dirichlet_frac": 0.25,
+        "vps_to_win": 10,
+        "discard_limit": 7,
+        "turns_limit": 2,
+    }
+
+    samples, winner = _play_native_self_play_game(
+        episode_seed=101,
+        args_dict=args,
+        inference_backend=backend,
+    )
+
+    assert winner is None
+    assert samples
+    actor_size = len(get_observation_indices_from_full(2, "MINI", "private"))
+    critic_size = len(get_observation_indices_from_full(2, "MINI", "full"))
+    for actor_state, critic_state, policy, action_mask, player in samples:
+        assert actor_state.shape == (actor_size,)
+        assert critic_state.shape == (critic_size,)
+        assert policy.shape == action_mask.shape == (action_space_size,)
+        assert action_mask.dtype == np.bool_
+        assert np.count_nonzero(action_mask) > 1
+        assert float(policy.sum()) == pytest.approx(1.0)
+        assert np.all(policy[~action_mask] == 0.0)
+        assert player in (0, 1)
+
+
+def test_native_parallel_self_play_returns_shared_experience_type():
+    torch.manual_seed(0)
+    actor_size = len(get_observation_indices_from_full(2, "MINI", "private"))
+    critic_size = len(get_observation_indices_from_full(2, "MINI", "full"))
+    action_space_size = 187
+    policy_model = PolicyNetworkWrapper(
+        nn.Identity(),
+        FlatPolicyHead(actor_size, action_space_size),
+    )
+    critic_model = ValueNetworkWrapper(
+        nn.Identity(),
+        nn.Sequential(nn.Linear(critic_size, 1), nn.Tanh()),
+    )
+
+    experiences, stats = generate_native_self_play_data(
+        policy_model=policy_model,
+        critic_model=critic_model,
+        model_type="flat",
+        map_type="MINI",
+        num_players=2,
+        num_games=1,
+        num_game_workers=1,
+        num_simulations=1,
+        c_puct=1.5,
+        prunning=False,
+        actor_observation_level="private",
+        critic_observation_level="full",
+        ismcts_determinizations=1,
+        inference_batch_size=4,
+        inference_wait_ms=1.0,
+        temperature=1.0,
+        final_temperature=0.1,
+        target_temperature=1.0,
+        temperature_drop_move=30,
+        noise_turns=20,
+        dirichlet_alpha=0.3,
+        dirichlet_frac=0.25,
+        vps_to_win=10,
+        discard_limit=7,
+        seed=17,
+        device="cpu",
+        show_tqdm=False,
+        turns_limit=1,
+    )
+
+    assert stats["games"] == 1
+    assert experiences
+    assert all(exp.policy.shape == (action_space_size,) for exp in experiences)
+    assert all(np.all(exp.policy[~exp.action_mask] == 0.0) for exp in experiences)
