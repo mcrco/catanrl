@@ -5,9 +5,10 @@ import ctypes
 import numpy as np
 from catanatron.gym.board_tensor_features import HEIGHT, WIDTH
 
+from catanrl.features.catanatron_utils import get_observation_indices_from_full
+
 from .batch_binding import _position_arrays
 from .binding import MapType, NativeGame, _load_library
-from .features import full_native_features
 
 
 class NativeMCTSSearch:
@@ -31,12 +32,13 @@ class NativeMCTSSearch:
         self._library = _load_library()
         self._configure_signatures()
         nodes, edges, tiles = _position_arrays()
-        root_observation = full_native_features(
-            game,
-            map_type,
-            base_player=game.current_player,
+        self.observation_size = len(
+            get_observation_indices_from_full(
+                game.num_players,
+                map_type,
+                "full",
+            )
         )
-        self.observation_size = int(root_observation.size)
         self.action_space_size = game.action_space_size
         self._leaf_observation = np.empty(self.observation_size, dtype=np.float32)
 
@@ -84,6 +86,12 @@ class NativeMCTSSearch:
             handle,
             ctypes.c_double,
             ctypes.c_double,
+        ]
+        library.cppanatron_search_root_observation.argtypes = [
+            handle,
+            float_pointer,
+            ctypes.c_size_t,
+            ctypes.POINTER(ctypes.c_int32),
         ]
         library.cppanatron_search_select_leaf.argtypes = [
             handle,
@@ -138,6 +146,18 @@ class NativeMCTSSearch:
                 float(fraction),
             )
         )
+
+    def root_observation(self) -> tuple[np.ndarray, int]:
+        player = ctypes.c_int32()
+        self._check_result(
+            self._library.cppanatron_search_root_observation(
+                self._handle,
+                self._leaf_observation.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+                self._leaf_observation.size,
+                ctypes.byref(player),
+            )
+        )
+        return self._leaf_observation.copy(), int(player.value)
 
     def select_leaf(self) -> tuple[np.ndarray, int] | None:
         player = ctypes.c_int32()

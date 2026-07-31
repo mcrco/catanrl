@@ -13,6 +13,7 @@ from catanrl.envs.cppanatron import (
     NativeGame,
     NativeMCTSSearch,
     find_cppanatron_library,
+    full_native_features,
 )
 from catanrl.features.catanatron_utils import get_observation_indices_from_full
 from catanrl.models.heads import FlatPolicyHead
@@ -41,6 +42,12 @@ def _run_search(seed: int) -> tuple[np.ndarray, np.ndarray]:
     leaf_players: list[int] = []
     try:
         with NativeMCTSSearch(game, "MINI", c_puct=1.5, seed=seed) as search:
+            root_observation, root_player = search.root_observation()
+            assert root_player == game.current_player
+            np.testing.assert_array_equal(
+                root_observation,
+                full_native_features(game, "MINI", game.current_player),
+            )
             search.initialize_root(logits)
             search.add_root_dirichlet_noise(0.3, 0.25)
             for _ in range(24):

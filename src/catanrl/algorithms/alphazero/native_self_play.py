@@ -11,7 +11,7 @@ from typing import Literal
 import numpy as np
 import torch
 
-from catanrl.envs.cppanatron import NativeGame, NativeMCTSSearch, full_native_features
+from catanrl.envs.cppanatron import NativeGame, NativeMCTSSearch
 from catanrl.envs.cppanatron.puffer_env import TURNS_LIMIT
 from catanrl.features.catanatron_utils import (
     ActorObservationLevel,
@@ -39,7 +39,6 @@ def _native_search_policy(
     *,
     game: NativeGame,
     map_type: MapType,
-    full_state: np.ndarray,
     inference_backend: _NNMCTSInferenceBackend,
     actor_indices: np.ndarray,
     critic_indices: np.ndarray,
@@ -52,18 +51,20 @@ def _native_search_policy(
     action_temperature: float,
     target_temperature: float | None,
     rng: np.random.Generator,
-) -> tuple[np.ndarray, int]:
-    root_evaluation = inference_backend.evaluate_leaf(
-        full_state[actor_indices],
-        full_state[critic_indices],
-    )
-
+) -> tuple[np.ndarray, int, np.ndarray]:
     with NativeMCTSSearch(
         game,
         map_type,
         c_puct=c_puct,
         seed=search_seed,
     ) as search:
+        full_state, root_player = search.root_observation()
+        if root_player != game.current_player:
+            raise RuntimeError("Native MCTS root player does not match its source game")
+        root_evaluation = inference_backend.evaluate_leaf(
+            full_state[actor_indices],
+            full_state[critic_indices],
+        )
         search.initialize_root(root_evaluation.policy_logits)
         if add_noise and dirichlet_frac > 0.0:
             search.add_root_dirichlet_noise(
@@ -92,7 +93,7 @@ def _native_search_policy(
     policy = np.zeros(game.action_space_size, dtype=np.float32)
     policy[valid_indices] = target_probabilities.astype(np.float32, copy=False)
     action = int(rng.choice(valid_indices, p=action_probabilities))
-    return policy, action
+    return policy, action, full_state
 
 
 def _play_native_self_play_game(
@@ -140,20 +141,14 @@ def _play_native_self_play_game(
             if valid_actions.size == 1:
                 action = int(valid_actions[0])
             else:
-                full_state = full_native_features(
-                    game,
-                    map_type,
-                    base_player=current_player,
-                )
                 temperature = (
                     float(args_dict["temperature"])
                     if move_number < int(args_dict["temperature_drop_move"])
                     else float(args_dict["final_temperature"])
                 )
-                policy, action = _native_search_policy(
+                policy, action, full_state = _native_search_policy(
                     game=game,
                     map_type=map_type,
-                    full_state=full_state,
                     inference_backend=inference_backend,
                     actor_indices=actor_indices,
                     critic_indices=critic_indices,
