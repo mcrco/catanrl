@@ -20,10 +20,14 @@ def mask_action_logits(
         mask = mask.unsqueeze(0)
     no_valid = ~mask.any(dim=1, keepdim=True)
     mask = torch.where(no_valid, torch.ones_like(mask), mask)
-    masked_logits = torch.where(mask, policy_logits, torch.full_like(policy_logits, float("-inf")))
     if clamp_range is not None:
         min_value, max_value = clamp_range
-        masked_logits = torch.clamp(masked_logits, min=min_value, max=max_value)
+        policy_logits = torch.clamp(policy_logits, min=min_value, max=max_value)
+    masked_logits = torch.where(
+        mask,
+        policy_logits,
+        torch.full_like(policy_logits, float("-inf")),
+    )
     return masked_logits, mask
 
 

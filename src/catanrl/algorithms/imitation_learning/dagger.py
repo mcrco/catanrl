@@ -123,6 +123,37 @@ class DAggerRolloutBatch:
     action_masks: np.ndarray
 
 
+def _compute_discounted_returns(
+    rewards: np.ndarray,
+    dones: np.ndarray,
+    bootstrap_values: np.ndarray,
+    gamma: float,
+) -> np.ndarray:
+    """Compute time-major returns without leaking across episode boundaries."""
+    if rewards.shape != dones.shape:
+        raise ValueError(
+            f"rewards and dones must have the same shape, got {rewards.shape} and {dones.shape}"
+        )
+    if rewards.ndim != 2:
+        raise ValueError(f"rewards and dones must be time-major matrices, got {rewards.shape}")
+    if bootstrap_values.shape != (rewards.shape[1],):
+        raise ValueError(
+            "bootstrap_values must have one value per environment, got "
+            f"{bootstrap_values.shape} for {rewards.shape[1]} environments"
+        )
+
+    returns = np.zeros_like(rewards, dtype=np.float32)
+    running_returns = bootstrap_values.astype(np.float32, copy=True)
+    for step_idx in reversed(range(rewards.shape[0])):
+        # A terminal transition has no continuation value. Reset before adding
+        # its reward so that the terminal result still propagates to earlier
+        # states in the same episode.
+        running_returns = np.where(dones[step_idx], 0.0, running_returns)
+        running_returns = rewards[step_idx] + gamma * running_returns
+        returns[step_idx] = running_returns
+    return returns
+
+
 def _policy_expert_agreement(
     policy_agent: PolicyAgent,
     full_states: np.ndarray,
@@ -287,6 +318,11 @@ def _collect_dagger_rollouts_vectorized(
         # Vectorized beta sampling
         use_expert = np.random.random(batch_size) < beta
         actions_to_play = np.where(use_expert, expert_actions, policy_actions)
+        _assert_actions_are_unmasked(
+            actions=actions_to_play,
+            action_masks=action_masks,
+            context="DAgger environment actions",
+        )
 
         expert_actions_used += np.sum(use_expert)
         total_actions += batch_size
@@ -343,13 +379,12 @@ def _collect_dagger_rollouts_vectorized(
     if was_training:
         critic_model.train()
 
-    # Compute discounted returns (time-major), resetting at episode boundaries
-    returns_tmj = np.zeros_like(rewards_tmj)
-    running_returns = bootstrap_values.copy()
-    for step_idx in reversed(range(num_steps)):
-        running_returns = rewards_tmj[step_idx] + gamma * running_returns
-        returns_tmj[step_idx] = running_returns
-        running_returns = np.where(dones_tmj[step_idx], 0.0, running_returns)
+    returns_tmj = _compute_discounted_returns(
+        rewards_tmj,
+        dones_tmj,
+        bootstrap_values,
+        gamma,
+    )
 
     dataset.add_samples(
         full_states=full_states_tmj.reshape(-1, full_state_dim),
