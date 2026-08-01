@@ -5,6 +5,7 @@ import pytest
 import torch
 from torch import nn
 
+from catanrl.algorithms.alphazero.native_search import run_native_search_policy
 from catanrl.algorithms.alphazero.native_self_play import (
     _play_native_self_play_game,
     generate_native_self_play_data,
@@ -29,7 +30,7 @@ def _require_native_library():
         pytest.skip(str(exc))
 
 
-def _run_search(seed: int) -> tuple[np.ndarray, np.ndarray]:
+def _run_search(seed: int):
     game = NativeGame(
         2,
         "MINI",
@@ -61,18 +62,23 @@ def _run_search(seed: int) -> tuple[np.ndarray, np.ndarray]:
                 assert 0 <= player < game.num_players
                 leaf_players.append(player)
                 search.evaluate_leaf(logits, value=0.0)
-            return search.root_visits(), np.asarray(leaf_players)
+            return search.root_visits(), np.asarray(leaf_players), search.metrics()
     finally:
         game.close()
 
 
 def test_native_mcts_search_is_deterministic_and_visits_legal_actions():
-    first_visits, first_players = _run_search(1234)
-    second_visits, second_players = _run_search(1234)
+    first_visits, first_players, first_metrics = _run_search(1234)
+    second_visits, second_players, second_metrics = _run_search(1234)
 
     np.testing.assert_array_equal(first_visits, second_visits)
     np.testing.assert_array_equal(first_players, second_players)
+    assert first_metrics == second_metrics
     assert int(first_visits.sum()) == 24
+    assert first_metrics.simulations == 24
+    assert 1 <= first_metrics.principal_variation_depth <= first_metrics.maximum_depth
+    assert 1.0 <= first_metrics.mean_depth <= first_metrics.maximum_depth
+    assert first_metrics.root_value == pytest.approx(0.0)
 
     game = NativeGame(2, "MINI", seed=91, map_seed=73, number_placement="random")
     try:
@@ -90,6 +96,49 @@ def test_native_mcts_rejects_wrong_policy_shape():
                 search.initialize_root(np.zeros(game.action_space_size - 1))
     finally:
         game.close()
+
+
+def test_native_search_policy_reports_depth_and_policy_effect():
+    game = NativeGame(2, "MINI", seed=31, map_seed=37)
+    action_space_size = game.action_space_size
+    backend = MockInferenceBackend(
+        action_space_size,
+        value=0.2,
+        policy_logits=np.linspace(-0.5, 0.5, action_space_size, dtype=np.float32),
+    )
+    actor_indices = get_observation_indices_from_full(2, "MINI", "private")
+    critic_indices = get_observation_indices_from_full(2, "MINI", "full")
+    try:
+        result = run_native_search_policy(
+            game=game,
+            map_type="MINI",
+            inference_backend=backend,
+            actor_indices=actor_indices,
+            critic_indices=critic_indices,
+            num_simulations=16,
+            c_puct=1.5,
+            search_seed=41,
+            add_noise=False,
+            dirichlet_alpha=0.3,
+            dirichlet_frac=0.0,
+            action_temperature=0.0,
+            target_temperature=1.0,
+            rng=np.random.default_rng(43),
+        )
+    finally:
+        game.close()
+
+    diagnostics = result.diagnostics
+    assert diagnostics.simulations == 16
+    assert 1 <= diagnostics.principal_variation_depth <= diagnostics.maximum_depth
+    assert 1.0 <= diagnostics.mean_depth <= diagnostics.maximum_depth
+    assert diagnostics.legal_actions > 1
+    assert diagnostics.top1_agreement in (0.0, 1.0)
+    assert diagnostics.policy_kl >= 0.0
+    assert diagnostics.policy_js >= 0.0
+    assert np.isfinite(diagnostics.value_shift)
+    assert diagnostics.elapsed_seconds > 0.0
+    assert result.policy.sum() == pytest.approx(1.0)
 
 
 def test_native_self_play_game_emits_standard_legal_training_fields():

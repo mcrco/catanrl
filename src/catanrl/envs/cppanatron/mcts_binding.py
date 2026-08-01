@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+from dataclasses import dataclass
 
 import numpy as np
 from catanatron.gym.board_tensor_features import HEIGHT, WIDTH
@@ -9,6 +10,25 @@ from catanrl.features.catanatron_utils import get_observation_indices_from_full
 
 from .batch_binding import _position_arrays
 from .binding import MapType, NativeGame, _load_library
+
+
+class _SearchMetrics(ctypes.Structure):
+    _fields_ = [
+        ("simulations", ctypes.c_uint64),
+        ("principal_variation_depth", ctypes.c_uint32),
+        ("maximum_depth", ctypes.c_uint32),
+        ("mean_depth", ctypes.c_double),
+        ("root_value", ctypes.c_double),
+    ]
+
+
+@dataclass(frozen=True)
+class NativeMCTSSearchMetrics:
+    simulations: int
+    principal_variation_depth: int
+    maximum_depth: int
+    mean_depth: float
+    root_value: float
 
 
 class NativeMCTSSearch:
@@ -111,6 +131,10 @@ class NativeMCTSSearch:
             ctypes.POINTER(ctypes.c_uint32),
             ctypes.c_size_t,
         ]
+        library.cppanatron_search_get_metrics.argtypes = [
+            handle,
+            ctypes.POINTER(_SearchMetrics),
+        ]
 
     def _raise_last_error(self) -> None:
         message = self._library.cppanatron_last_error()
@@ -197,6 +221,22 @@ class NativeMCTSSearch:
         )
         return visits
 
+    def metrics(self) -> NativeMCTSSearchMetrics:
+        metrics = _SearchMetrics()
+        self._check_result(
+            self._library.cppanatron_search_get_metrics(
+                self._handle,
+                ctypes.byref(metrics),
+            )
+        )
+        return NativeMCTSSearchMetrics(
+            simulations=int(metrics.simulations),
+            principal_variation_depth=int(metrics.principal_variation_depth),
+            maximum_depth=int(metrics.maximum_depth),
+            mean_depth=float(metrics.mean_depth),
+            root_value=float(metrics.root_value),
+        )
+
     def close(self) -> None:
         if self._handle:
             self._library.cppanatron_search_destroy(self._handle)
@@ -212,4 +252,4 @@ class NativeMCTSSearch:
         self.close()
 
 
-__all__ = ["NativeMCTSSearch"]
+__all__ = ["NativeMCTSSearch", "NativeMCTSSearchMetrics"]

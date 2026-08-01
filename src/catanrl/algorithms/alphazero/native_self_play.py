@@ -11,7 +11,7 @@ from typing import Literal
 import numpy as np
 import torch
 
-from catanrl.envs.cppanatron import NativeGame, NativeMCTSSearch
+from catanrl.envs.cppanatron import NativeGame
 from catanrl.envs.cppanatron.puffer_env import TURNS_LIMIT
 from catanrl.features.catanatron_utils import (
     ActorObservationLevel,
@@ -22,7 +22,6 @@ from catanrl.features.catanatron_utils import (
 from catanrl.players.nn_mcts_player import (
     _NNMCTSInferenceBackend,
     _RemoteNNMCTSInferenceBackend,
-    _visit_distribution,
 )
 from catanrl.utils.seeding import derive_map_and_game_seeds, derive_seed
 
@@ -31,6 +30,7 @@ from .parallel_self_play import (
     _assign_episode_seeds,
     run_inference_server_workers,
 )
+from .native_search import run_native_search_policy
 
 MapType = Literal["BASE", "MINI", "TOURNAMENT"]
 
@@ -52,48 +52,23 @@ def _native_search_policy(
     target_temperature: float | None,
     rng: np.random.Generator,
 ) -> tuple[np.ndarray, int, np.ndarray]:
-    with NativeMCTSSearch(
-        game,
-        map_type,
+    result = run_native_search_policy(
+        game=game,
+        map_type=map_type,
+        inference_backend=inference_backend,
+        actor_indices=actor_indices,
+        critic_indices=critic_indices,
+        num_simulations=num_simulations,
         c_puct=c_puct,
-        seed=search_seed,
-    ) as search:
-        full_state, root_player = search.root_observation()
-        if root_player != game.current_player:
-            raise RuntimeError("Native MCTS root player does not match its source game")
-        root_evaluation = inference_backend.evaluate_leaf(
-            full_state[actor_indices],
-            full_state[critic_indices],
-        )
-        search.initialize_root(root_evaluation.policy_logits)
-        if add_noise and dirichlet_frac > 0.0:
-            search.add_root_dirichlet_noise(
-                dirichlet_alpha,
-                dirichlet_frac,
-            )
-        for _ in range(num_simulations):
-            leaf = search.select_leaf()
-            if leaf is None:
-                continue
-            full_leaf_state, _player = leaf
-            evaluation = inference_backend.evaluate_leaf(
-                full_leaf_state[actor_indices],
-                full_leaf_state[critic_indices],
-            )
-            search.evaluate_leaf(evaluation.policy_logits, evaluation.value)
-        visits = search.root_visits().astype(np.float64)
-
-    valid_indices = np.flatnonzero(game.valid_action_mask())
-    valid_visits = visits[valid_indices]
-    target_probabilities = _visit_distribution(
-        valid_visits,
-        action_temperature if target_temperature is None else target_temperature,
+        search_seed=search_seed,
+        add_noise=add_noise,
+        dirichlet_alpha=dirichlet_alpha,
+        dirichlet_frac=dirichlet_frac,
+        action_temperature=action_temperature,
+        target_temperature=target_temperature,
+        rng=rng,
     )
-    action_probabilities = _visit_distribution(valid_visits, action_temperature)
-    policy = np.zeros(game.action_space_size, dtype=np.float32)
-    policy[valid_indices] = target_probabilities.astype(np.float32, copy=False)
-    action = int(rng.choice(valid_indices, p=action_probabilities))
-    return policy, action, full_state
+    return result.policy, result.action, result.full_state
 
 
 def _play_native_self_play_game(
