@@ -98,6 +98,61 @@ def test_native_mcts_rejects_wrong_policy_shape():
         game.close()
 
 
+def test_native_mcts_reuses_a_deterministic_played_subtree():
+    game = NativeGame(2, "MINI", seed=59, map_seed=61)
+    logits = np.zeros(game.action_space_size, dtype=np.float32)
+    backend = MockInferenceBackend(game.action_space_size, value=0.4)
+    actor_indices = get_observation_indices_from_full(2, "MINI", "private")
+    critic_indices = get_observation_indices_from_full(2, "MINI", "full")
+    try:
+        with NativeMCTSSearch(
+            game,
+            "MINI",
+            seed=67,
+            canonical_pruning=True,
+        ) as search:
+            search.initialize_root(logits)
+            for _ in range(12):
+                leaf = search.select_leaf()
+                if leaf is not None:
+                    search.evaluate_leaf(logits, 0.2)
+            action = int(np.argmax(search.root_visits()))
+            assert search.advance(action)
+            game.step(action)
+            root_observation, root_player = search.root_observation()
+            assert root_player == game.current_player
+            np.testing.assert_array_equal(
+                root_observation,
+                full_native_features(game, "MINI", game.current_player),
+            )
+
+            result = run_native_search_policy(
+                game=game,
+                map_type="MINI",
+                inference_backend=backend,
+                actor_indices=actor_indices,
+                critic_indices=critic_indices,
+                num_simulations=4,
+                c_puct=1.5,
+                search_seed=71,
+                add_noise=False,
+                dirichlet_alpha=0.3,
+                dirichlet_frac=0.0,
+                action_temperature=0.0,
+                target_temperature=1.0,
+                rng=np.random.default_rng(73),
+                value_scale=0.5,
+                canonical_pruning=True,
+                search=search,
+            )
+            assert result.diagnostics.tree_reused == 1.0
+            assert result.diagnostics.retained_root_visits > 0
+            assert result.diagnostics.simulations == 4
+            assert result.diagnostics.backed_up_network_value == pytest.approx(0.2)
+    finally:
+        game.close()
+
+
 def test_native_search_policy_reports_depth_and_policy_effect():
     game = NativeGame(2, "MINI", seed=31, map_seed=37)
     action_space_size = game.action_space_size

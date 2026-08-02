@@ -11,7 +11,7 @@ from typing import Literal
 import numpy as np
 import torch
 
-from catanrl.envs.cppanatron import NativeGame
+from catanrl.envs.cppanatron import NativeGame, NativeMCTSSearch
 from catanrl.envs.cppanatron.puffer_env import TURNS_LIMIT
 from catanrl.features.catanatron_utils import (
     ActorObservationLevel,
@@ -51,6 +51,9 @@ def _native_search_policy(
     action_temperature: float,
     target_temperature: float | None,
     rng: np.random.Generator,
+    value_scale: float = 1.0,
+    canonical_pruning: bool = False,
+    search: NativeMCTSSearch | None = None,
 ) -> tuple[np.ndarray, int, np.ndarray]:
     result = run_native_search_policy(
         game=game,
@@ -67,6 +70,9 @@ def _native_search_policy(
         action_temperature=action_temperature,
         target_temperature=target_temperature,
         rng=rng,
+        value_scale=value_scale,
+        canonical_pruning=canonical_pruning,
+        search=search,
     )
     return result.policy, result.action, result.full_state
 
@@ -105,6 +111,7 @@ def _play_native_self_play_game(
     )
     samples: list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int]] = []
     move_number = 0
+    search: NativeMCTSSearch | None = None
     turns_limit = int(args_dict.get("turns_limit", TURNS_LIMIT))
     try:
         while game.winner is None and game.num_turns < turns_limit:
@@ -121,6 +128,14 @@ def _play_native_self_play_game(
                     if move_number < int(args_dict["temperature_drop_move"])
                     else float(args_dict["final_temperature"])
                 )
+                if search is None and bool(args_dict.get("tree_reuse", False)):
+                    search = NativeMCTSSearch(
+                        game,
+                        map_type,
+                        c_puct=float(args_dict["c_puct"]),
+                        seed=derive_seed(episode_seed, "native_mcts", move_number),
+                        canonical_pruning=bool(args_dict.get("canonical_pruning", False)),
+                    )
                 policy, action, full_state = _native_search_policy(
                     game=game,
                     map_type=map_type,
@@ -144,6 +159,9 @@ def _play_native_self_play_game(
                         else float(args_dict["target_temperature"])
                     ),
                     rng=rng,
+                    value_scale=float(args_dict.get("value_scale", 1.0)),
+                    canonical_pruning=bool(args_dict.get("canonical_pruning", False)),
+                    search=search,
                 )
                 samples.append(
                     (
@@ -154,10 +172,15 @@ def _play_native_self_play_game(
                         current_player,
                     )
                 )
+            if search is not None and not search.advance(action):
+                search.close()
+                search = None
             game.step(action)
             move_number += 1
         return samples, game.winner
     finally:
+        if search is not None:
+            search.close()
         game.close()
 
 
@@ -233,6 +256,9 @@ def generate_native_self_play_data(
     device: str | torch.device,
     show_tqdm: bool = True,
     turns_limit: int = TURNS_LIMIT,
+    value_scale: float = 1.0,
+    tree_reuse: bool = False,
+    canonical_pruning: bool = False,
 ) -> tuple[list[SelfPlayExperience], dict[str, int]]:
     """Generate the trainer's standard replay records with native C++ MCTS."""
     if prunning:
@@ -264,6 +290,9 @@ def generate_native_self_play_data(
         "vps_to_win": vps_to_win,
         "discard_limit": discard_limit,
         "turns_limit": turns_limit,
+        "value_scale": value_scale,
+        "tree_reuse": tree_reuse,
+        "canonical_pruning": canonical_pruning,
     }
     experiences: list[SelfPlayExperience] = []
     stats: Counter[str] = Counter()

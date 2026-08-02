@@ -8,7 +8,7 @@ from typing import Literal
 
 import numpy as np
 
-from catanrl.envs.cppanatron import NativeGame, NativeMCTSSearch
+from catanrl.envs.cppanatron import NativeGame, NativeMCTSSearch, full_native_features
 from catanrl.players.nn_mcts_player import _NNMCTSInferenceBackend, _visit_distribution
 
 MapType = Literal["BASE", "MINI", "TOURNAMENT"]
@@ -31,6 +31,13 @@ class NativeSearchDiagnostics:
     network_value: float
     search_value: float
     value_shift: float
+    value_scale: float
+    backed_up_network_value: float
+    retained_root_visits: int
+    tree_reused: float
+    pruned_actions: int
+    coalesced_outcomes: int
+    neural_evaluations: int
     elapsed_seconds: float
 
 
@@ -87,26 +94,41 @@ def run_native_search_policy(
     action_temperature: float,
     target_temperature: float | None,
     rng: np.random.Generator,
+    value_scale: float = 1.0,
+    canonical_pruning: bool = False,
+    search: NativeMCTSSearch | None = None,
 ) -> NativeSearchResult:
     """Run one search and report how much it changed the root network prediction."""
     if num_simulations < 1:
         raise ValueError("num_simulations must be at least 1")
+    if not np.isfinite(value_scale) or value_scale < 0.0:
+        raise ValueError("value_scale must be finite and non-negative")
 
     started = time.perf_counter()
-    with NativeMCTSSearch(
-        game,
-        map_type,
-        c_puct=c_puct,
-        seed=search_seed,
-    ) as search:
+    owns_search = search is None
+    if search is None:
+        search = NativeMCTSSearch(
+            game,
+            map_type,
+            c_puct=c_puct,
+            seed=search_seed,
+            canonical_pruning=canonical_pruning,
+        )
+    try:
+        search.reset_metrics()
         full_state, root_player = search.root_observation()
         if root_player != game.current_player:
             raise RuntimeError("Native MCTS root player does not match its source game")
+        source_state = full_native_features(game, map_type, game.current_player)
+        if not np.array_equal(full_state, source_state):
+            raise RuntimeError("Reused native MCTS tree diverged from its source game")
         root_evaluation = inference_backend.evaluate_leaf(
             full_state[actor_indices],
             full_state[critic_indices],
         )
-        search.initialize_root(root_evaluation.policy_logits)
+        neural_evaluations = 1
+        if not search.root_expanded:
+            search.initialize_root(root_evaluation.policy_logits)
         if add_noise and dirichlet_frac > 0.0:
             search.add_root_dirichlet_noise(
                 dirichlet_alpha,
@@ -121,9 +143,16 @@ def run_native_search_policy(
                 full_leaf_state[actor_indices],
                 full_leaf_state[critic_indices],
             )
-            search.evaluate_leaf(evaluation.policy_logits, evaluation.value)
+            neural_evaluations += 1
+            search.evaluate_leaf(
+                evaluation.policy_logits,
+                float(evaluation.value) * value_scale,
+            )
         visits = search.root_visits().astype(np.float64)
         search_metrics = search.metrics()
+    finally:
+        if owns_search:
+            search.close()
 
     valid_indices = np.flatnonzero(game.valid_action_mask())
     if valid_indices.size < 2:
@@ -160,6 +189,13 @@ def run_native_search_policy(
         network_value=network_value,
         search_value=search_value,
         value_shift=search_value - network_value,
+        value_scale=value_scale,
+        backed_up_network_value=float(np.clip(network_value * value_scale, -1.0, 1.0)),
+        retained_root_visits=search_metrics.retained_root_visits,
+        tree_reused=float(search_metrics.tree_reused),
+        pruned_actions=search_metrics.pruned_actions,
+        coalesced_outcomes=search_metrics.coalesced_outcomes,
+        neural_evaluations=neural_evaluations,
         elapsed_seconds=time.perf_counter() - started,
     )
     return NativeSearchResult(

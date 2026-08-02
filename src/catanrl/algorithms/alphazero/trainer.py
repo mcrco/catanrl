@@ -18,7 +18,7 @@ import os
 import random
 from collections import deque
 from dataclasses import dataclass
-from typing import Deque, Literal, Optional
+from typing import Any, Deque, Literal, Optional
 
 import numpy as np
 import torch
@@ -53,6 +53,9 @@ class AlphaZeroConfig:
     # Search teacher.
     simulations: int = 64
     c_puct: float = 1.5
+    value_scale: float = 1.0
+    tree_reuse: bool = False
+    canonical_pruning: bool = False
     prunning: bool = False
     ismcts_determinizations: int = 1
     temperature: float = 1.0
@@ -300,7 +303,7 @@ class AlphaZeroTrainer:
             if self.config.self_play_backend == "cppanatron"
             else generate_self_play_data
         )
-        experiences, stats = self_play_generator(
+        self_play_kwargs: dict[str, Any] = dict(
             policy_model=self.teacher_policy_model,
             critic_model=self.teacher_critic_model,
             model_type=self.config.model_type,
@@ -328,6 +331,13 @@ class AlphaZeroTrainer:
             seed=base_seed,
             device=self.device,
         )
+        if self.config.self_play_backend == "cppanatron":
+            self_play_kwargs.update(
+                value_scale=self.config.value_scale,
+                tree_reuse=self.config.tree_reuse,
+                canonical_pruning=self.config.canonical_pruning,
+            )
+        experiences, stats = self_play_generator(**self_play_kwargs)
         self.replay_buffer.extend(experiences)
         if self.config.offload_inactive_models:
             self._move_teacher(self.cpu_device)

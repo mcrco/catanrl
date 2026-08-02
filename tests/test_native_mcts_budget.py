@@ -3,7 +3,10 @@ from __future__ import annotations
 import pytest
 
 from catanrl.algorithms.alphazero.native_search import NativeSearchDiagnostics
-from catanrl.eval.native_mcts_budget import SearchDiagnosticsAccumulator
+from catanrl.eval.native_mcts_budget import (
+    CriticCalibrationAccumulator,
+    SearchDiagnosticsAccumulator,
+)
 
 
 def _diagnostics(*, depth: int, agreement: float) -> NativeSearchDiagnostics:
@@ -23,6 +26,13 @@ def _diagnostics(*, depth: int, agreement: float) -> NativeSearchDiagnostics:
         network_value=0.1,
         search_value=0.3,
         value_shift=0.2,
+        value_scale=1.0,
+        backed_up_network_value=0.1,
+        retained_root_visits=0,
+        tree_reused=0.0,
+        pruned_actions=0,
+        coalesced_outcomes=0,
+        neural_evaluations=97,
         elapsed_seconds=0.4,
     )
 
@@ -42,3 +52,17 @@ def test_search_diagnostics_accumulator_merges_weighted_summaries():
     assert summary["mean_top1_agreement"] == 0.5
     assert summary["maximum_observed_depth"] == 6.0
     assert summary["simulations_per_second"] == pytest.approx(240.0)
+
+
+def test_critic_calibration_reports_scale_and_affine_fit():
+    calibration = CriticCalibrationAccumulator()
+    calibration.add(0.25, 1.0)
+    calibration.add(-0.25, -1.0)
+
+    summary = calibration.summary()
+
+    assert summary["mse"] == pytest.approx(0.5625)
+    assert summary["correlation"] == pytest.approx(1.0)
+    assert summary["least_squares_scale"] == pytest.approx(4.0)
+    assert summary["affine_scale"] == pytest.approx(4.0)
+    assert summary["affine_bias"] == pytest.approx(0.0)

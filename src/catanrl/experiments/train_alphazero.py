@@ -10,6 +10,7 @@ fixed-opponent gates. Both modes use the same parallel MCTS collector.
 from __future__ import annotations
 
 import argparse
+import math
 import os
 from typing import Any, Iterable, Literal, cast
 
@@ -113,6 +114,24 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         default=8,
     )
     search.add_argument("--c-puct", type=float, default=1.5)
+    search.add_argument(
+        "--value-scale",
+        type=float,
+        default=1.0,
+        help="Multiplier applied to non-terminal critic values backed up by native MCTS.",
+    )
+    search.add_argument(
+        "--tree-reuse",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Reuse native subtrees after deterministic played actions.",
+    )
+    search.add_argument(
+        "--canonical-pruning",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable exact successor and discard-order deduplication in native MCTS.",
+    )
     search.add_argument("--prunning", action="store_true")
     search.add_argument("--temperature", type=float, default=1.0)
     search.add_argument("--final-temperature", type=float, default=0.1)
@@ -217,6 +236,8 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         parser.error("--promotion-threshold must be between 0 and 1")
     if args.max_baseline_regression < 0:
         parser.error("--max-baseline-regression cannot be negative")
+    if not math.isfinite(args.value_scale) or args.value_scale < 0.0:
+        parser.error("--value-scale must be finite and non-negative")
     if args.value_loss_weight is None:
         args.value_loss_weight = 0.0 if args.mode == "distill" else 1.0
     if args.self_play_backend == "cppanatron":
@@ -704,6 +725,9 @@ def main() -> None:
         self_play_backend=args.self_play_backend,
         simulations=args.simulations,
         c_puct=args.c_puct,
+        value_scale=args.value_scale,
+        tree_reuse=args.tree_reuse,
+        canonical_pruning=args.canonical_pruning,
         prunning=args.prunning,
         ismcts_determinizations=args.ismcts_determinizations,
         temperature=args.temperature,

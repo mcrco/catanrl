@@ -15,7 +15,7 @@ from catanrl.algorithms.alphazero.native_search import (
     run_native_search_policy,
 )
 from catanrl.algorithms.alphazero.parallel_self_play import run_inference_server_workers
-from catanrl.envs.cppanatron import NativeGame, full_native_features
+from catanrl.envs.cppanatron import NativeGame, NativeMCTSSearch, full_native_features
 from catanrl.envs.cppanatron.puffer_env import TURNS_LIMIT
 from catanrl.features.catanatron_utils import (
     ActorObservationLevel,
@@ -41,6 +41,13 @@ _MEAN_DIAGNOSTIC_FIELDS = (
     "network_value",
     "search_value",
     "value_shift",
+    "value_scale",
+    "backed_up_network_value",
+    "retained_root_visits",
+    "tree_reused",
+    "pruned_actions",
+    "coalesced_outcomes",
+    "neural_evaluations",
     "elapsed_seconds",
 )
 
@@ -93,13 +100,81 @@ class SearchDiagnosticsAccumulator:
 
 
 @dataclass
+class CriticCalibrationAccumulator:
+    count: int = 0
+    prediction_sum: float = 0.0
+    target_sum: float = 0.0
+    prediction_square_sum: float = 0.0
+    target_square_sum: float = 0.0
+    cross_sum: float = 0.0
+    squared_error_sum: float = 0.0
+    absolute_error_sum: float = 0.0
+
+    def add(self, prediction: float, target: float) -> None:
+        self.count += 1
+        self.prediction_sum += prediction
+        self.target_sum += target
+        self.prediction_square_sum += prediction * prediction
+        self.target_square_sum += target * target
+        self.cross_sum += prediction * target
+        self.squared_error_sum += (prediction - target) ** 2
+        self.absolute_error_sum += abs(prediction - target)
+
+    def merge(self, payload: dict[str, Any]) -> None:
+        self.count += int(payload.get("count", 0))
+        for name in (
+            "prediction_sum",
+            "target_sum",
+            "prediction_square_sum",
+            "target_square_sum",
+            "cross_sum",
+            "squared_error_sum",
+            "absolute_error_sum",
+        ):
+            setattr(self, name, getattr(self, name) + float(payload.get(name, 0.0)))
+
+    def payload(self) -> dict[str, float | int]:
+        return asdict(self)
+
+    def summary(self) -> dict[str, float]:
+        if self.count == 0:
+            return {"samples": 0.0}
+        count = float(self.count)
+        prediction_mean = self.prediction_sum / count
+        target_mean = self.target_sum / count
+        prediction_variance = max(0.0, self.prediction_square_sum / count - prediction_mean**2)
+        target_variance = max(0.0, self.target_square_sum / count - target_mean**2)
+        covariance = self.cross_sum / count - prediction_mean * target_mean
+        denominator = np.sqrt(prediction_variance * target_variance)
+        least_squares_scale = (
+            self.cross_sum / self.prediction_square_sum if self.prediction_square_sum > 0.0 else 0.0
+        )
+        affine_scale = covariance / prediction_variance if prediction_variance > 0.0 else 0.0
+        return {
+            "samples": count,
+            "mse": self.squared_error_sum / count,
+            "mae": self.absolute_error_sum / count,
+            "bias": prediction_mean - target_mean,
+            "mean_prediction": prediction_mean,
+            "std_prediction": float(np.sqrt(prediction_variance)),
+            "mean_target": target_mean,
+            "correlation": covariance / denominator if denominator > 0.0 else 0.0,
+            "least_squares_scale": least_squares_scale,
+            "affine_scale": affine_scale,
+            "affine_bias": target_mean - affine_scale * prediction_mean,
+        }
+
+
+@dataclass
 class NativeBudgetGameResult:
     game_records: list[dict[str, Any]] = field(default_factory=list)
     diagnostics: SearchDiagnosticsAccumulator = field(default_factory=SearchDiagnosticsAccumulator)
+    calibration: CriticCalibrationAccumulator = field(default_factory=CriticCalibrationAccumulator)
 
     def merge(self, payload: dict[str, Any]) -> None:
         self.game_records.extend(dict(record) for record in payload.get("game_records", []))
         self.diagnostics.merge(payload.get("diagnostics", {}))
+        self.calibration.merge(payload.get("calibration", {}))
 
     def summary(self) -> dict[str, float]:
         games = len(self.game_records)
@@ -129,6 +204,7 @@ class NativeBudgetGameResult:
             ),
         }
         result.update({f"search/{key}": value for key, value in self.diagnostics.summary().items()})
+        result.update({f"critic/{key}": value for key, value in self.calibration.summary().items()})
         return result
 
 
@@ -197,6 +273,7 @@ def _search(
     actor_indices: np.ndarray,
     critic_indices: np.ndarray,
     inference_backend: _RemoteNNMCTSInferenceBackend,
+    search: NativeMCTSSearch | None = None,
 ):
     return run_native_search_policy(
         game=game,
@@ -215,6 +292,9 @@ def _search(
         rng=np.random.default_rng(
             derive_seed(episode_seed, "native_budget_action", decision_index)
         ),
+        value_scale=float(args_dict.get("value_scale", 1.0)),
+        canonical_pruning=bool(args_dict.get("canonical_pruning", False)),
+        search=search,
     )
 
 
@@ -227,9 +307,15 @@ def _play_budget_game(
     actor_indices: np.ndarray,
     critic_indices: np.ndarray,
     inference_backend: _RemoteNNMCTSInferenceBackend,
-) -> tuple[dict[str, Any], SearchDiagnosticsAccumulator]:
+) -> tuple[
+    dict[str, Any],
+    SearchDiagnosticsAccumulator,
+    CriticCalibrationAccumulator,
+]:
     map_seed, game_seed = derive_map_and_game_seeds(episode_seed)
     diagnostics = SearchDiagnosticsAccumulator()
+    calibration_rows: list[tuple[float, int]] = []
+    calibration = CriticCalibrationAccumulator()
     game = NativeGame(
         2,
         args_dict["map_type"],
@@ -240,6 +326,7 @@ def _play_budget_game(
         vps_to_win=int(args_dict["vps_to_win"]),
     )
     decision_index = 0
+    search: NativeMCTSSearch | None = None
     try:
         while game.winner is None and game.num_turns < int(args_dict["turns_limit"]):
             valid_indices = np.flatnonzero(game.valid_action_mask())
@@ -248,6 +335,18 @@ def _play_budget_game(
             if valid_indices.size == 1:
                 action = int(valid_indices[0])
             elif game.current_player == mcts_seat:
+                if search is None and bool(args_dict.get("tree_reuse", False)):
+                    search = NativeMCTSSearch(
+                        game,
+                        args_dict["map_type"],
+                        c_puct=float(args_dict["c_puct"]),
+                        seed=derive_seed(
+                            episode_seed,
+                            "native_budget_search",
+                            decision_index,
+                        ),
+                        canonical_pruning=bool(args_dict.get("canonical_pruning", False)),
+                    )
                 search_result = _search(
                     game=game,
                     budget=budget,
@@ -257,8 +356,12 @@ def _play_budget_game(
                     actor_indices=actor_indices,
                     critic_indices=critic_indices,
                     inference_backend=inference_backend,
+                    search=search,
                 )
                 diagnostics.add(search_result.diagnostics)
+                calibration_rows.append(
+                    (search_result.diagnostics.network_value, game.current_player)
+                )
                 action = search_result.action
             else:
                 action = _raw_policy_action(
@@ -268,10 +371,16 @@ def _play_budget_game(
                     critic_indices,
                     inference_backend,
                 )
+            if search is not None and not search.advance(action):
+                search.close()
+                search = None
             game.step(action)
             decision_index += 1
 
         winner = game.winner
+        for prediction, player in calibration_rows:
+            target = 0.0 if winner is None else (1.0 if winner == player else -1.0)
+            calibration.add(prediction, target)
         mcts_vps = game.player_state(mcts_seat).actual_victory_points
         return (
             {
@@ -289,8 +398,11 @@ def _play_budget_game(
                 "actions": decision_index,
             },
             diagnostics,
+            calibration,
         )
     finally:
+        if search is not None:
+            search.close()
         game.close()
 
 
@@ -312,7 +424,7 @@ def _game_worker_main(
         actor_indices, critic_indices = _indices(args_dict)
         result = NativeBudgetGameResult()
         for mcts_seat, episode_seed in scenarios:
-            record, diagnostics = _play_budget_game(
+            record, diagnostics, calibration = _play_budget_game(
                 episode_seed=episode_seed,
                 mcts_seat=mcts_seat,
                 budget=budget,
@@ -323,6 +435,7 @@ def _game_worker_main(
             )
             result.game_records.append(record)
             result.diagnostics.merge(diagnostics.payload())
+            result.calibration.merge(calibration.payload())
         result_queue.put(
             {
                 "worker_id": worker_id,
@@ -330,6 +443,7 @@ def _game_worker_main(
                 "result": {
                     "game_records": result.game_records,
                     "diagnostics": result.diagnostics.payload(),
+                    "calibration": result.calibration.payload(),
                 },
             }
         )
@@ -442,6 +556,9 @@ def _common_args(
     discard_limit: int,
     turns_limit: int,
     probe_stride: int = 1,
+    value_scale: float = 1.0,
+    tree_reuse: bool = False,
+    canonical_pruning: bool = False,
 ) -> dict[str, Any]:
     return {
         "map_type": map_type,
@@ -452,6 +569,9 @@ def _common_args(
         "discard_limit": discard_limit,
         "turns_limit": turns_limit,
         "probe_stride": probe_stride,
+        "value_scale": value_scale,
+        "tree_reuse": tree_reuse,
+        "canonical_pruning": canonical_pruning,
     }
 
 
@@ -475,6 +595,9 @@ def run_native_budget_games(
     device: str | torch.device,
     turns_limit: int = TURNS_LIMIT,
     show_tqdm: bool = True,
+    value_scale: float = 1.0,
+    tree_reuse: bool = False,
+    canonical_pruning: bool = False,
 ) -> NativeBudgetGameResult:
     if budget < 1:
         raise ValueError("budget must be at least 1")
@@ -494,6 +617,9 @@ def run_native_budget_games(
         vps_to_win=vps_to_win,
         discard_limit=discard_limit,
         turns_limit=turns_limit,
+        value_scale=value_scale,
+        tree_reuse=tree_reuse,
+        canonical_pruning=canonical_pruning,
     )
     aggregate = NativeBudgetGameResult()
 
@@ -545,6 +671,8 @@ def run_native_budget_position_probes(
     device: str | torch.device,
     turns_limit: int = TURNS_LIMIT,
     show_tqdm: bool = True,
+    value_scale: float = 1.0,
+    canonical_pruning: bool = False,
 ) -> NativeBudgetProbeResult:
     if not budgets or any(int(budget) < 1 for budget in budgets):
         raise ValueError("budgets must contain positive simulation counts")
@@ -566,6 +694,8 @@ def run_native_budget_position_probes(
         discard_limit=discard_limit,
         turns_limit=turns_limit,
         probe_stride=probe_stride,
+        value_scale=value_scale,
+        canonical_pruning=canonical_pruning,
     )
     aggregate = NativeBudgetProbeResult()
 
@@ -594,6 +724,7 @@ def run_native_budget_position_probes(
 __all__ = [
     "NativeBudgetGameResult",
     "NativeBudgetProbeResult",
+    "CriticCalibrationAccumulator",
     "SearchDiagnosticsAccumulator",
     "run_native_budget_games",
     "run_native_budget_position_probes",

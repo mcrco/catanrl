@@ -19,6 +19,10 @@ class _SearchMetrics(ctypes.Structure):
         ("maximum_depth", ctypes.c_uint32),
         ("mean_depth", ctypes.c_double),
         ("root_value", ctypes.c_double),
+        ("retained_root_visits", ctypes.c_uint32),
+        ("pruned_actions", ctypes.c_uint64),
+        ("coalesced_outcomes", ctypes.c_uint64),
+        ("tree_reused", ctypes.c_int32),
     ]
 
 
@@ -29,6 +33,10 @@ class NativeMCTSSearchMetrics:
     maximum_depth: int
     mean_depth: float
     root_value: float
+    retained_root_visits: int
+    pruned_actions: int
+    coalesced_outcomes: int
+    tree_reused: bool
 
 
 class NativeMCTSSearch:
@@ -47,6 +55,7 @@ class NativeMCTSSearch:
         *,
         c_puct: float = 1.5,
         seed: int = 0,
+        canonical_pruning: bool = False,
     ) -> None:
         self._handle = None
         self._library = _load_library()
@@ -66,6 +75,7 @@ class NativeMCTSSearch:
             game._handle,
             float(c_puct),
             int(seed),
+            int(canonical_pruning),
             WIDTH,
             HEIGHT,
             nodes,
@@ -86,6 +96,7 @@ class NativeMCTSSearch:
             handle,
             ctypes.c_double,
             ctypes.c_uint64,
+            ctypes.c_int32,
             ctypes.c_int32,
             ctypes.c_int32,
             ctypes.c_void_p,
@@ -135,6 +146,11 @@ class NativeMCTSSearch:
             handle,
             ctypes.POINTER(_SearchMetrics),
         ]
+        library.cppanatron_search_root_expanded.argtypes = [handle]
+        library.cppanatron_search_root_expanded.restype = ctypes.c_int32
+        library.cppanatron_search_reset_metrics.argtypes = [handle]
+        library.cppanatron_search_advance.argtypes = [handle, ctypes.c_size_t]
+        library.cppanatron_search_advance.restype = ctypes.c_int32
 
     def _raise_last_error(self) -> None:
         message = self._library.cppanatron_last_error()
@@ -221,6 +237,24 @@ class NativeMCTSSearch:
         )
         return visits
 
+    @property
+    def root_expanded(self) -> bool:
+        result = int(self._library.cppanatron_search_root_expanded(self._handle))
+        if result < 0:
+            self._raise_last_error()
+        return bool(result)
+
+    def reset_metrics(self) -> None:
+        self._check_result(self._library.cppanatron_search_reset_metrics(self._handle))
+
+    def advance(self, action: int) -> bool:
+        if not 0 <= action < self.action_space_size:
+            raise ValueError(f"Action index {action} is outside the flat action space")
+        result = int(self._library.cppanatron_search_advance(self._handle, action))
+        if result < 0:
+            self._raise_last_error()
+        return bool(result)
+
     def metrics(self) -> NativeMCTSSearchMetrics:
         metrics = _SearchMetrics()
         self._check_result(
@@ -235,6 +269,10 @@ class NativeMCTSSearch:
             maximum_depth=int(metrics.maximum_depth),
             mean_depth=float(metrics.mean_depth),
             root_value=float(metrics.root_value),
+            retained_root_visits=int(metrics.retained_root_visits),
+            pruned_actions=int(metrics.pruned_actions),
+            coalesced_outcomes=int(metrics.coalesced_outcomes),
+            tree_reused=bool(metrics.tree_reused),
         )
 
     def close(self) -> None:
