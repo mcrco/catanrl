@@ -217,6 +217,18 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     optimization.add_argument("--weight-decay", type=float, default=0.0)
     optimization.add_argument("--policy-loss-weight", type=float, default=1.0)
     optimization.add_argument(
+        "--soft-policy-temperature",
+        type=float,
+        default=0.0,
+        help="Temperature for a fresh auxiliary softened-search-policy head (0 disables).",
+    )
+    optimization.add_argument(
+        "--soft-policy-weight",
+        type=float,
+        default=0.0,
+        help="Loss weight for the auxiliary soft policy head.",
+    )
+    optimization.add_argument(
         "--value-loss-weight",
         type=float,
         default=None,
@@ -297,6 +309,14 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         parser.error("--promotion-threshold must be between 0 and 1")
     if args.max_baseline_regression < 0:
         parser.error("--max-baseline-regression cannot be negative")
+    if not math.isfinite(args.soft_policy_weight) or args.soft_policy_weight < 0.0:
+        parser.error("--soft-policy-weight must be finite and non-negative")
+    if (
+        not math.isfinite(args.soft_policy_temperature)
+        or args.soft_policy_temperature < 0.0
+        or (args.soft_policy_weight > 0.0 and args.soft_policy_temperature <= 0.0)
+    ):
+        parser.error("An enabled soft policy head requires a positive finite temperature")
     if not math.isfinite(args.value_scale) or args.value_scale < 0.0:
         parser.error("--value-scale must be finite and non-negative")
     if not 0.0 < args.full_search_probability <= 1.0:
@@ -847,6 +867,8 @@ def main() -> None:
         weight_decay=args.weight_decay,
         policy_loss_weight=args.policy_loss_weight,
         value_loss_weight=args.value_loss_weight,
+        soft_policy_temperature=args.soft_policy_temperature,
+        soft_policy_weight=args.soft_policy_weight,
         max_grad_norm=args.max_grad_norm,
         offload_inactive_models=args.offload_inactive_models,
         device=device,

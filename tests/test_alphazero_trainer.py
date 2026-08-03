@@ -59,7 +59,12 @@ def _trainer(
     )
 
 
-def _shared_trainer(*, categorical_value: bool = False) -> AlphaZeroTrainer:
+def _shared_trainer(
+    *,
+    categorical_value: bool = False,
+    soft_policy_temperature: float = 0.0,
+    soft_policy_weight: float = 0.0,
+) -> AlphaZeroTrainer:
     torch.manual_seed(0)
     student = PolicyValueNetworkWrapper(
         nn.Linear(3, 3),
@@ -76,6 +81,8 @@ def _shared_trainer(*, categorical_value: bool = False) -> AlphaZeroTrainer:
         policy_lr=0.1,
         critic_lr=99.0,
         value_loss_weight=1.0,
+        soft_policy_temperature=soft_policy_temperature,
+        soft_policy_weight=soft_policy_weight,
         device="cpu",
         seed=7,
     )
@@ -209,6 +216,39 @@ def test_wdl_shared_value_head_trains_categorically_but_infers_scalar_q() -> Non
     assert values.shape == (2,)
     assert torch.all(values >= -1.0)
     assert torch.all(values <= 1.0)
+
+
+def test_auxiliary_soft_policy_head_is_fresh_masked_and_persisted() -> None:
+    trainer = _shared_trainer(
+        categorical_value=True,
+        soft_policy_temperature=4.0,
+        soft_policy_weight=8.0,
+    )
+    assert trainer.student_soft_policy_head is not None
+    assert trainer.teacher_soft_policy_head is not None
+    trainer.replay_buffer.extend(
+        [
+            _experience(0, 1.0, legal_actions=(0, 1)),
+            _experience(1, -1.0, legal_actions=(0, 1)),
+        ]
+    )
+    soft_before = _parameters(trainer.student_soft_policy_head)
+
+    metrics = trainer.update_weights()
+
+    assert metrics is not None
+    assert metrics["soft_policy_loss"] > 0.0
+    assert any(
+        not torch.equal(before, after)
+        for before, after in zip(soft_before, trainer.student_soft_policy_head.parameters())
+    )
+    state = trainer.state_dict()
+    assert state["student_soft_policy_head"] is not None
+    trainer.promote_student()
+    assert _same_parameters(
+        trainer.student_soft_policy_head,
+        trainer.teacher_soft_policy_head,
+    )
 
 
 def test_distillation_loss_masks_illegal_action_logits() -> None:
@@ -436,6 +476,8 @@ def test_cli_mode_defaults_freeze_value_only_for_distillation() -> None:
 
     assert distill.value_loss_weight == 0.0
     assert iterate.value_loss_weight == 1.0
+    assert iterate.soft_policy_temperature == 0.0
+    assert iterate.soft_policy_weight == 0.0
 
 
 def test_cli_replay_epochs_override_is_opt_in() -> None:
@@ -493,9 +535,15 @@ def test_cli_completed_q_policy_target_requires_native_search() -> None:
             "50",
             "--c-scale",
             "1",
+            "--soft-policy-temperature",
+            "4",
+            "--soft-policy-weight",
+            "8",
         ]
     )
     assert args.policy_target == "completed-q"
+    assert args.soft_policy_temperature == 4.0
+    assert args.soft_policy_weight == 8.0
 
     with pytest.raises(SystemExit):
         parse_args(

@@ -26,11 +26,8 @@ import torch
 import torch.nn.functional as F
 
 from ...features.catanatron_utils import ActorObservationLevel, COLOR_ORDER, CriticObservationLevel
-from ...models.inference_utils import (
-    forward_policy_value,
-    forward_shared_policy_value_training,
-    values_to_wdl_targets,
-)
+from ...models.inference_utils import values_to_wdl_targets
+from ...models.heads import FlatPolicyHead, HierarchicalPolicyHead, WDLValueHead
 from ...models.wrappers import PolicyNetworkWrapper, PolicyValueNetworkWrapper, ValueNetworkWrapper
 from .native_self_play import generate_native_self_play_data
 from .native_search import PolicyTarget
@@ -90,6 +87,8 @@ class AlphaZeroConfig:
     weight_decay: float = 0.0
     policy_loss_weight: float = 1.0
     value_loss_weight: float = 0.0
+    soft_policy_temperature: float = 0.0
+    soft_policy_weight: float = 0.0
     max_grad_norm: float = 1.0
 
     # Keeping only the active pair on the accelerator substantially reduces
@@ -99,16 +98,36 @@ class AlphaZeroConfig:
     seed: Optional[int] = 42
 
 
-def _flat_policy_logits(model: PolicyModel, states: torch.Tensor, model_type: str) -> torch.Tensor:
-    if isinstance(model, PolicyValueNetworkWrapper):
-        logits, _ = forward_policy_value(model, None, states, model_type)
-        return logits
+def _policy_logits_and_features(
+    model: PolicyModel,
+    states: torch.Tensor,
+    model_type: str,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    features = model.backbone(states)
+    policy_outputs = model.policy_head(features)
     if model_type == "flat":
-        return model(states)
+        if not isinstance(policy_outputs, torch.Tensor):
+            raise TypeError("Flat policy head returned hierarchical outputs.")
+        return policy_outputs, features
     if model_type == "hierarchical":
-        action_type_logits, param_logits = model(states)
-        return model.get_flat_action_logits(action_type_logits, param_logits)
+        if not isinstance(policy_outputs, tuple):
+            raise TypeError("Hierarchical policy head returned flat outputs.")
+        return model.get_flat_action_logits(*policy_outputs), features
     raise ValueError(f"Unknown model_type '{model_type}'")
+
+
+def _policy_feature_dim(model: PolicyModel) -> int:
+    if isinstance(model.policy_head, FlatPolicyHead):
+        return int(model.policy_head.policy_head.in_features)
+    if isinstance(model.policy_head, HierarchicalPolicyHead):
+        return int(model.policy_head.action_type_head.in_features)
+    raise TypeError(f"Unsupported policy head for soft-policy training: {type(model.policy_head)}")
+
+
+def _policy_action_dim(model: PolicyModel) -> int:
+    if isinstance(model.policy_head, FlatPolicyHead):
+        return int(model.policy_head.policy_head.out_features)
+    return int(model.action_space_size)
 
 
 def _move_optimizer_state(optimizer: torch.optim.Optimizer | None, device: torch.device) -> None:
@@ -150,6 +169,17 @@ class AlphaZeroTrainer:
             raise ValueError("policy_loss_weight must be positive.")
         if config.value_loss_weight < 0:
             raise ValueError("value_loss_weight cannot be negative.")
+        if (
+            not np.isfinite(config.soft_policy_weight)
+            or config.soft_policy_weight < 0.0
+            or not np.isfinite(config.soft_policy_temperature)
+            or config.soft_policy_temperature < 0.0
+            or (config.soft_policy_weight > 0.0 and config.soft_policy_temperature <= 0.0)
+        ):
+            raise ValueError(
+                "soft_policy_weight must be non-negative and an enabled soft policy "
+                "requires a positive finite temperature."
+            )
         if not 0.0 < config.full_search_probability <= 1.0:
             raise ValueError("full_search_probability must be in (0, 1].")
         if config.fast_simulations < 1 or (
@@ -191,6 +221,23 @@ class AlphaZeroTrainer:
         elif student_critic_model is None or teacher_critic_model is None:
             raise ValueError("Separate-network training requires student and teacher critics.")
 
+        self.student_soft_policy_head: FlatPolicyHead | None = None
+        self.teacher_soft_policy_head: FlatPolicyHead | None = None
+        if config.soft_policy_weight > 0.0:
+            feature_dim = _policy_feature_dim(student_policy_model)
+            action_dim = _policy_action_dim(student_policy_model)
+            self.student_soft_policy_head = FlatPolicyHead(
+                feature_dim,
+                action_dim,
+            )
+            self.teacher_soft_policy_head = FlatPolicyHead(
+                feature_dim,
+                action_dim,
+            )
+            self.teacher_soft_policy_head.load_state_dict(
+                self.student_soft_policy_head.state_dict()
+            )
+
         self.replay_buffer: Deque[SelfPlayExperience] = deque(maxlen=config.buffer_size)
         self._self_play_calls = 0
         # Optimizers must be constructed after the first device placement so
@@ -215,9 +262,12 @@ class AlphaZeroTrainer:
         return self.student_critic_model
 
     def _build_optimizers(self) -> None:
+        policy_parameters = list(self.student_policy_model.parameters())
+        if self.student_soft_policy_head is not None:
+            policy_parameters.extend(self.student_soft_policy_head.parameters())
         if self.uses_shared_network:
             self.policy_optimizer = torch.optim.Adam(
-                self.student_policy_model.parameters(),
+                policy_parameters,
                 lr=self.config.policy_lr,
                 weight_decay=self.config.weight_decay,
             )
@@ -225,7 +275,7 @@ class AlphaZeroTrainer:
             return
 
         self.policy_optimizer = torch.optim.Adam(
-            self.student_policy_model.parameters(),
+            policy_parameters,
             lr=self.config.policy_lr,
             weight_decay=self.config.weight_decay,
         )
@@ -245,6 +295,11 @@ class AlphaZeroTrainer:
         self._activate_student()
 
     def _move_student(self, device: torch.device) -> None:
+        soft_parameters = (
+            list(self.student_soft_policy_head.parameters())
+            if self.student_soft_policy_head is not None
+            else []
+        )
         parameter_ids = tuple(
             id(parameter)
             for parameter in (
@@ -254,11 +309,14 @@ class AlphaZeroTrainer:
                     if self.student_critic_model is not None
                     else []
                 )
+                + soft_parameters
             )
         )
         self.student_policy_model.to(device)
         if self.student_critic_model is not None:
             self.student_critic_model.to(device)
+        if self.student_soft_policy_head is not None:
+            self.student_soft_policy_head.to(device)
         moved_parameter_ids = tuple(
             id(parameter)
             for parameter in (
@@ -266,6 +324,11 @@ class AlphaZeroTrainer:
                 + (
                     list(self.student_critic_model.parameters())
                     if self.student_critic_model is not None
+                    else []
+                )
+                + (
+                    list(self.student_soft_policy_head.parameters())
+                    if self.student_soft_policy_head is not None
                     else []
                 )
             )
@@ -282,12 +345,16 @@ class AlphaZeroTrainer:
         self.teacher_policy_model.to(device)
         if self.teacher_critic_model is not None:
             self.teacher_critic_model.to(device)
+        if self.teacher_soft_policy_head is not None:
+            self.teacher_soft_policy_head.to(device)
 
     def _activate_student(self) -> None:
         self._move_student(self.device)
         self.student_policy_model.train()
         if self.student_critic_model is not None:
             self.student_critic_model.train(self.config.value_loss_weight > 0)
+        if self.student_soft_policy_head is not None:
+            self.student_soft_policy_head.train()
 
     def _activate_teacher(self) -> None:
         if self.config.offload_inactive_models:
@@ -296,12 +363,16 @@ class AlphaZeroTrainer:
         self.teacher_policy_model.eval()
         if self.teacher_critic_model is not None:
             self.teacher_critic_model.eval()
+        if self.teacher_soft_policy_head is not None:
+            self.teacher_soft_policy_head.eval()
 
     def prepare_student_evaluation(self) -> tuple[PolicyModel, CriticModel]:
         self._activate_student()
         self.student_policy_model.eval()
         if self.student_critic_model is not None:
             self.student_critic_model.eval()
+        if self.student_soft_policy_head is not None:
+            self.student_soft_policy_head.eval()
         if self.config.offload_inactive_models:
             self._move_teacher(self.cpu_device)
         return self.student_policy_model, self.student_critic_model
@@ -317,6 +388,8 @@ class AlphaZeroTrainer:
         self.teacher_policy_model.eval()
         if self.teacher_critic_model is not None:
             self.teacher_critic_model.eval()
+        if self.teacher_soft_policy_head is not None:
+            self.teacher_soft_policy_head.eval()
         return self.teacher_policy_model, self.teacher_critic_model
 
     # ------------------------------------------------------------------
@@ -457,21 +530,21 @@ class AlphaZeroTrainer:
 
         values: torch.Tensor | None = None
         value_logits: torch.Tensor | None = None
+        logits, policy_features = _policy_logits_and_features(
+            self.student_policy_model,
+            actor_states,
+            self.config.model_type,
+        )
         if self.uses_shared_network:
             assert isinstance(self.student_policy_model, PolicyValueNetworkWrapper)
-            logits, shared_values, value_logits = forward_shared_policy_value_training(
-                self.student_policy_model,
-                actor_states,
-                self.config.model_type,
-            )
+            if isinstance(self.student_policy_model.value_head, WDLValueHead):
+                value_logits = self.student_policy_model.value_head.logits(policy_features)
+                shared_values = WDLValueHead.values_from_logits(value_logits).view(-1)
+            else:
+                shared_values = self.student_policy_model.value_head(policy_features).view(-1)
             if self.config.value_loss_weight > 0:
                 values = shared_values
         else:
-            logits = _flat_policy_logits(
-                self.student_policy_model,
-                actor_states,
-                self.config.model_type,
-            )
             if self.config.value_loss_weight > 0:
                 assert self.student_critic_model is not None
                 assert critic_states is not None
@@ -486,6 +559,25 @@ class AlphaZeroTrainer:
         ).sum(dim=1)
         policy_weight_sum = policy_weights.sum().clamp_min(1.0)
         policy_loss = (per_sample_policy_loss * policy_weights).sum() / policy_weight_sum
+        soft_policy_loss = torch.zeros((), device=self.device)
+        if self.student_soft_policy_head is not None:
+            soft_targets = torch.where(
+                action_masks,
+                policy_targets.clamp_min(1e-8).pow(1.0 / self.config.soft_policy_temperature),
+                torch.zeros_like(policy_targets),
+            )
+            soft_targets /= soft_targets.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+            soft_logits = self.student_soft_policy_head(policy_features).masked_fill(
+                ~action_masks,
+                float("-inf"),
+            )
+            soft_log_probs = torch.log_softmax(soft_logits, dim=-1)
+            per_sample_soft_loss = -torch.where(
+                action_masks,
+                soft_targets * soft_log_probs,
+                torch.zeros_like(soft_log_probs),
+            ).sum(dim=1)
+            soft_policy_loss = (per_sample_soft_loss * policy_weights).sum() / policy_weight_sum
         if value_logits is not None and value_targets is not None:
             value_distribution_targets = values_to_wdl_targets(value_targets)
             value_loss = -(
@@ -498,11 +590,15 @@ class AlphaZeroTrainer:
         loss = (
             self.config.policy_loss_weight * policy_loss
             + self.config.value_loss_weight * value_loss
+            + self.config.soft_policy_weight * soft_policy_loss
         )
         loss.backward()
 
+        policy_parameters = list(self.student_policy_model.parameters())
+        if self.student_soft_policy_head is not None:
+            policy_parameters.extend(self.student_soft_policy_head.parameters())
         policy_grad_norm = torch.nn.utils.clip_grad_norm_(
-            self.student_policy_model.parameters(), self.config.max_grad_norm
+            policy_parameters, self.config.max_grad_norm
         )
         critic_grad_norm = torch.zeros((), device=self.device)
         if self.critic_optimizer is not None and self.student_critic_model is not None:
@@ -536,6 +632,7 @@ class AlphaZeroTrainer:
             "loss": float(loss.item()),
             "policy_loss": float(policy_loss.item()),
             "value_loss": float(value_loss.item()),
+            "soft_policy_loss": float(soft_policy_loss.item()),
             "target_entropy": float(target_entropy.item()),
             "prediction_entropy": float(prediction_entropy.item()),
             "top1_agreement": float(top1_agreement.item()),
@@ -554,6 +651,10 @@ class AlphaZeroTrainer:
         self.teacher_policy_model.load_state_dict(self.student_policy_model.state_dict())
         if self.teacher_critic_model is not None and self.student_critic_model is not None:
             self.teacher_critic_model.load_state_dict(self.student_critic_model.state_dict())
+        if self.teacher_soft_policy_head is not None and self.student_soft_policy_head is not None:
+            self.teacher_soft_policy_head.load_state_dict(
+                self.student_soft_policy_head.state_dict()
+            )
         if self.config.offload_inactive_models:
             self._move_teacher(self.cpu_device)
 
@@ -562,6 +663,10 @@ class AlphaZeroTrainer:
         self.student_policy_model.load_state_dict(self.teacher_policy_model.state_dict())
         if self.student_critic_model is not None and self.teacher_critic_model is not None:
             self.student_critic_model.load_state_dict(self.teacher_critic_model.state_dict())
+        if self.student_soft_policy_head is not None and self.teacher_soft_policy_head is not None:
+            self.student_soft_policy_head.load_state_dict(
+                self.teacher_soft_policy_head.state_dict()
+            )
         self.reset_optimizers()
 
     # ------------------------------------------------------------------
@@ -587,6 +692,8 @@ class AlphaZeroTrainer:
             "student_critic_model": _cpu_state_dict(self.student_critic_model),
             "teacher_policy_model": _cpu_state_dict(self.teacher_policy_model),
             "teacher_critic_model": _cpu_state_dict(self.teacher_critic_model),
+            "student_soft_policy_head": _cpu_state_dict(self.student_soft_policy_head),
+            "teacher_soft_policy_head": _cpu_state_dict(self.teacher_soft_policy_head),
             "policy_optimizer": self.policy_optimizer.state_dict(),
             "critic_optimizer": (
                 self.critic_optimizer.state_dict() if self.critic_optimizer is not None else None
@@ -604,6 +711,10 @@ class AlphaZeroTrainer:
         self.teacher_policy_model.load_state_dict(state["teacher_policy_model"])
         if self.teacher_critic_model is not None and state.get("teacher_critic_model") is not None:
             self.teacher_critic_model.load_state_dict(state["teacher_critic_model"])
+        if self.student_soft_policy_head is not None and state.get("student_soft_policy_head"):
+            self.student_soft_policy_head.load_state_dict(state["student_soft_policy_head"])
+        if self.teacher_soft_policy_head is not None and state.get("teacher_soft_policy_head"):
+            self.teacher_soft_policy_head.load_state_dict(state["teacher_soft_policy_head"])
         if state.get("policy_optimizer") is not None:
             self.policy_optimizer.load_state_dict(state["policy_optimizer"])
         if self.critic_optimizer is not None and state.get("critic_optimizer") is not None:
