@@ -13,7 +13,11 @@ from torch import nn
 from catanrl.algorithms.alphazero.parallel_self_play import SelfPlayExperience
 from catanrl.algorithms.alphazero.trainer import AlphaZeroConfig, AlphaZeroTrainer
 from catanrl.eval.search_training import decide_promotion
-from catanrl.experiments.train_alphazero import _load_initial_weights, parse_args
+from catanrl.experiments.train_alphazero import (
+    _load_initial_weights,
+    _update_search_teacher,
+    parse_args,
+)
 from catanrl.models.heads import FlatPolicyHead, ValueHead, WDLValueHead
 from catanrl.models.wrappers import (
     PolicyNetworkWrapper,
@@ -561,6 +565,61 @@ def test_reset_loaded_value_head_requires_new_warm_start() -> None:
                 "--reset-loaded-value-head",
             ]
         )
+
+
+def test_latest_teacher_update_promotes_without_waiting_for_evaluation() -> None:
+    trainer = _trainer()
+    with torch.no_grad():
+        for parameter in trainer.student_policy_model.parameters():
+            parameter.add_(1.0)
+    assert not _same_parameters(
+        trainer.student_policy_model,
+        trainer.teacher_policy_model,
+    )
+
+    accepted, score, reason = _update_search_teacher(
+        trainer=trainer,
+        strategy="latest",
+        candidate_win_rate=None,
+        h2h_win_rate=None,
+        champion_eval_score=0.2,
+        promotion_threshold=0.52,
+        max_baseline_regression=0.02,
+    )
+
+    assert accepted is True
+    assert score == 0.2
+    assert reason is not None
+    assert _same_parameters(
+        trainer.student_policy_model,
+        trainer.teacher_policy_model,
+    )
+
+
+def test_gated_teacher_update_waits_for_evaluation() -> None:
+    trainer = _trainer()
+    with torch.no_grad():
+        for parameter in trainer.student_policy_model.parameters():
+            parameter.add_(1.0)
+    teacher_before = _parameters(trainer.teacher_policy_model)
+
+    accepted, score, reason = _update_search_teacher(
+        trainer=trainer,
+        strategy="gated",
+        candidate_win_rate=None,
+        h2h_win_rate=None,
+        champion_eval_score=0.2,
+        promotion_threshold=0.52,
+        max_baseline_regression=0.02,
+    )
+
+    assert accepted is None
+    assert score == 0.2
+    assert reason is None
+    assert all(
+        torch.equal(before, after)
+        for before, after in zip(teacher_before, trainer.teacher_policy_model.parameters())
+    )
 
 
 def test_cli_native_self_play_requires_plain_mcts() -> None:

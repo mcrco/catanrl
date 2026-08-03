@@ -87,6 +87,15 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         default="distill",
         help="Frozen teacher distillation or candidate/champion Expert Iteration.",
     )
+    parser.add_argument(
+        "--teacher-update",
+        choices=("gated", "latest"),
+        default="gated",
+        help=(
+            "For iterate mode, either gate teacher promotions at evaluation points "
+            "or use the newly trained student for the next self-play iteration."
+        ),
+    )
     parser.add_argument("--iterations", type=int, default=8)
     parser.add_argument("--games-per-iteration", type=int, default=64)
     parser.add_argument("--optimizer-steps", type=int, default=128)
@@ -326,6 +335,8 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         parser.error("--buffer-size must be at least --batch-size")
     if args.mode == "distill" and not args.load_from_experiment:
         parser.error("--mode distill requires --load-from-experiment as the frozen teacher")
+    if args.mode != "iterate" and args.teacher_update != "gated":
+        parser.error("--teacher-update latest requires --mode iterate")
     if args.reset_loaded_value_head and not args.load_from_experiment:
         parser.error("--reset-loaded-value-head requires --load-from-experiment")
     if args.reset_loaded_value_head and args.resume:
@@ -675,6 +686,44 @@ def _print_eval(label: str, result: PolicyEvalResult) -> None:
     )
 
 
+def _update_search_teacher(
+    *,
+    trainer: AlphaZeroTrainer,
+    strategy: str,
+    candidate_win_rate: float | None,
+    h2h_win_rate: float | None,
+    champion_eval_score: float,
+    promotion_threshold: float,
+    max_baseline_regression: float,
+) -> tuple[bool | None, float, str | None]:
+    """Update the self-play teacher, returning acceptance, score, and reason."""
+    if strategy == "latest":
+        trainer.promote_student()
+        score = (
+            champion_eval_score
+            if candidate_win_rate is None
+            else candidate_win_rate
+        )
+        return True, score, "latest student becomes next iteration's search teacher"
+    if strategy != "gated":
+        raise ValueError(f"Unknown teacher update strategy: {strategy}")
+    if candidate_win_rate is None or h2h_win_rate is None:
+        return None, champion_eval_score, None
+
+    decision = decide_promotion(
+        h2h_win_rate=h2h_win_rate,
+        candidate_baseline_win_rate=candidate_win_rate,
+        champion_baseline_win_rate=champion_eval_score,
+        h2h_threshold=promotion_threshold,
+        max_baseline_regression=max_baseline_regression,
+    )
+    if decision.promote:
+        trainer.promote_student()
+        return True, candidate_win_rate, decision.reason
+    trainer.restore_student_from_teacher()
+    return False, champion_eval_score, decision.reason
+
+
 def run_training(
     *,
     args: argparse.Namespace,
@@ -774,6 +823,9 @@ def run_training(
             evaluation_due = (
                 iteration % args.eval_every_iterations == 0 or iteration == final_iteration
             )
+            candidate_eval: PolicyEvalResult | None = None
+            h2h_eval: PolicyEvalResult | None = None
+            eval_metrics: dict[str, float] | None = None
             if evaluation_due:
                 candidate_eval = _evaluate_student(trainer, config, args)
                 _print_eval("Candidate deployable policy vs F", candidate_eval)
@@ -791,23 +843,26 @@ def run_training(
                     trainer.save(checkpoint_dir, "best")
                     print(f"  saved new best deployable checkpoint ({best_eval_score:.2%})")
 
-                if args.mode == "iterate":
-                    decision = decide_promotion(
-                        h2h_win_rate=h2h_eval.win_rate,
-                        candidate_baseline_win_rate=candidate_eval.win_rate,
-                        champion_baseline_win_rate=champion_eval_score,
-                        h2h_threshold=args.promotion_threshold,
-                        max_baseline_regression=args.max_baseline_regression,
-                    )
-                    eval_metrics["promotion/accepted"] = float(decision.promote)
+            if args.mode == "iterate":
+                accepted, champion_eval_score, update_reason = _update_search_teacher(
+                    trainer=trainer,
+                    strategy=args.teacher_update,
+                    candidate_win_rate=(
+                        None if candidate_eval is None else candidate_eval.win_rate
+                    ),
+                    h2h_win_rate=None if h2h_eval is None else h2h_eval.win_rate,
+                    champion_eval_score=champion_eval_score,
+                    promotion_threshold=args.promotion_threshold,
+                    max_baseline_regression=args.max_baseline_regression,
+                )
+                if accepted:
+                    promotions += 1
+                if update_reason is not None:
+                    print(f"  teacher update: {update_reason}")
+                if eval_metrics is not None and accepted is not None:
+                    eval_metrics["promotion/accepted"] = float(accepted)
                     eval_metrics["promotion/count"] = float(promotions)
-                    print(f"  promotion: {decision.reason}")
-                    if decision.promote:
-                        trainer.promote_student()
-                        champion_eval_score = candidate_eval.win_rate
-                        promotions += 1
-                    else:
-                        trainer.restore_student_from_teacher()
+            if eval_metrics is not None:
                 wandb.log(eval_metrics, step=global_step)
 
             if args.save_every_updates and iteration % args.save_every_updates == 0:
