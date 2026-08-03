@@ -15,8 +15,8 @@ import torch
 from catanrl.envs.cppanatron import NativeGame, NativeMCTSSearch
 from catanrl.envs.cppanatron.puffer_env import TURNS_LIMIT
 from catanrl.features.catanatron_utils import (
-    ActorObservationLevel,
     COLOR_ORDER,
+    ActorObservationLevel,
     CriticObservationLevel,
     get_observation_indices_from_full,
 )
@@ -26,12 +26,12 @@ from catanrl.players.nn_mcts_player import (
 )
 from catanrl.utils.seeding import derive_map_and_game_seeds, derive_seed
 
+from .native_search import PolicyTarget, run_native_search_policy, step_game_and_reconcile_search
 from .parallel_self_play import (
     SelfPlayExperience,
     _assign_episode_seeds,
     run_inference_server_workers,
 )
-from .native_search import PolicyTarget, run_native_search_policy, step_game_and_reconcile_search
 
 MapType = Literal["BASE", "MINI", "TOURNAMENT"]
 
@@ -268,9 +268,11 @@ def _native_training_worker_main(
         response_queue=response_queue,
     )
     try:
-        experiences: list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float, bool]] = []
-        stats: Counter[str] = Counter()
         for episode_seed in episode_seeds:
+            experiences: list[
+                tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float, bool]
+            ] = []
+            stats: Counter[str] = Counter()
             samples, winner = _play_native_self_play_game(
                 episode_seed=episode_seed,
                 args_dict=args_dict,
@@ -301,12 +303,22 @@ def _native_training_worker_main(
                 )
             stats["full_search_decisions"] += sum(int(sample.full_search) for sample in samples)
             stats["fast_search_decisions"] += sum(int(not sample.full_search) for sample in samples)
+            result_queue.put(
+                {
+                    "worker_id": worker_id,
+                    "done": False,
+                    "games": 1,
+                    "experiences": experiences,
+                    "stats": dict(stats),
+                }
+            )
         result_queue.put(
             {
                 "worker_id": worker_id,
-                "games": len(episode_seeds),
-                "experiences": experiences,
-                "stats": dict(stats),
+                "done": True,
+                "games": 0,
+                "experiences": [],
+                "stats": {},
             }
         )
     except BaseException:

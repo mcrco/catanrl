@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from typing import cast
+
 import numpy as np
 import pytest
 import torch
+from nn_mcts_helpers import MockInferenceBackend
 from torch import nn
-from typing import cast
 
 from catanrl.algorithms.alphazero.native_search import (
     _completed_q_policy,
@@ -19,6 +21,7 @@ from catanrl.algorithms.alphazero.native_self_play import (
 from catanrl.envs.cppanatron import (
     NativeGame,
     NativeMCTSSearch,
+    NativeMCTSSearchMetrics,
     find_cppanatron_library,
     full_native_features,
 )
@@ -26,7 +29,6 @@ from catanrl.features.catanatron_utils import get_observation_indices_from_full
 from catanrl.models.heads import FlatPolicyHead
 from catanrl.models.wrappers import PolicyNetworkWrapper, ValueNetworkWrapper
 from catanrl.utils.seeding import derive_map_and_game_seeds
-from nn_mcts_helpers import MockInferenceBackend
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -117,7 +119,9 @@ def test_completed_q_search_uses_canopy_root_allocation_and_global_q_bounds():
     logits = np.full(game.action_space_size, -20.0, dtype=np.float32)
     logits[legal_indices[-1]] = 20.0
 
-    def first_visit(search_selection: str) -> tuple[np.ndarray, object]:
+    def first_visit(
+        search_selection: str,
+    ) -> tuple[np.ndarray, NativeMCTSSearchMetrics]:
         with NativeMCTSSearch(
             game,
             "MINI",
@@ -142,6 +146,8 @@ def test_completed_q_search_uses_canopy_root_allocation_and_global_q_bounds():
 
     assert int(np.argmax(puct_visits)) == int(legal_indices[-1])
     assert int(np.argmax(completed_visits)) == int(legal_indices[0])
+    assert completed_metrics.q_min is not None
+    assert completed_metrics.q_max is not None
     assert completed_metrics.q_min <= -0.75
     assert completed_metrics.q_max >= 0.25
 
@@ -439,7 +445,7 @@ def test_native_playout_cap_keeps_fast_decisions_for_value_training():
     assert all(not sample.full_search for sample in samples)
 
 
-def test_native_parallel_self_play_returns_shared_experience_type():
+def test_native_parallel_self_play_streams_multiple_games_per_worker():
     torch.manual_seed(0)
     actor_size = len(get_observation_indices_from_full(2, "MINI", "private"))
     critic_size = len(get_observation_indices_from_full(2, "MINI", "full"))
@@ -459,7 +465,7 @@ def test_native_parallel_self_play_returns_shared_experience_type():
         model_type="flat",
         map_type="MINI",
         num_players=2,
-        num_games=1,
+        num_games=2,
         num_game_workers=1,
         num_simulations=1,
         c_puct=1.5,
@@ -484,7 +490,7 @@ def test_native_parallel_self_play_returns_shared_experience_type():
         turns_limit=1,
     )
 
-    assert stats["games"] == 1
+    assert stats["games"] == 2
     assert experiences
     assert all(exp.full_search for exp in experiences)
     assert all(exp.policy.shape == (action_space_size,) for exp in experiences)

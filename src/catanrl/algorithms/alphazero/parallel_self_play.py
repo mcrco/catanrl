@@ -66,8 +66,10 @@ def run_inference_server_workers(
     ``worker_target`` is invoked as
     ``worker_target(worker_id, request_queue, response_queue, result_queue, *worker_args[worker_id])``
     and must put a dict containing ``worker_id`` (and either ``error`` or its
-    payload) on ``result_queue``. ``handle_result`` is called for each
-    successful message.
+    payload) on ``result_queue``. Workers may stream multiple payloads by setting
+    ``done=False`` and finish with a final ``done=True`` payload. Messages
+    without ``done`` retain the historical one-message-per-worker behavior.
+    ``handle_result`` is called for each successful message.
     """
     mp_ctx = mp.get_context("spawn")
 
@@ -135,12 +137,14 @@ def run_inference_server_workers(
             worker_id = int(message["worker_id"])
             if worker_id not in pending_workers:
                 continue
-            pending_workers.remove(worker_id)
             if "error" in message:
+                pending_workers.remove(worker_id)
                 first_error = str(message["error"])
                 break
             handle_result(message)
             progress.update(int(message.get("games", 0)))
+            if bool(message.get("done", True)):
+                pending_workers.remove(worker_id)
     finally:
         progress.close()
         if first_error is not None:
@@ -288,10 +292,11 @@ def _training_worker_main(
         vps_to_win = int(args_dict["vps_to_win"])
         discard_limit = int(args_dict["discard_limit"])
 
-        experiences: list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]] = []
-        stats: Counter[str] = Counter()
-
         for episode_seed in episode_seeds:
+            experiences: list[
+                tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]
+            ] = []
+            stats: Counter[str] = Counter()
             random.seed(episode_seed)
             np.random.seed(episode_seed % (2**32))
             torch.manual_seed(episode_seed)
@@ -323,12 +328,22 @@ def _training_worker_main(
                 for actor_state, policy, critic_state, action_mask in player.samples:
                     experiences.append((actor_state, critic_state, policy, action_mask, value))
 
+            result_queue.put(
+                {
+                    "worker_id": worker_id,
+                    "done": False,
+                    "games": 1,
+                    "experiences": experiences,
+                    "stats": dict(stats),
+                }
+            )
         result_queue.put(
             {
                 "worker_id": worker_id,
-                "games": len(episode_seeds),
-                "experiences": experiences,
-                "stats": dict(stats),
+                "done": True,
+                "games": 0,
+                "experiences": [],
+                "stats": {},
             }
         )
     except BaseException:
