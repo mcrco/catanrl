@@ -395,6 +395,8 @@ def test_collect_self_play_can_dispatch_to_native_backend(
     assert called["c_visit"] == 50.0
     assert called["c_scale"] == 1.0
     assert called["search_selection"] == "puct"
+    assert called["trajectory_action_selection"] == "visits"
+    assert called["explore_actions"] == 24
     assert stats["experiences"] == 1.0
     assert len(trainer.replay_buffer) == 1
 
@@ -716,6 +718,46 @@ def test_cli_completed_q_search_selection_requires_native_search() -> None:
                 "model.yaml",
                 "--search-selection",
                 "completed-q",
+            ]
+        )
+
+
+def test_cli_canopy_trajectory_requires_exact_search_controls() -> None:
+    args = parse_args(
+        [
+            "--mode",
+            "iterate",
+            "--config",
+            "model.yaml",
+            "--self-play-backend",
+            "cppanatron",
+            "--ismcts-determinizations",
+            "1",
+            "--search-selection",
+            "completed-q",
+            "--policy-target",
+            "completed-q",
+            "--target-temperature",
+            "1",
+            "--trajectory-action-selection",
+            "canopy",
+            "--explore-actions",
+            "24",
+        ]
+    )
+
+    assert args.trajectory_action_selection == "canopy"
+    assert args.explore_actions == 24
+
+    with pytest.raises(SystemExit):
+        parse_args(
+            [
+                "--mode",
+                "iterate",
+                "--config",
+                "model.yaml",
+                "--trajectory-action-selection",
+                "canopy",
             ]
         )
 

@@ -76,6 +76,8 @@ class AlphaZeroConfig:
     noise_turns: int = 20
     dirichlet_alpha: float = 0.3
     dirichlet_frac: float = 0.25
+    trajectory_action_selection: Literal["visits", "canopy"] = "visits"
+    explore_actions: int = 24
     num_game_workers: int = 1
     inference_batch_size: int = 64
     inference_wait_ms: float = 2.0
@@ -195,6 +197,21 @@ class AlphaZeroTrainer:
             raise ValueError("policy_target must be 'visits' or 'completed-q'.")
         if config.search_selection not in ("puct", "completed-q"):
             raise ValueError("search_selection must be 'puct' or 'completed-q'.")
+        if config.trajectory_action_selection not in ("visits", "canopy"):
+            raise ValueError("trajectory_action_selection must be 'visits' or 'canopy'.")
+        if config.explore_actions < 0:
+            raise ValueError("explore_actions cannot be negative.")
+        if config.trajectory_action_selection == "canopy":
+            if config.self_play_backend != "cppanatron":
+                raise ValueError("Canopy trajectory selection requires cppanatron self-play.")
+            if config.policy_target != "completed-q" or config.search_selection != "completed-q":
+                raise ValueError(
+                    "Canopy trajectory selection requires completed-Q search and targets."
+                )
+            if config.target_temperature is None or not np.isclose(
+                config.target_temperature, 1.0
+            ):
+                raise ValueError("Canopy trajectory selection requires target_temperature=1.0.")
         if (
             not np.isfinite(config.c_visit)
             or config.c_visit < 0.0
@@ -459,6 +476,8 @@ class AlphaZeroTrainer:
                 policy_target=self.config.policy_target,
                 c_visit=self.config.c_visit,
                 c_scale=self.config.c_scale,
+                trajectory_action_selection=self.config.trajectory_action_selection,
+                explore_actions=self.config.explore_actions,
             )
         experiences, stats = self_play_generator(**self_play_kwargs)
         self.replay_buffer.extend(experiences)

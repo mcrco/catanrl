@@ -224,7 +224,28 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         ),
     )
     search.add_argument("--temperature-drop-move", type=int, default=30)
-    search.add_argument("--noise-turns", type=int, default=20)
+    search.add_argument(
+        "--noise-turns",
+        type=int,
+        default=20,
+        help="Moves with root noise in visit-trajectory mode; Canopy mode uses noise throughout.",
+    )
+    search.add_argument(
+        "--trajectory-action-selection",
+        choices=("visits", "canopy"),
+        default="visits",
+        help=(
+            "Choose actions with the temperature-adjusted visit policy, or match "
+            "Canopy by sampling completed-Q targets for early exploration and then "
+            "taking the visit-count argmax while keeping root noise on every move."
+        ),
+    )
+    search.add_argument(
+        "--explore-actions",
+        type=int,
+        default=24,
+        help="Total game actions that sample the improved policy in Canopy trajectory mode.",
+    )
     search.add_argument("--dirichlet-alpha", type=float, default=0.3)
     search.add_argument("--dirichlet-frac", type=float, default=0.25)
     search.add_argument("--inference-batch-size", type=int, default=64)
@@ -371,6 +392,17 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         parser.error("--policy-target completed-q currently requires cppanatron self-play")
     if args.search_selection == "completed-q" and args.self_play_backend != "cppanatron":
         parser.error("--search-selection completed-q currently requires cppanatron self-play")
+    if args.explore_actions < 0:
+        parser.error("--explore-actions cannot be negative")
+    if args.trajectory_action_selection == "canopy":
+        if args.self_play_backend != "cppanatron":
+            parser.error("--trajectory-action-selection canopy requires cppanatron self-play")
+        if args.policy_target != "completed-q" or args.search_selection != "completed-q":
+            parser.error(
+                "--trajectory-action-selection canopy requires completed-Q search and targets"
+            )
+        if args.target_temperature is None or not math.isclose(args.target_temperature, 1.0):
+            parser.error("--trajectory-action-selection canopy requires --target-temperature 1")
     if args.value_loss_weight is None:
         args.value_loss_weight = 0.0 if args.mode == "distill" else 1.0
     if args.self_play_backend == "cppanatron":
@@ -960,6 +992,8 @@ def main() -> None:
         noise_turns=args.noise_turns,
         dirichlet_alpha=args.dirichlet_alpha,
         dirichlet_frac=args.dirichlet_frac,
+        trajectory_action_selection=args.trajectory_action_selection,
+        explore_actions=args.explore_actions,
         num_game_workers=args.num_workers,
         inference_batch_size=args.inference_batch_size,
         inference_wait_ms=args.inference_wait_ms,

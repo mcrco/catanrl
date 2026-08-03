@@ -15,7 +15,9 @@ from catanrl.algorithms.alphazero.native_search import (
     step_game_and_reconcile_search,
 )
 from catanrl.algorithms.alphazero.native_self_play import (
+    _choose_trajectory_action,
     _play_native_self_play_game,
+    _trajectory_search_controls,
     generate_native_self_play_data,
 )
 from catanrl.envs.cppanatron import (
@@ -384,6 +386,68 @@ def test_completed_q_policy_uses_search_wide_q_bounds_when_available():
     expected = np.exp(np.array([7.5, 2.5, 5.0]))
     expected /= expected.sum()
     np.testing.assert_allclose(policy, expected)
+
+
+def test_canopy_trajectory_samples_improved_policy_then_uses_visit_argmax():
+    valid_actions = np.array([2, 5])
+    improved_policy = np.zeros(7, dtype=np.float64)
+    improved_policy[5] = 1.0
+    rng = np.random.default_rng(71)
+
+    exploratory = _choose_trajectory_action(
+        mode="canopy",
+        search_action=2,
+        improved_policy=improved_policy,
+        valid_actions=valid_actions,
+        move_number=23,
+        explore_actions=24,
+        rng=rng,
+    )
+    exploiting = _choose_trajectory_action(
+        mode="canopy",
+        search_action=2,
+        improved_policy=improved_policy,
+        valid_actions=valid_actions,
+        move_number=24,
+        explore_actions=24,
+        rng=rng,
+    )
+    legacy = _choose_trajectory_action(
+        mode="visits",
+        search_action=2,
+        improved_policy=improved_policy,
+        valid_actions=valid_actions,
+        move_number=0,
+        explore_actions=24,
+        rng=rng,
+    )
+
+    assert exploratory == 5
+    assert exploiting == legacy == 2
+
+
+def test_canopy_trajectory_keeps_root_noise_and_uses_visit_argmax_search():
+    temperature, add_noise = _trajectory_search_controls(
+        mode="canopy",
+        move_number=500,
+        temperature=1.0,
+        final_temperature=0.1,
+        temperature_drop_move=30,
+        noise_turns=24,
+    )
+    legacy_temperature, legacy_noise = _trajectory_search_controls(
+        mode="visits",
+        move_number=500,
+        temperature=1.0,
+        final_temperature=0.1,
+        temperature_drop_move=30,
+        noise_turns=24,
+    )
+
+    assert temperature == 1e-3
+    assert add_noise is True
+    assert legacy_temperature == 0.1
+    assert legacy_noise is False
 
 
 def test_native_self_play_game_emits_standard_legal_training_fields():

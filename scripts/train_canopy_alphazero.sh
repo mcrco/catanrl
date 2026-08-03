@@ -70,8 +70,10 @@ env -u VIRTUAL_ENV PYTHONUNBUFFERED=1 uv run python -m catanrl.experiments.train
   --final-temperature 0.1 \
   --target-temperature 1.0 \
   --temperature-drop-move 30 \
+  --trajectory-action-selection canopy \
+  --explore-actions 24 \
   --noise-turns 24 \
-  --dirichlet-alpha 0.3 \
+  --dirichlet-alpha 0.05 \
   --dirichlet-frac 0.25 \
   --buffer-size 500000 \
   --batch-size 1024 \

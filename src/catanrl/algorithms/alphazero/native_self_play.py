@@ -34,6 +34,7 @@ from .parallel_self_play import (
 )
 
 MapType = Literal["BASE", "MINI", "TOURNAMENT"]
+TrajectoryActionSelection = Literal["visits", "canopy"]
 
 
 @dataclass(frozen=True)
@@ -70,6 +71,50 @@ def _blend_terminal_search_value(
     terminal = float(np.clip(terminal_value, -1.0, 1.0))
     search = float(np.clip(search_value, -1.0, 1.0))
     return (1.0 - search_weight) * terminal + search_weight * search
+
+
+def _choose_trajectory_action(
+    *,
+    mode: TrajectoryActionSelection,
+    search_action: int,
+    improved_policy: np.ndarray,
+    valid_actions: np.ndarray,
+    move_number: int,
+    explore_actions: int,
+    rng: np.random.Generator,
+) -> int:
+    """Apply the trajectory rule without changing the stored search target."""
+    if mode == "visits" or move_number >= explore_actions:
+        return search_action
+    if mode != "canopy":
+        raise ValueError(f"Unknown trajectory action selection: {mode!r}")
+    probabilities = np.asarray(improved_policy[valid_actions], dtype=np.float64)
+    probability_sum = float(probabilities.sum())
+    if not np.isfinite(probability_sum) or probability_sum <= 0.0:
+        probabilities = np.full(valid_actions.size, 1.0 / valid_actions.size)
+    else:
+        probabilities /= probability_sum
+    return int(rng.choice(valid_actions, p=probabilities))
+
+
+def _trajectory_search_controls(
+    *,
+    mode: TrajectoryActionSelection,
+    move_number: int,
+    temperature: float,
+    final_temperature: float,
+    temperature_drop_move: int,
+    noise_turns: int,
+) -> tuple[float, bool]:
+    """Return action temperature and root-noise use for one search."""
+    if mode == "canopy":
+        return 1e-3, True
+    if mode != "visits":
+        raise ValueError(f"Unknown trajectory action selection: {mode!r}")
+    action_temperature = (
+        temperature if move_number < temperature_drop_move else final_temperature
+    )
+    return action_temperature, move_number < noise_turns
 
 
 def _native_search_policy(
@@ -174,10 +219,16 @@ def _play_native_self_play_game(
             if valid_actions.size == 1:
                 action = int(valid_actions[0])
             else:
-                temperature = (
-                    float(args_dict["temperature"])
-                    if move_number < int(args_dict["temperature_drop_move"])
-                    else float(args_dict["final_temperature"])
+                trajectory_action_selection: TrajectoryActionSelection = args_dict.get(
+                    "trajectory_action_selection", "visits"
+                )
+                temperature, add_noise = _trajectory_search_controls(
+                    mode=trajectory_action_selection,
+                    move_number=move_number,
+                    temperature=float(args_dict["temperature"]),
+                    final_temperature=float(args_dict["final_temperature"]),
+                    temperature_drop_move=int(args_dict["temperature_drop_move"]),
+                    noise_turns=int(args_dict["noise_turns"]),
                 )
                 if search is None and bool(args_dict.get("tree_reuse", False)):
                     search = NativeMCTSSearch(
@@ -212,7 +263,7 @@ def _play_native_self_play_game(
                         "native_mcts",
                         move_number,
                     ),
-                    add_noise=move_number < int(args_dict["noise_turns"]),
+                    add_noise=add_noise,
                     dirichlet_alpha=float(args_dict["dirichlet_alpha"]),
                     dirichlet_frac=float(args_dict["dirichlet_frac"]),
                     action_temperature=max(temperature, 1e-3),
@@ -229,6 +280,15 @@ def _play_native_self_play_game(
                     c_visit=float(args_dict.get("c_visit", 50.0)),
                     c_scale=float(args_dict.get("c_scale", 1.0)),
                     search_selection=args_dict.get("search_selection", "puct"),
+                )
+                action = _choose_trajectory_action(
+                    mode=trajectory_action_selection,
+                    search_action=action,
+                    improved_policy=policy,
+                    valid_actions=valid_actions,
+                    move_number=move_number,
+                    explore_actions=int(args_dict.get("explore_actions", 24)),
+                    rng=rng,
                 )
                 actor_state = full_state[actor_indices].copy()
                 critic_state = (
@@ -374,6 +434,8 @@ def generate_native_self_play_data(
     c_visit: float = 50.0,
     c_scale: float = 1.0,
     search_selection: str = "puct",
+    trajectory_action_selection: TrajectoryActionSelection = "visits",
+    explore_actions: int = 24,
 ) -> tuple[list[SelfPlayExperience], dict[str, int]]:
     """Generate the trainer's standard replay records with native C++ MCTS."""
     if prunning:
@@ -392,6 +454,15 @@ def generate_native_self_play_data(
         raise ValueError("policy_target must be 'visits' or 'completed-q'")
     if search_selection not in ("puct", "completed-q"):
         raise ValueError("search_selection must be 'puct' or 'completed-q'")
+    if trajectory_action_selection not in ("visits", "canopy"):
+        raise ValueError("trajectory_action_selection must be 'visits' or 'canopy'")
+    if explore_actions < 0:
+        raise ValueError("explore_actions cannot be negative")
+    if trajectory_action_selection == "canopy":
+        if policy_target != "completed-q" or search_selection != "completed-q":
+            raise ValueError("Canopy trajectory selection requires completed-Q search and targets")
+        if target_temperature is None or not np.isclose(target_temperature, 1.0):
+            raise ValueError("Canopy trajectory selection requires target_temperature=1.0")
     if num_games <= 0:
         return [], {}
 
@@ -427,6 +498,8 @@ def generate_native_self_play_data(
         "c_visit": c_visit,
         "c_scale": c_scale,
         "search_selection": search_selection,
+        "trajectory_action_selection": trajectory_action_selection,
+        "explore_actions": explore_actions,
     }
     experiences: list[SelfPlayExperience] = []
     stats: Counter[str] = Counter()
