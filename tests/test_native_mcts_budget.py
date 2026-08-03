@@ -8,6 +8,7 @@ from catanrl.eval.native_mcts_budget import (
     NativeBudgetGameResult,
     SearchDiagnosticsAccumulator,
     _game_opponent_action,
+    _game_worker_main,
 )
 
 
@@ -108,3 +109,68 @@ def test_native_value_opponent_uses_cpp_value_player_without_inference():
 
     assert action == 17
     assert game.calls == 1
+
+
+def test_native_budget_worker_streams_each_game(monkeypatch):
+    class _Backend:
+        closed = False
+
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def close(self) -> None:
+            self.closed = True
+
+    class _Queue:
+        def __init__(self) -> None:
+            self.messages = []
+
+        def put(self, message) -> None:
+            self.messages.append(message)
+
+    def _play_budget_game(**kwargs):
+        diagnostics = SearchDiagnosticsAccumulator()
+        diagnostics.add(_diagnostics(depth=2, agreement=1.0))
+        calibration = CriticCalibrationAccumulator()
+        calibration.add(0.25, 1.0)
+        return (
+            {
+                "win": True,
+                "seat": "first" if kwargs["mcts_seat"] == 0 else "second",
+                "episode_seed": kwargs["episode_seed"],
+            },
+            diagnostics,
+            calibration,
+        )
+
+    monkeypatch.setattr(
+        "catanrl.eval.native_mcts_budget._RemoteNNMCTSInferenceBackend",
+        _Backend,
+    )
+    monkeypatch.setattr(
+        "catanrl.eval.native_mcts_budget._indices",
+        lambda _args: (object(), object()),
+    )
+    monkeypatch.setattr(
+        "catanrl.eval.native_mcts_budget._play_budget_game",
+        _play_budget_game,
+    )
+    result_queue = _Queue()
+
+    _game_worker_main(
+        3,
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        result_queue,  # type: ignore[arg-type]
+        [(0, 11), (1, 12)],
+        1600,
+        {},
+    )
+
+    assert [message["done"] for message in result_queue.messages] == [False, False, True]
+    assert [message["games"] for message in result_queue.messages] == [1, 1, 0]
+    assert [message["result"]["game_records"] for message in result_queue.messages[:2]] == [
+        [{"win": True, "seat": "first", "episode_seed": 11}],
+        [{"win": True, "seat": "second", "episode_seed": 12}],
+    ]
+    assert result_queue.messages[-1]["result"]["game_records"] == []

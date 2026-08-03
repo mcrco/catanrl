@@ -6,13 +6,13 @@ from __future__ import annotations
 import argparse
 import json
 import math
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
 import torch
-
 import wandb
+
 from catanrl.eval.native_mcts_budget import (
     run_native_budget_games,
     run_native_budget_position_probes,
@@ -79,6 +79,12 @@ def _parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Enable exact successor/discard-order deduplication during search",
+    )
+    parser.add_argument(
+        "--tree-reuse",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Reuse exact native subtrees after played actions, with safe fallback",
     )
     parser.add_argument("--seed", type=int, default=123)
     parser.add_argument("--turns-limit", type=int, default=1000)
@@ -158,7 +164,7 @@ def main() -> None:
             experiment.build_critic(which=args.which, device=device),
         )
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     output_dir = Path(
         args.output_dir
         or f"experiments/native-mcts-budget-sweep-{experiment.metadata.name}-{timestamp}"
@@ -182,6 +188,7 @@ def main() -> None:
         "c_scale": args.c_scale,
         "value_scale": args.value_scale,
         "canonical_pruning": args.canonical_pruning,
+        "tree_reuse": args.tree_reuse,
         "seed": args.seed,
         "turns_limit": args.turns_limit,
         "device": str(device),
@@ -295,6 +302,7 @@ def main() -> None:
                     turns_limit=args.turns_limit,
                     game_opponent=args.game_opponent,
                     value_scale=args.value_scale,
+                    tree_reuse=args.tree_reuse,
                     canonical_pruning=args.canonical_pruning,
                 )
                 summary = games.summary()

@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import multiprocessing as mp
 import traceback
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
-from typing import Any, Literal, Sequence
+from typing import Any, Literal
 
 import numpy as np
 import torch
@@ -460,8 +461,8 @@ def _game_worker_main(
     )
     try:
         actor_indices, critic_indices = _indices(args_dict)
-        result = NativeBudgetGameResult()
         for mcts_seat, episode_seed in scenarios:
+            result = NativeBudgetGameResult()
             record, diagnostics, calibration = _play_budget_game(
                 episode_seed=episode_seed,
                 mcts_seat=mcts_seat,
@@ -474,18 +475,31 @@ def _game_worker_main(
             result.game_records.append(record)
             result.diagnostics.merge(diagnostics.payload())
             result.calibration.merge(calibration.payload())
+            result_queue.put(
+                {
+                    "worker_id": worker_id,
+                    "done": False,
+                    "games": 1,
+                    "result": {
+                        "game_records": result.game_records,
+                        "diagnostics": result.diagnostics.payload(),
+                        "calibration": result.calibration.payload(),
+                    },
+                }
+            )
         result_queue.put(
             {
                 "worker_id": worker_id,
-                "games": len(result.game_records),
+                "done": True,
+                "games": 0,
                 "result": {
-                    "game_records": result.game_records,
-                    "diagnostics": result.diagnostics.payload(),
-                    "calibration": result.calibration.payload(),
+                    "game_records": [],
+                    "diagnostics": SearchDiagnosticsAccumulator().payload(),
+                    "calibration": CriticCalibrationAccumulator().payload(),
                 },
             }
         )
-    except BaseException:
+    except BaseException:  # noqa: BLE001 - propagate worker failures through the queue
         result_queue.put({"worker_id": worker_id, "error": traceback.format_exc()})
     finally:
         inference_backend.close()
@@ -571,7 +585,7 @@ def _probe_worker_main(
                 "result": {"position_records": position_records},
             }
         )
-    except BaseException:
+    except BaseException:  # noqa: BLE001 - propagate worker failures through the queue
         result_queue.put({"worker_id": worker_id, "error": traceback.format_exc()})
     finally:
         inference_backend.close()
@@ -788,9 +802,9 @@ def run_native_budget_position_probes(
 
 
 __all__ = [
+    "CriticCalibrationAccumulator",
     "NativeBudgetGameResult",
     "NativeBudgetProbeResult",
-    "CriticCalibrationAccumulator",
     "SearchDiagnosticsAccumulator",
     "run_native_budget_games",
     "run_native_budget_position_probes",
