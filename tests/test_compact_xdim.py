@@ -106,9 +106,15 @@ def test_fresh_xdim_config_preserves_catanatron_board_layout() -> None:
 
     board = torch.arange(21 * 11 * 2).reshape(21, 11, 2)
     restored = _reshape_board_tensor(board.flatten().unsqueeze(0), config.args)
+    backbone, _ = create_backbone(config)
+    assert isinstance(backbone, CompactCrossDimensionalBackbone)
+    first_conv = next(
+        module for module in backbone.cnn if isinstance(module, torch.nn.Conv2d)
+    )
 
     assert restored.shape == (1, 2, 21, 11)
     assert torch.equal(restored[0], board.permute(2, 0, 1))
+    assert first_conv.kernel_size == (5, 3)
 
 
 def test_old_xdim_metadata_keeps_legacy_board_layout() -> None:
@@ -133,8 +139,14 @@ def test_old_xdim_metadata_keeps_legacy_board_layout() -> None:
 
     board_flat = torch.arange(21 * 11 * 2).unsqueeze(0)
     restored = _reshape_board_tensor(board_flat, config.args)
+    backbone, _ = create_backbone(config)
+    assert isinstance(backbone, CompactCrossDimensionalBackbone)
+    first_conv = next(
+        module for module in backbone.cnn if isinstance(module, torch.nn.Conv2d)
+    )
 
     assert restored.shape == (1, 2, 11, 21)
+    assert first_conv.kernel_size == (3, 5)
 
 
 def test_compact_xdim_training_preset_loads() -> None:

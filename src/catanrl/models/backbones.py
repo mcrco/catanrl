@@ -1,7 +1,8 @@
+from dataclasses import dataclass, field
+from typing import List, Tuple, Union
+
 import torch
 import torch.nn as nn
-from dataclasses import dataclass, field
-from typing import List, Union, Tuple
 
 from .utils import orthogonal_init
 
@@ -47,6 +48,18 @@ def _board_spatial_shape(config: CrossDimensionalBackboneConfig) -> tuple[int, i
         "board_layout must be 'legacy_height_width' or 'width_height', "
         f"got {config.board_layout!r}"
     )
+
+
+def _board_kernel_size(config: CrossDimensionalBackboneConfig) -> tuple[int, int]:
+    """Translate semantic (height, width) kernels to the stored tensor axes."""
+    kernel_height, kernel_width = config.cnn_kernel_size
+    if config.board_layout == "legacy_height_width":
+        return kernel_height, kernel_width
+    if config.board_layout == "width_height":
+        return kernel_width, kernel_height
+    # Keep layout validation and its error message in one place.
+    _board_spatial_shape(config)
+    raise AssertionError("unreachable")
 
 
 def _reshape_board_tensor(
@@ -108,18 +121,19 @@ class CrossDimensionalBackbone(nn.Module):
         # CNN branch for board tensor
         cnn_layers = []
         in_channels = config.board_channels
-        current_h, current_w = config.board_height, config.board_width
+        current_h, current_w = _board_spatial_shape(config)
+        kernel_size = _board_kernel_size(config)
 
         for out_channels in config.cnn_channels:
             # Use padding to maintain spatial dimensions initially
-            pad_h = (config.cnn_kernel_size[0] - 1) // 2
-            pad_w = (config.cnn_kernel_size[1] - 1) // 2
+            pad_h = (kernel_size[0] - 1) // 2
+            pad_w = (kernel_size[1] - 1) // 2
 
             cnn_layers.append(
                 nn.Conv2d(
                     in_channels,
                     out_channels,
-                    kernel_size=config.cnn_kernel_size,
+                    kernel_size=kernel_size,
                     padding=(pad_h, pad_w),
                 )
             )
@@ -222,14 +236,15 @@ class CompactCrossDimensionalBackbone(nn.Module):
         cnn_layers: list[nn.Module] = []
         in_channels = config.board_channels
         current_h, current_w = _board_spatial_shape(config)
-        pad_h = (config.cnn_kernel_size[0] - 1) // 2
-        pad_w = (config.cnn_kernel_size[1] - 1) // 2
+        kernel_size = _board_kernel_size(config)
+        pad_h = (kernel_size[0] - 1) // 2
+        pad_w = (kernel_size[1] - 1) // 2
         for out_channels in config.cnn_channels:
             cnn_layers.append(
                 nn.Conv2d(
                     in_channels,
                     out_channels,
-                    kernel_size=config.cnn_kernel_size,
+                    kernel_size=kernel_size,
                     stride=2,
                     padding=(pad_h, pad_w),
                 )
@@ -312,16 +327,17 @@ class ResidualCrossDimensionalBackbone(nn.Module):
         self.cnn_layers = nn.ModuleList()
         self.cnn_norms = nn.ModuleList()
         in_channels = config.board_channels
+        kernel_size = _board_kernel_size(config)
 
         for out_channels in config.cnn_channels:
-            pad_h = (config.cnn_kernel_size[0] - 1) // 2
-            pad_w = (config.cnn_kernel_size[1] - 1) // 2
+            pad_h = (kernel_size[0] - 1) // 2
+            pad_w = (kernel_size[1] - 1) // 2
 
             self.cnn_layers.append(
                 nn.Conv2d(
                     in_channels,
                     out_channels,
-                    kernel_size=config.cnn_kernel_size,
+                    kernel_size=kernel_size,
                     padding=(pad_h, pad_w),
                 )
             )
