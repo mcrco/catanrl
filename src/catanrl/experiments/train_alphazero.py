@@ -169,6 +169,27 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         default=1,
         help="Self-play iterations over which root-Q target weight ramps from zero.",
     )
+    search.add_argument(
+        "--policy-target",
+        choices=("visits", "completed-q"),
+        default="visits",
+        help=(
+            "Policy target extracted from native search: ordinary visit counts or "
+            "Canopy/Gumbel-AZ-style completed-Q policy improvement."
+        ),
+    )
+    search.add_argument(
+        "--c-visit",
+        type=float,
+        default=50.0,
+        help="Completed-Q policy-improvement visit offset.",
+    )
+    search.add_argument(
+        "--c-scale",
+        type=float,
+        default=1.0,
+        help="Completed-Q policy-improvement Q scale.",
+    )
     search.add_argument("--prunning", action="store_true")
     search.add_argument("--temperature", type=float, default=1.0)
     search.add_argument("--final-temperature", type=float, default=0.1)
@@ -286,6 +307,12 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         parser.error("--search-value-weight-max must be between 0 and 1")
     if args.search_value_weight_ramp_iterations < 0:
         parser.error("--search-value-weight-ramp-iterations cannot be negative")
+    if not math.isfinite(args.c_visit) or args.c_visit < 0.0:
+        parser.error("--c-visit must be finite and non-negative")
+    if not math.isfinite(args.c_scale) or args.c_scale < 0.0:
+        parser.error("--c-scale must be finite and non-negative")
+    if args.policy_target == "completed-q" and args.self_play_backend != "cppanatron":
+        parser.error("--policy-target completed-q currently requires cppanatron self-play")
     if args.value_loss_weight is None:
         args.value_loss_weight = 0.0 if args.mode == "distill" else 1.0
     if args.self_play_backend == "cppanatron":
@@ -794,6 +821,9 @@ def main() -> None:
         value_scale=args.value_scale,
         tree_reuse=args.tree_reuse,
         canonical_pruning=args.canonical_pruning,
+        policy_target=args.policy_target,
+        c_visit=args.c_visit,
+        c_scale=args.c_scale,
         full_search_probability=args.full_search_probability,
         fast_simulations=args.fast_simulations,
         search_value_weight_max=args.search_value_weight_max,

@@ -12,6 +12,7 @@ from catanrl.envs.cppanatron import NativeGame, NativeMCTSSearch, full_native_fe
 from catanrl.players.nn_mcts_player import _NNMCTSInferenceBackend, _visit_distribution
 
 MapType = Literal["BASE", "MINI", "TOURNAMENT"]
+PolicyTarget = Literal["visits", "completed-q"]
 
 
 @dataclass(frozen=True)
@@ -106,6 +107,55 @@ def _policy_divergences(search_policy: np.ndarray, prior: np.ndarray) -> tuple[f
     return policy_kl, policy_js
 
 
+def _completed_q_policy(
+    *,
+    logits: np.ndarray,
+    visits: np.ndarray,
+    action_values: np.ndarray,
+    network_value: float,
+    c_visit: float,
+    c_scale: float,
+    temperature: float,
+) -> np.ndarray:
+    """Canopy/Gumbel-AZ-style policy improvement with completed root Q values."""
+    logits = np.asarray(logits, dtype=np.float64)
+    visits = np.asarray(visits, dtype=np.float64)
+    action_values = np.asarray(action_values, dtype=np.float64)
+    if logits.shape != visits.shape or logits.shape != action_values.shape:
+        raise ValueError("logits, visits, and action_values must have identical shapes")
+    if logits.size == 0:
+        return np.empty(0, dtype=np.float64)
+
+    prior = _softmax(logits)
+    visited = (visits > 0.0) & np.isfinite(action_values)
+    total_visits = float(visits.sum())
+    visited_prior = float(prior[visited].sum())
+    weighted_q = (
+        float(np.dot(prior[visited], action_values[visited])) / visited_prior
+        if visited_prior > 0.0
+        else 0.0
+    )
+    v_mix = (float(network_value) + total_visits * weighted_q) / (1.0 + total_visits)
+    completed_q = np.where(visited, action_values, v_mix)
+
+    # Canopy widens global search bounds from an initial [0, 0]. Root bounds
+    # preserve that zero anchor while avoiding an extra traversal export.
+    q_min = min(0.0, float(np.min(completed_q)))
+    q_max = max(0.0, float(np.max(completed_q)))
+    if q_max - q_min <= np.finfo(np.float64).eps:
+        normalized_q = np.full_like(completed_q, 0.5)
+    else:
+        normalized_q = (completed_q - q_min) / (q_max - q_min)
+    improved_logits = (
+        logits + (float(c_visit) + float(np.max(visits))) * float(c_scale) * normalized_q
+    )
+    if temperature <= 1e-3:
+        probabilities = np.zeros_like(improved_logits)
+        probabilities[int(np.argmax(improved_logits))] = 1.0
+        return probabilities
+    return _softmax(improved_logits / temperature)
+
+
 def run_native_search_policy(
     *,
     game: NativeGame,
@@ -125,12 +175,21 @@ def run_native_search_policy(
     value_scale: float = 1.0,
     canonical_pruning: bool = False,
     search: NativeMCTSSearch | None = None,
+    policy_target: PolicyTarget = "visits",
+    c_visit: float = 50.0,
+    c_scale: float = 1.0,
 ) -> NativeSearchResult:
     """Run one search and report how much it changed the root network prediction."""
     if num_simulations < 1:
         raise ValueError("num_simulations must be at least 1")
     if not np.isfinite(value_scale) or value_scale < 0.0:
         raise ValueError("value_scale must be finite and non-negative")
+    if policy_target not in ("visits", "completed-q"):
+        raise ValueError("policy_target must be 'visits' or 'completed-q'")
+    if not np.isfinite(c_visit) or c_visit < 0.0:
+        raise ValueError("c_visit must be finite and non-negative")
+    if not np.isfinite(c_scale) or c_scale < 0.0:
+        raise ValueError("c_scale must be finite and non-negative")
 
     started = time.perf_counter()
     owns_search = search is None
@@ -177,6 +236,7 @@ def run_native_search_policy(
                 float(evaluation.value) * value_scale,
             )
         visits = search.root_visits().astype(np.float64)
+        action_values = search.root_action_values()
         search_metrics = search.metrics()
     finally:
         if owns_search:
@@ -186,10 +246,24 @@ def run_native_search_policy(
     if valid_indices.size < 2:
         raise ValueError("Native MCTS diagnostics require at least two legal actions")
     valid_visits = visits[valid_indices]
-    target_probabilities = _visit_distribution(
-        valid_visits,
-        action_temperature if target_temperature is None else target_temperature,
+    effective_target_temperature = (
+        action_temperature if target_temperature is None else target_temperature
     )
+    if policy_target == "completed-q":
+        target_probabilities = _completed_q_policy(
+            logits=root_evaluation.policy_logits[valid_indices],
+            visits=valid_visits,
+            action_values=action_values[valid_indices],
+            network_value=float(np.clip(root_evaluation.value * value_scale, -1.0, 1.0)),
+            c_visit=c_visit,
+            c_scale=c_scale,
+            temperature=effective_target_temperature,
+        )
+    else:
+        target_probabilities = _visit_distribution(
+            valid_visits,
+            effective_target_temperature,
+        )
     action_probabilities = _visit_distribution(valid_visits, action_temperature)
     policy = np.zeros(game.action_space_size, dtype=np.float32)
     policy[valid_indices] = target_probabilities.astype(np.float32, copy=False)
@@ -198,7 +272,7 @@ def run_native_search_policy(
     prior = _softmax(root_evaluation.policy_logits[valid_indices])
     policy_kl, policy_js = _policy_divergences(target_probabilities, prior)
     prior_top1_action = int(valid_indices[int(np.argmax(prior))])
-    search_top1_action = int(valid_indices[int(np.argmax(valid_visits))])
+    search_top1_action = int(valid_indices[int(np.argmax(target_probabilities))])
     network_value = float(root_evaluation.value)
     search_value = float(search_metrics.root_value)
     diagnostics = NativeSearchDiagnostics(
@@ -237,6 +311,7 @@ def run_native_search_policy(
 __all__ = [
     "NativeSearchDiagnostics",
     "NativeSearchResult",
+    "PolicyTarget",
     "run_native_search_policy",
     "step_game_and_reconcile_search",
 ]

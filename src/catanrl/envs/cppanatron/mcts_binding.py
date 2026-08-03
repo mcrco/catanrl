@@ -142,6 +142,11 @@ class NativeMCTSSearch:
             ctypes.POINTER(ctypes.c_uint32),
             ctypes.c_size_t,
         ]
+        library.cppanatron_search_root_action_values.argtypes = [
+            handle,
+            ctypes.POINTER(ctypes.c_double),
+            ctypes.c_size_t,
+        ]
         library.cppanatron_search_get_metrics.argtypes = [
             handle,
             ctypes.POINTER(_SearchMetrics),
@@ -236,6 +241,18 @@ class NativeMCTSSearch:
             )
         )
         return visits
+
+    def root_action_values(self) -> np.ndarray:
+        """Expected action Q from the root player; missing actions are NaN."""
+        values = np.empty(self.action_space_size, dtype=np.float64)
+        self._check_result(
+            self._library.cppanatron_search_root_action_values(
+                self._handle,
+                values.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+                values.size,
+            )
+        )
+        return values
 
     @property
     def root_expanded(self) -> bool:

@@ -31,7 +31,7 @@ from .parallel_self_play import (
     _assign_episode_seeds,
     run_inference_server_workers,
 )
-from .native_search import run_native_search_policy, step_game_and_reconcile_search
+from .native_search import PolicyTarget, run_native_search_policy, step_game_and_reconcile_search
 
 MapType = Literal["BASE", "MINI", "TOURNAMENT"]
 
@@ -91,6 +91,9 @@ def _native_search_policy(
     value_scale: float = 1.0,
     canonical_pruning: bool = False,
     search: NativeMCTSSearch | None = None,
+    policy_target: PolicyTarget = "visits",
+    c_visit: float = 50.0,
+    c_scale: float = 1.0,
 ) -> tuple[np.ndarray, int, np.ndarray, float]:
     result = run_native_search_policy(
         game=game,
@@ -110,6 +113,9 @@ def _native_search_policy(
         value_scale=value_scale,
         canonical_pruning=canonical_pruning,
         search=search,
+        policy_target=policy_target,
+        c_visit=c_visit,
+        c_scale=c_scale,
     )
     return (
         result.policy,
@@ -213,6 +219,9 @@ def _play_native_self_play_game(
                     value_scale=float(args_dict.get("value_scale", 1.0)),
                     canonical_pruning=bool(args_dict.get("canonical_pruning", False)),
                     search=search,
+                    policy_target=args_dict.get("policy_target", "visits"),
+                    c_visit=float(args_dict.get("c_visit", 50.0)),
+                    c_scale=float(args_dict.get("c_scale", 1.0)),
                 )
                 samples.append(
                     _NativeSelfPlaySample(
@@ -336,6 +345,9 @@ def generate_native_self_play_data(
     full_search_probability: float = 1.0,
     fast_simulations: int = 64,
     search_value_weight: float = 0.0,
+    policy_target: PolicyTarget = "visits",
+    c_visit: float = 50.0,
+    c_scale: float = 1.0,
 ) -> tuple[list[SelfPlayExperience], dict[str, int]]:
     """Generate the trainer's standard replay records with native C++ MCTS."""
     if prunning:
@@ -350,6 +362,8 @@ def generate_native_self_play_data(
         raise ValueError("fast_simulations must be between 1 and num_simulations")
     if not 0.0 <= search_value_weight <= 1.0:
         raise ValueError("search_value_weight must be between 0 and 1")
+    if policy_target not in ("visits", "completed-q"):
+        raise ValueError("policy_target must be 'visits' or 'completed-q'")
     if num_games <= 0:
         return [], {}
 
@@ -381,6 +395,9 @@ def generate_native_self_play_data(
         "full_search_probability": full_search_probability,
         "fast_simulations": fast_simulations,
         "search_value_weight": search_value_weight,
+        "policy_target": policy_target,
+        "c_visit": c_visit,
+        "c_scale": c_scale,
     }
     experiences: list[SelfPlayExperience] = []
     stats: Counter[str] = Counter()
