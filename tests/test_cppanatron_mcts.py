@@ -320,6 +320,37 @@ def test_native_search_policy_reports_depth_and_policy_effect():
     assert result.policy.sum() == pytest.approx(1.0)
 
 
+def test_native_search_aliases_identical_actor_and_critic_observations():
+    game = NativeGame(2, "MINI", seed=47, map_seed=53)
+
+    class _AliasingBackend(MockInferenceBackend):
+        def evaluate_leaf(self, actor_features, critic_features):
+            assert actor_features is critic_features
+            return super().evaluate_leaf(actor_features, critic_features)
+
+    backend = _AliasingBackend(game.action_space_size)
+    full_indices = get_observation_indices_from_full(2, "MINI", "full")
+    try:
+        run_native_search_policy(
+            game=game,
+            map_type="MINI",
+            inference_backend=backend,
+            actor_indices=full_indices,
+            critic_indices=full_indices.copy(),
+            num_simulations=2,
+            c_puct=1.5,
+            search_seed=59,
+            add_noise=False,
+            dirichlet_alpha=0.3,
+            dirichlet_frac=0.0,
+            action_temperature=0.0,
+            target_temperature=1.0,
+            rng=np.random.default_rng(61),
+        )
+    finally:
+        game.close()
+
+
 def test_completed_q_policy_improves_logits_and_completes_unvisited_actions():
     policy = _completed_q_policy(
         logits=np.zeros(3),

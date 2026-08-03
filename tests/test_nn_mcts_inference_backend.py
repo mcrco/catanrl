@@ -1,20 +1,20 @@
-from concurrent.futures import ThreadPoolExecutor
 import multiprocessing as mp
 import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import torch
 
+from catanrl.players.nn_mcts_player import (
+    _CentralNNMCTSInferenceServer,
+    _LocalNNMCTSInferenceBackend,
+    _RemoteLeafEvaluationRequest,
+    _RemoteNNMCTSInferenceBackend,
+)
 from scripts.eval_mcts_self_play import (
     _assign_episode_indices,
     _empty_serialized_stats,
     _merge_serialized_result,
-)
-from catanrl.players.nn_mcts_player import (
-    _CentralNNMCTSInferenceServer,
-    _RemoteNNMCTSInferenceBackend,
-    _LocalNNMCTSInferenceBackend,
-    _RemoteLeafEvaluationRequest,
 )
 
 
@@ -145,6 +145,7 @@ def test_central_inference_server_batches_mixed_worker_requests():
     assert response_1["request_id"] == 20
     np.testing.assert_allclose(response_1["policy_logits"], np.array([15.0, -1.0, 6.0]))
     np.testing.assert_allclose(response_1["value"], 0.3)
+    assert server.stats() == (2, 1)
 
 
 def test_parallel_self_play_assignment_and_merge_helpers_preserve_totals():

@@ -24,15 +24,15 @@ from catanatron.players.tree_search_utils import execute_spectrum, list_prunned_
 from catanatron.players.value import ValueFunctionPlayer
 from catanatron.players.weighted_random import WeightedRandomPlayer
 
-from catanrl.beliefs.dev_card_belief import DevCardBelief
 from catanrl.beliefs.determinize import determinize_game
+from catanrl.beliefs.dev_card_belief import DevCardBelief
+from catanrl.experiments.network_config import validate_ismcts_observation_levels
 from catanrl.features.catanatron_utils import (
     ActorObservationLevel,
     CriticObservationLevel,
     full_game_to_features,
     get_observation_indices_from_full,
 )
-from catanrl.experiments.network_config import validate_ismcts_observation_levels
 from catanrl.models import PolicyNetworkWrapper, PolicyValueNetworkWrapper, ValueNetworkWrapper
 from catanrl.models.inference_utils import forward_policy_value
 from catanrl.utils.catanatron_action_space import get_action_space_size, to_action_space
@@ -365,6 +365,9 @@ class _CentralNNMCTSInferenceServer(threading.Thread):
         self.response_queues = response_queues
         self.max_batch_size = max(1, int(max_batch_size))
         self.max_wait_ms = max(0.0, float(max_wait_ms))
+        self.uses_shared_network = isinstance(policy_model, PolicyValueNetworkWrapper)
+        self.total_evaluations = 0
+        self.total_batches = 0
         self._stop_event = threading.Event()
 
     def run(self) -> None:
@@ -399,13 +402,22 @@ class _CentralNNMCTSInferenceServer(threading.Thread):
         self.request_queue.put(None)
         self.join(timeout=5.0)
 
+    def stats(self) -> tuple[int, int]:
+        """Return completed neural evaluations and forward batches."""
+        return self.total_evaluations, self.total_batches
+
     def _evaluate_batch(self, batch: list[_RemoteLeafEvaluationRequest]) -> None:
         try:
             actor_features = np.stack([request.actor_features for request in batch], axis=0)
-            critic_features = np.stack([request.critic_features for request in batch], axis=0)
             with torch.no_grad():
                 actor_tensor = torch.from_numpy(actor_features).to(self.device)
-                critic_tensor = torch.from_numpy(critic_features).to(self.device)
+                critic_tensor = None
+                if not self.uses_shared_network:
+                    critic_features = np.stack(
+                        [request.critic_features for request in batch],
+                        axis=0,
+                    )
+                    critic_tensor = torch.from_numpy(critic_features).to(self.device)
                 logits, values = forward_policy_value(
                     self.policy_model,
                     self.critic_model,
@@ -415,6 +427,8 @@ class _CentralNNMCTSInferenceServer(threading.Thread):
                 )
                 policy_logits = logits.detach().cpu().numpy()
                 values_np = values.detach().cpu().numpy()
+            self.total_evaluations += len(batch)
+            self.total_batches += 1
 
             for request, logits_np, value in zip(batch, policy_logits, values_np):
                 self.response_queues[request.worker_id].put(

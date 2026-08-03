@@ -220,6 +220,16 @@ def run_native_search_policy(
         raise ValueError("c_scale must be finite and non-negative")
     if search_selection not in ("puct", "completed-q"):
         raise ValueError("search_selection must be 'puct' or 'completed-q'")
+    shared_observation = np.array_equal(actor_indices, critic_indices)
+
+    def evaluate(full_observation: np.ndarray):
+        actor_observation = full_observation[actor_indices]
+        critic_observation = (
+            actor_observation
+            if shared_observation
+            else full_observation[critic_indices]
+        )
+        return inference_backend.evaluate_leaf(actor_observation, critic_observation)
 
     started = time.perf_counter()
     owns_search = search is None
@@ -242,10 +252,7 @@ def run_native_search_policy(
         source_state = full_native_features(game, map_type, game.current_player)
         if not _native_observations_match(full_state, source_state):
             raise RuntimeError("Native MCTS root diverged from its source game")
-        root_evaluation = inference_backend.evaluate_leaf(
-            full_state[actor_indices],
-            full_state[critic_indices],
-        )
+        root_evaluation = evaluate(full_state)
         neural_evaluations = 1
         backed_up_root_value = float(np.clip(root_evaluation.value * value_scale, -1.0, 1.0))
         if search_selection == "completed-q":
@@ -262,10 +269,7 @@ def run_native_search_policy(
             if leaf is None:
                 continue
             full_leaf_state, _player = leaf
-            evaluation = inference_backend.evaluate_leaf(
-                full_leaf_state[actor_indices],
-                full_leaf_state[critic_indices],
-            )
+            evaluation = evaluate(full_leaf_state)
             neural_evaluations += 1
             search.evaluate_leaf(
                 evaluation.policy_logits,

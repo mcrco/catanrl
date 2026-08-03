@@ -18,6 +18,7 @@ from __future__ import annotations
 import multiprocessing as mp
 import queue
 import random
+import time
 import traceback
 from collections import Counter
 from dataclasses import dataclass
@@ -108,6 +109,8 @@ def run_inference_server_workers(
     pending_workers = set(range(num_workers))
     progress = tqdm(total=total, disable=not show_tqdm)
     first_error: str | None = None
+    inference_started = time.perf_counter()
+    last_status = inference_started
 
     inference_server.start()
     try:
@@ -131,6 +134,16 @@ def run_inference_server_workers(
                         break
                 if first_error is not None:
                     break
+                now = time.perf_counter()
+                if show_tqdm and now - last_status >= 30.0:
+                    evaluations, batches = inference_server.stats()
+                    elapsed = max(now - inference_started, 1e-9)
+                    average_batch = evaluations / batches if batches else 0.0
+                    progress.set_postfix_str(
+                        f"{evaluations / elapsed:.0f} eval/s, batch={average_batch:.1f}",
+                        refresh=True,
+                    )
+                    last_status = now
                 continue
 
             # process message received from worker.
