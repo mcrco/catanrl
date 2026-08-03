@@ -5,7 +5,9 @@ import pytest
 from catanrl.algorithms.alphazero.native_search import NativeSearchDiagnostics
 from catanrl.eval.native_mcts_budget import (
     CriticCalibrationAccumulator,
+    NativeBudgetGameResult,
     SearchDiagnosticsAccumulator,
+    _game_opponent_action,
 )
 
 
@@ -66,3 +68,43 @@ def test_critic_calibration_reports_scale_and_affine_fit():
     assert summary["least_squares_scale"] == pytest.approx(4.0)
     assert summary["affine_scale"] == pytest.approx(4.0)
     assert summary["affine_bias"] == pytest.approx(0.0)
+
+
+def test_native_budget_summary_includes_win_rate_interval():
+    result = NativeBudgetGameResult(
+        game_records=[
+            {"win": win, "seat": "first", "vps": 15, "turns": 100, "draw": False}
+            for win in (True, True, False, False)
+        ]
+    )
+
+    summary = result.summary()
+
+    assert summary["win_rate"] == 0.5
+    assert summary["win_rate_ci95_low"] < 0.5
+    assert summary["win_rate_ci95_high"] > 0.5
+
+
+class _ValueOpponentGame:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def value_action(self) -> int:
+        self.calls += 1
+        return 17
+
+
+def test_native_value_opponent_uses_cpp_value_player_without_inference():
+    game = _ValueOpponentGame()
+
+    action = _game_opponent_action(
+        game,  # type: ignore[arg-type]
+        "value",
+        "BASE",
+        pytest.fail,  # type: ignore[arg-type]
+        pytest.fail,  # type: ignore[arg-type]
+        pytest.fail,  # type: ignore[arg-type]
+    )
+
+    assert action == 17
+    assert game.calls == 1

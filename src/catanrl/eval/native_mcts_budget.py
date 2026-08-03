@@ -18,6 +18,7 @@ from catanrl.algorithms.alphazero.native_search import (
 from catanrl.algorithms.alphazero.parallel_self_play import run_inference_server_workers
 from catanrl.envs.cppanatron import NativeGame, NativeMCTSSearch, full_native_features
 from catanrl.envs.cppanatron.puffer_env import TURNS_LIMIT
+from catanrl.eval.reporting import wilson_interval
 from catanrl.features.catanatron_utils import (
     ActorObservationLevel,
     CriticObservationLevel,
@@ -27,6 +28,7 @@ from catanrl.players.nn_mcts_player import _RemoteNNMCTSInferenceBackend
 from catanrl.utils.seeding import derive_map_and_game_seeds, derive_seed
 
 MapType = Literal["BASE", "MINI", "TOURNAMENT"]
+GameOpponent = Literal["raw", "value"]
 
 _MEAN_DIAGNOSTIC_FIELDS = (
     "simulations",
@@ -204,6 +206,10 @@ class NativeBudgetGameResult:
                 sum(bool(record["draw"]) for record in self.game_records) / games if games else 0.0
             ),
         }
+        if games:
+            ci_low, ci_high = wilson_interval(wins, games)
+            result["win_rate_ci95_low"] = ci_low
+            result["win_rate_ci95_high"] = ci_high
         result.update({f"search/{key}": value for key, value in self.diagnostics.summary().items()})
         result.update({f"critic/{key}": value for key, value in self.calibration.summary().items()})
         return result
@@ -262,6 +268,27 @@ def _raw_policy_action(
     )
     valid_indices = np.flatnonzero(game.valid_action_mask())
     return int(valid_indices[int(np.argmax(evaluation.policy_logits[valid_indices]))])
+
+
+def _game_opponent_action(
+    game: NativeGame,
+    opponent: GameOpponent,
+    map_type: MapType,
+    actor_indices: np.ndarray,
+    critic_indices: np.ndarray,
+    inference_backend: _RemoteNNMCTSInferenceBackend,
+) -> int:
+    if opponent == "value":
+        return game.value_action()
+    if opponent == "raw":
+        return _raw_policy_action(
+            game,
+            map_type,
+            actor_indices,
+            critic_indices,
+            inference_backend,
+        )
+    raise ValueError(f"Unsupported native game opponent: {opponent!r}")
 
 
 def _search(
@@ -365,8 +392,9 @@ def _play_budget_game(
                 )
                 action = search_result.action
             else:
-                action = _raw_policy_action(
+                action = _game_opponent_action(
                     game,
+                    args_dict["game_opponent"],
                     args_dict["map_type"],
                     actor_indices,
                     critic_indices,
@@ -399,6 +427,7 @@ def _play_budget_game(
                 ),
                 "turns": game.num_turns,
                 "actions": decision_index,
+                "opponent": args_dict["game_opponent"],
             },
             diagnostics,
             calibration,
@@ -562,6 +591,7 @@ def _common_args(
     value_scale: float = 1.0,
     tree_reuse: bool = False,
     canonical_pruning: bool = False,
+    game_opponent: GameOpponent = "raw",
 ) -> dict[str, Any]:
     return {
         "map_type": map_type,
@@ -575,6 +605,7 @@ def _common_args(
         "value_scale": value_scale,
         "tree_reuse": tree_reuse,
         "canonical_pruning": canonical_pruning,
+        "game_opponent": game_opponent,
     }
 
 
@@ -601,11 +632,14 @@ def run_native_budget_games(
     value_scale: float = 1.0,
     tree_reuse: bool = False,
     canonical_pruning: bool = False,
+    game_opponent: GameOpponent = "raw",
 ) -> NativeBudgetGameResult:
     if budget < 1:
         raise ValueError("budget must be at least 1")
     if games_per_seat < 1:
         raise ValueError("games_per_seat must be at least 1")
+    if game_opponent not in ("raw", "value"):
+        raise ValueError("game_opponent must be 'raw' or 'value'")
     scenarios = [
         (seat, derive_seed(seed, "native_budget_episode", game_index))
         for seat in range(2)
@@ -623,6 +657,7 @@ def run_native_budget_games(
         value_scale=value_scale,
         tree_reuse=tree_reuse,
         canonical_pruning=canonical_pruning,
+        game_opponent=game_opponent,
     )
     aggregate = NativeBudgetGameResult()
 

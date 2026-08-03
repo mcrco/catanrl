@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sweep native MCTS budgets against a frozen raw policy and fixed positions."""
+"""Sweep native MCTS budgets against a raw policy or native F and fixed positions."""
 
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Measure native MCTS depth/search effect on identical frozen-policy positions, "
-            "then play paired games against the same raw policy."
+            "then play paired games against either the same raw policy or native F."
         )
     )
     parser.add_argument("--experiment", required=True, help="Frozen experiment checkpoint")
@@ -46,6 +46,15 @@ def _parse_args() -> argparse.Namespace:
         help="Probe every Nth non-forced decision on frozen raw-policy trajectories",
     )
     parser.add_argument("--games-per-seat", type=int, default=32)
+    parser.add_argument(
+        "--game-opponent",
+        choices=("raw", "value"),
+        default="raw",
+        help=(
+            "Opponent for paired games: the frozen raw network (raw) or the native "
+            "C++ Catanatron F/value player (value)"
+        ),
+    )
     parser.add_argument("--num-workers", type=int, default=16)
     parser.add_argument("--inference-batch-size", type=int, default=64)
     parser.add_argument("--inference-wait-ms", type=float, default=2.0)
@@ -136,6 +145,7 @@ def main() -> None:
         "probe_games": args.probe_games,
         "probe_stride": args.probe_stride,
         "games_per_seat": args.games_per_seat,
+        "game_opponent": args.game_opponent,
         "num_workers": args.num_workers,
         "inference_batch_size": args.inference_batch_size,
         "inference_wait_ms": args.inference_wait_ms,
@@ -168,7 +178,7 @@ def main() -> None:
             group=args.wandb_group,
             job_type="eval",
             config=config,
-            tags=["native-mcts", "budget-sweep", "frozen-policy"],
+            tags=["native-mcts", "budget-sweep", "frozen-policy", args.game_opponent],
         )
 
     print(f"Frozen checkpoint: {experiment.metadata.name} ({args.which})", flush=True)
@@ -222,7 +232,7 @@ def main() -> None:
             for budget in args.budgets:
                 print(
                     f"\nRunning paired native games for s{budget} "
-                    f"({args.games_per_seat} per seat)...",
+                    f"vs {args.game_opponent} ({args.games_per_seat} per seat)...",
                     flush=True,
                 )
                 games = run_native_budget_games(
@@ -243,6 +253,7 @@ def main() -> None:
                     discard_limit=discard_limit,
                     device=device,
                     turns_limit=args.turns_limit,
+                    game_opponent=args.game_opponent,
                 )
                 summary = games.summary()
                 payload["game_sweeps"][str(budget)] = {
