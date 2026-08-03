@@ -19,6 +19,7 @@ NETWORK_MODE_CHOICES = ("shared", "separate")
 BACKBONE_TYPE_CHOICES = ("mlp", "xdim", "xdim_res", "xdim_compact")
 MAP_TYPE_CHOICES = ("BASE", "MINI", "TOURNAMENT")
 MODEL_TYPE_CHOICES = ("flat", "hierarchical")
+VALUE_HEAD_TYPE_CHOICES = ("scalar", "wdl")
 
 
 @dataclass(frozen=True)
@@ -38,6 +39,7 @@ class ArchitecturePreset:
     vps_to_win: int
     discard_limit: int
     num_players: int | None = None
+    value_head_type: str = "scalar"
 
     @property
     def actor_observation_level(self) -> str:
@@ -166,6 +168,11 @@ def load_architecture_preset(path: str | Path) -> ArchitecturePreset:
         vps_to_win=_parse_optional_int(game.get("vps_to_win"), field="game.vps_to_win") or 15,
         discard_limit=_parse_optional_int(game.get("discard_limit"), field="game.discard_limit") or 9,
         num_players=num_players,
+        value_head_type=_parse_choice(
+            model.get("value_head_type", "scalar"),
+            field="model.value_head_type",
+            choices=VALUE_HEAD_TYPE_CHOICES,
+        ),
     )
 
 
@@ -179,6 +186,7 @@ def architecture_train_config_fields(arch: ArchitecturePreset) -> dict[str, Any]
         "policy_mode": arch.policy_mode,
         "critic_mode": arch.critic_mode,
         "network_mode": arch.network_mode,
+        "value_head_type": arch.value_head_type,
         "actor_observation_level": arch.actor_observation_level,
         "critic_observation_level": arch.critic_observation_level,
         "xdim_cnn_channels": list(arch.xdim_cnn_channels),

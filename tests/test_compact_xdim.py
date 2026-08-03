@@ -2,7 +2,19 @@ from __future__ import annotations
 
 import torch
 
-from catanrl.experiment_store import backbone_config_from_dict, backbone_config_to_dict
+from catanrl.algorithms.common import PolicyAgent
+from catanrl.algorithms.imitation_learning.dagger import _train_on_dataset
+from catanrl.algorithms.imitation_learning.dataset import AggregatedDataset
+from catanrl.envs.puffer.common import compute_single_agent_dims
+from catanrl.experiment_store import (
+    KIND_POLICY_VALUE,
+    GameConfig,
+    NetworkSpec,
+    backbone_config_from_dict,
+    backbone_config_to_dict,
+    build_network,
+    network_spec_from_model,
+)
 from catanrl.experiments.architecture_config import load_architecture_preset
 from catanrl.models.backbone_builder import build_backbone_config
 from catanrl.models.backbones import CompactCrossDimensionalBackbone, create_backbone
@@ -23,6 +35,7 @@ def test_compact_xdim_preserves_policy_value_shapes_with_small_parameter_count()
         xdim_cnn_channels=(64, 128, 128),
         xdim_cnn_kernel_size=(3, 5),
         xdim_fusion_hidden_dim=256,
+        value_head_type="wdl",
     )
     assert isinstance(model.backbone, CompactCrossDimensionalBackbone)
     input_dim = model.backbone.numeric_dim + (
@@ -33,7 +46,23 @@ def test_compact_xdim_preserves_policy_value_shapes_with_small_parameter_count()
 
     assert policy.shape == (3, get_action_space_size(2, "BASE"))
     assert value.shape == (3,)
+    assert torch.all(value >= -1.0)
+    assert torch.all(value <= 1.0)
     assert sum(parameter.numel() for parameter in model.parameters()) < 2_000_000
+
+    spec = network_spec_from_model(
+        model,
+        kind=KIND_POLICY_VALUE,
+        model_type="flat",
+        observation_level="full",
+    )
+    restored_spec = NetworkSpec.from_dict(spec.to_dict())
+    restored_model = build_network(
+        restored_spec,
+        GameConfig(num_players=2, map_type="BASE", vps_to_win=15, discard_limit=9),
+    )
+    assert spec.value_head_type == restored_spec.value_head_type == "wdl"
+    restored_model.load_state_dict(model.state_dict())
 
 
 def test_compact_xdim_config_round_trips_through_experiment_schema() -> None:
@@ -62,4 +91,63 @@ def test_compact_xdim_training_preset_loads() -> None:
 
     assert preset.backbone_type == "xdim_compact"
     assert preset.network_mode == "shared"
+    assert preset.value_head_type == "wdl"
     assert preset.actor_observation_level == preset.critic_observation_level == "full"
+
+
+def test_compact_wdl_head_runs_through_shared_dagger_update() -> None:
+    num_players = 2
+    map_type = "MINI"
+    dims = compute_single_agent_dims(
+        num_players,
+        map_type,
+        actor_observation_level="full",
+        critic_observation_level="full",
+    )
+    model = build_policy_value_model(
+        backbone_type="xdim_compact",
+        model_type="flat",
+        hidden_dims=(32,),
+        num_players=num_players,
+        map_type=map_type,
+        actor_observation_level="full",
+        critic_observation_level="full",
+        device="cpu",
+        xdim_cnn_channels=(8, 8),
+        xdim_cnn_kernel_size=(3, 3),
+        xdim_fusion_hidden_dim=32,
+        value_head_type="wdl",
+    )
+    dataset = AggregatedDataset(
+        full_state_dim=dims["critic_dim"],
+        num_players=num_players,
+        map_type=map_type,
+        actor_observation_level="full",
+        critic_observation_level="full",
+        max_size=4,
+    )
+    num_actions = get_action_space_size(num_players, map_type)
+    dataset.add_samples(
+        full_states=torch.randn(4, dims["critic_dim"]).numpy(),
+        expert_actions=[0, 1, 2, 3],
+        returns=[1.0, -1.0, 0.5, -0.5],
+        is_single_action=[False] * 4,
+        action_masks=torch.ones(4, num_actions, dtype=torch.bool).numpy(),
+    )
+
+    metrics = _train_on_dataset(
+        dataset=dataset,
+        policy_agent=PolicyAgent(model, "flat", torch.device("cpu")),
+        critic_model=model,
+        policy_optimizer=torch.optim.Adam(model.parameters(), lr=1e-3),
+        critic_optimizer=None,
+        epochs=1,
+        batch_size=4,
+        device=torch.device("cpu"),
+        num_players=num_players,
+        map_type=map_type,
+        model_type="flat",
+        uses_shared_network=True,
+    )
+
+    assert metrics["value_loss"] > 0.0

@@ -339,6 +339,7 @@ def main():
         actor_observation_level=arch.actor_observation_level,
         critic_observation_level=arch.critic_observation_level,
         network_mode=arch.network_mode,
+        value_head_type=arch.value_head_type,
         vps_to_win=arch.vps_to_win,
         discard_limit=arch.discard_limit,
         beta_init=args.beta_init,

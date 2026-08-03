@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from .backbones import BackboneConfig, create_backbone
-from .heads import FlatPolicyHead, HierarchicalPolicyHead, ValueHead
+from .heads import FlatPolicyHead, HierarchicalPolicyHead, ValueHead, WDLValueHead
 from ..utils.catanatron_action_space import MapType, get_action_array, get_action_space_size
 from .wrappers import PolicyNetworkWrapper, PolicyValueNetworkWrapper, ValueNetworkWrapper
 
 
 def _attach_hierarchical_metadata(
-    model: PolicyValueNetworkWrapper, policy_head: HierarchicalPolicyHead
+    model: PolicyNetworkWrapper | PolicyValueNetworkWrapper,
+    policy_head: HierarchicalPolicyHead,
 ) -> None:
     model.flat_to_hierarchical = policy_head.flat_to_hierarchical
     model.hierarchical_to_flat = policy_head.hierarchical_to_flat
@@ -25,12 +26,13 @@ def _attach_hierarchical_metadata(
 def build_flat_policy_value_network(
     backbone_config: BackboneConfig,
     num_actions: int,
+    value_head_type: str = "scalar",
 ) -> PolicyValueNetworkWrapper:
     """Create a flat policy-value network wrapper with a shared backbone."""
     action_dim = num_actions
     backbone, feature_dim = create_backbone(backbone_config)
     policy_head = FlatPolicyHead(feature_dim, action_dim)
-    value_head = ValueHead(feature_dim)
+    value_head = _build_value_head(feature_dim, value_head_type)
     model = PolicyValueNetworkWrapper(backbone, policy_head, value_head)
     model.backbone_config = backbone_config
     model.action_space_size = action_dim
@@ -71,6 +73,7 @@ def build_hierarchical_policy_value_network(
     backbone_config: BackboneConfig,
     num_players: int,
     map_type: MapType,
+    value_head_type: str = "scalar",
 ) -> PolicyValueNetworkWrapper:
     """Create a hierarchical policy-value network wrapper with a shared backbone."""
 
@@ -79,7 +82,7 @@ def build_hierarchical_policy_value_network(
         feature_dim,
         get_action_array(num_players, map_type),
     )
-    value_head = ValueHead(feature_dim)
+    value_head = _build_value_head(feature_dim, value_head_type)
 
     model = PolicyValueNetworkWrapper(backbone, policy_head, value_head)
     model.backbone_config = backbone_config
@@ -96,3 +99,11 @@ def build_value_network(
     model = ValueNetworkWrapper(backbone, value_head)
     model.backbone_config = backbone_config
     return model
+
+
+def _build_value_head(feature_dim: int, value_head_type: str) -> ValueHead | WDLValueHead:
+    if value_head_type == "scalar":
+        return ValueHead(feature_dim)
+    if value_head_type == "wdl":
+        return WDLValueHead(feature_dim)
+    raise ValueError(f"Unknown value_head_type '{value_head_type}'")

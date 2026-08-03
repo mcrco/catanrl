@@ -39,7 +39,11 @@ from ...models.models import (
     build_hierarchical_policy_value_network,
     build_value_network,
 )
-from ...models.inference_utils import forward_policy_value
+from ...models.inference_utils import (
+    forward_policy_value,
+    forward_shared_policy_value_training,
+    values_to_wdl_targets,
+)
 from ...models.wrappers import PolicyNetworkWrapper, PolicyValueNetworkWrapper, ValueNetworkWrapper
 from ...features.catanatron_utils import (
     ActorObservationLevel,
@@ -489,8 +493,12 @@ def _train_on_dataset(
                 non_single_mask = ~is_single_action
                 if uses_shared_network:
                     policy_optimizer.zero_grad()
-                    policy_logits, value_pred = policy_agent.policy_logits_and_values(
-                        actor_features
+                    if not isinstance(policy_agent.model, PolicyValueNetworkWrapper):
+                        raise TypeError("Shared DAgger training requires a policy-value model.")
+                    policy_logits, value_pred, value_logits = (
+                        forward_shared_policy_value_training(
+                            policy_agent.model, actor_features, model_type
+                        )
                     )
                     masked_policy_logits, _ = mask_action_logits(
                         policy_logits,
@@ -505,7 +513,13 @@ def _train_on_dataset(
                     else:
                         policy_loss = torch.tensor(0.0, device=device)
 
-                    value_loss = F.mse_loss(value_pred, returns)
+                    if value_logits is not None:
+                        value_targets = values_to_wdl_targets(returns)
+                        value_loss = -(
+                            value_targets * torch.log_softmax(value_logits, dim=-1)
+                        ).sum(dim=-1).mean()
+                    else:
+                        value_loss = F.mse_loss(value_pred, returns)
                     (policy_loss + value_loss).backward()
                     torch.nn.utils.clip_grad_norm_(
                         policy_agent.model.parameters(), max_norm=max_grad_norm
@@ -605,6 +619,7 @@ def train(
     actor_observation_level: ActorObservationLevel = "private",
     critic_observation_level: CriticObservationLevel = "full",
     network_mode: str = "separate",
+    value_head_type: str = "scalar",
     vps_to_win: int = 15,
     discard_limit: int = 9,
     beta_init: float = 1.0,
@@ -852,13 +867,16 @@ def train(
     if uses_shared_network:
         if model_type == "flat":
             policy_model = build_flat_policy_value_network(
-                backbone_config=policy_backbone_config, num_actions=action_space_size
+                backbone_config=policy_backbone_config,
+                num_actions=action_space_size,
+                value_head_type=value_head_type,
             ).to(torch_device)
         elif model_type == "hierarchical":
             policy_model = build_hierarchical_policy_value_network(
                 backbone_config=policy_backbone_config,
                 num_players=num_players,
                 map_type=map_type,
+                value_head_type=value_head_type,
             ).to(torch_device)
         else:
             raise ValueError(f"Unknown model_type '{model_type}'")

@@ -119,6 +119,7 @@ def build_policy_value_model(
     xdim_cnn_channels: Sequence[int] = (64, 128, 128),
     xdim_cnn_kernel_size: Tuple[int, int] = (3, 5),
     xdim_fusion_hidden_dim: int | None = None,
+    value_head_type: str = "scalar",
 ) -> PolicyValueNetworkWrapper:
     """Build a joint policy-value network with a shared backbone."""
     dims = compute_single_agent_dims(
@@ -144,12 +145,14 @@ def build_policy_value_model(
         model = build_flat_policy_value_network(
             backbone_config=backbone_config,
             num_actions=get_action_space_size(num_players, map_type),
+            value_head_type=value_head_type,
         )
     elif model_type == "hierarchical":
         model = build_hierarchical_policy_value_network(
             backbone_config=backbone_config,
             num_players=num_players,
             map_type=map_type,
+            value_head_type=value_head_type,
         )
     else:
         raise ValueError(f"Unknown model_type '{model_type}'")

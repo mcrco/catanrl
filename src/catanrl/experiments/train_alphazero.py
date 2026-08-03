@@ -320,6 +320,7 @@ def _build_model_pair(
             xdim_cnn_channels=arch.xdim_cnn_channels,
             xdim_cnn_kernel_size=arch.xdim_cnn_kernel_size,
             xdim_fusion_hidden_dim=arch.xdim_policy_fusion_hidden_dim,
+            value_head_type=arch.value_head_type,
         )
         return policy, None
 

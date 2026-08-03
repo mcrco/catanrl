@@ -9,6 +9,7 @@ model:
   policy_mode: full
   critic_mode: full
   network_mode: shared
+  value_head_type: wdl
   xdim_cnn_channels: [64, 128, 128]
   xdim_cnn_kernel_size: [3, 5]
   xdim_policy_fusion_hidden_dim: 256

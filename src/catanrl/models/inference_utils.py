@@ -4,7 +4,47 @@ from __future__ import annotations
 
 import torch
 
+from .heads import WDLValueHead
 from .wrappers import PolicyNetworkWrapper, PolicyValueNetworkWrapper, ValueNetworkWrapper
+
+
+def values_to_wdl_targets(values: torch.Tensor) -> torch.Tensor:
+    """Map scalar Q values to Canopy-compatible W/D/L training distributions."""
+    bounded = values.clamp(-1.0, 1.0)
+    return torch.stack(
+        (
+            (1.0 + bounded) * 0.5,
+            torch.zeros_like(bounded),
+            (1.0 - bounded) * 0.5,
+        ),
+        dim=-1,
+    )
+
+
+def forward_shared_policy_value_training(
+    model: PolicyValueNetworkWrapper,
+    states: torch.Tensor,
+    model_type: str,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    """Return policy logits, scalar values, and optional categorical WDL logits."""
+    features = model.backbone(states)
+    policy_outputs = model.policy_head(features)
+    if model_type == "flat":
+        if not isinstance(policy_outputs, torch.Tensor):
+            raise TypeError("Flat policy head returned hierarchical outputs.")
+        policy_logits = policy_outputs
+    elif model_type == "hierarchical":
+        if not isinstance(policy_outputs, tuple):
+            raise TypeError("Hierarchical policy head returned flat outputs.")
+        policy_logits = model.get_flat_action_logits(*policy_outputs)
+    else:
+        raise ValueError(f"Unknown model_type '{model_type}'")
+
+    if isinstance(model.value_head, WDLValueHead):
+        value_logits = model.value_head.logits(features)
+        values = WDLValueHead.values_from_logits(value_logits)
+        return policy_logits, values.view(-1), value_logits
+    return policy_logits, model.value_head(features).view(-1), None
 
 
 def forward_policy_value(

@@ -26,7 +26,11 @@ import torch
 import torch.nn.functional as F
 
 from ...features.catanatron_utils import ActorObservationLevel, COLOR_ORDER, CriticObservationLevel
-from ...models.inference_utils import forward_policy_value
+from ...models.inference_utils import (
+    forward_policy_value,
+    forward_shared_policy_value_training,
+    values_to_wdl_targets,
+)
 from ...models.wrappers import PolicyNetworkWrapper, PolicyValueNetworkWrapper, ValueNetworkWrapper
 from .native_self_play import generate_native_self_play_data
 from .parallel_self_play import SelfPlayExperience, generate_self_play_data
@@ -436,10 +440,11 @@ class AlphaZeroTrainer:
             self.critic_optimizer.zero_grad(set_to_none=True)
 
         values: torch.Tensor | None = None
+        value_logits: torch.Tensor | None = None
         if self.uses_shared_network:
-            logits, shared_values = forward_policy_value(
+            assert isinstance(self.student_policy_model, PolicyValueNetworkWrapper)
+            logits, shared_values, value_logits = forward_shared_policy_value_training(
                 self.student_policy_model,
-                None,
                 actor_states,
                 self.config.model_type,
             )
@@ -465,7 +470,12 @@ class AlphaZeroTrainer:
         ).sum(dim=1)
         policy_weight_sum = policy_weights.sum().clamp_min(1.0)
         policy_loss = (per_sample_policy_loss * policy_weights).sum() / policy_weight_sum
-        if values is not None and value_targets is not None:
+        if value_logits is not None and value_targets is not None:
+            value_distribution_targets = values_to_wdl_targets(value_targets)
+            value_loss = -(
+                value_distribution_targets * torch.log_softmax(value_logits, dim=-1)
+            ).sum(dim=-1).mean()
+        elif values is not None and value_targets is not None:
             value_loss = F.mse_loss(values, value_targets)
         else:
             value_loss = torch.zeros((), device=self.device)

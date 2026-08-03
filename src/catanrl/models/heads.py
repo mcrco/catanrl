@@ -34,6 +34,28 @@ class ValueHead(nn.Module):
         return self.value_head(x).squeeze(-1)
 
 
+class WDLValueHead(nn.Module):
+    """Categorical win/draw/loss head with scalar-Q inference compatibility."""
+
+    VALUE_OUTPUT_GAIN = 1.0
+
+    def __init__(self, input_dim: int):
+        super().__init__()
+        self.value_head = nn.Linear(input_dim, 3)
+        orthogonal_init(self.value_head, gain=self.VALUE_OUTPUT_GAIN)
+
+    def logits(self, x: torch.Tensor) -> torch.Tensor:
+        return self.value_head(x)
+
+    @staticmethod
+    def values_from_logits(logits: torch.Tensor) -> torch.Tensor:
+        probabilities = torch.softmax(logits, dim=-1)
+        return probabilities[..., 0] - probabilities[..., 2]
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.values_from_logits(self.logits(x))
+
+
 class FlatPolicyHead(nn.Module):
     """Simple linear head for policy network that outputs flat action logits."""
 

@@ -51,6 +51,7 @@ from .models.models import (
     build_hierarchical_policy_value_network,
     build_value_network,
 )
+from .models.heads import WDLValueHead
 from .models.wrappers import PolicyValueNetworkWrapper, policy_value_to_policy_only
 from .utils.catanatron_action_space import get_action_space_size
 
@@ -149,6 +150,7 @@ class NetworkSpec:
     model_type: Optional[str] = None  # "flat" | "hierarchical" (policy nets only)
     observation_level: Optional[str] = None  # feature level used at train time
     num_actions: Optional[int] = None  # flat policy action-space size
+    value_head_type: str = "scalar"
 
     def to_dict(self) -> Dict[str, Any]:
         out: Dict[str, Any] = {
@@ -161,6 +163,8 @@ class NetworkSpec:
             out["observation_level"] = self.observation_level
         if self.num_actions is not None:
             out["num_actions"] = self.num_actions
+        if self.value_head_type != "scalar":
+            out["value_head_type"] = self.value_head_type
         return out
 
     @classmethod
@@ -171,6 +175,7 @@ class NetworkSpec:
             model_type=data.get("model_type"),
             observation_level=data.get("observation_level"),
             num_actions=data.get("num_actions"),
+            value_head_type=data.get("value_head_type", "scalar"),
         )
 
 
@@ -292,7 +297,10 @@ def build_network(spec: NetworkSpec, game: GameConfig) -> torch.nn.Module:
     if spec.model_type == "hierarchical":
         if spec.kind == KIND_POLICY_VALUE:
             return build_hierarchical_policy_value_network(
-                spec.backbone, game.num_players, map_type
+                spec.backbone,
+                game.num_players,
+                map_type,
+                value_head_type=spec.value_head_type,
             )
         return build_hierarchical_policy_network(
             spec.backbone, game.num_players, map_type
@@ -302,7 +310,9 @@ def build_network(spec: NetworkSpec, game: GameConfig) -> torch.nn.Module:
     if num_actions is None:
         raise ValueError("Flat policy network spec is missing num_actions")
     if spec.kind == KIND_POLICY_VALUE:
-        return build_flat_policy_value_network(spec.backbone, num_actions)
+        return build_flat_policy_value_network(
+            spec.backbone, num_actions, value_head_type=spec.value_head_type
+        )
     return build_flat_policy_network(spec.backbone, num_actions)
 
 
@@ -996,6 +1006,7 @@ def architecture_preset_from_experiment(exp: Experiment) -> "ArchitecturePreset"
         vps_to_win=game.vps_to_win or tc.get("vps_to_win") or 15,
         discard_limit=game.discard_limit or tc.get("discard_limit") or 9,
         num_players=game.num_players,
+        value_head_type=policy.value_head_type,
     )
 
 
@@ -1096,6 +1107,11 @@ def network_spec_from_model(
         model_type=model_type,
         observation_level=observation_level,
         num_actions=num_actions if kind != KIND_VALUE else None,
+        value_head_type=(
+            "wdl"
+            if isinstance(getattr(model, "value_head", None), WDLValueHead)
+            else "scalar"
+        ),
     )
 
 

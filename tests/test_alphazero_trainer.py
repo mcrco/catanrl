@@ -12,7 +12,7 @@ from catanrl.algorithms.alphazero.parallel_self_play import SelfPlayExperience
 from catanrl.algorithms.alphazero.trainer import AlphaZeroConfig, AlphaZeroTrainer
 from catanrl.eval.search_training import decide_promotion
 from catanrl.experiments.train_alphazero import parse_args
-from catanrl.models.heads import FlatPolicyHead, ValueHead
+from catanrl.models.heads import FlatPolicyHead, ValueHead, WDLValueHead
 from catanrl.models.wrappers import (
     PolicyNetworkWrapper,
     PolicyValueNetworkWrapper,
@@ -59,12 +59,12 @@ def _trainer(
     )
 
 
-def _shared_trainer() -> AlphaZeroTrainer:
+def _shared_trainer(*, categorical_value: bool = False) -> AlphaZeroTrainer:
     torch.manual_seed(0)
     student = PolicyValueNetworkWrapper(
         nn.Linear(3, 3),
         FlatPolicyHead(3, 4),
-        ValueHead(3),
+        WDLValueHead(3) if categorical_value else ValueHead(3),
     )
     teacher = copy.deepcopy(student)
     config = AlphaZeroConfig(
@@ -192,6 +192,23 @@ def test_shared_policy_value_network_uses_one_combined_optimizer_step() -> None:
         torch.equal(before, after)
         for before, after in zip(teacher_before, trainer.teacher_policy_model.parameters())
     )
+
+
+def test_wdl_shared_value_head_trains_categorically_but_infers_scalar_q() -> None:
+    trainer = _shared_trainer(categorical_value=True)
+    trainer.replay_buffer.extend([_experience(0, 1.0), _experience(1, -1.0)])
+
+    metrics = trainer.update_weights()
+
+    assert metrics is not None
+    assert metrics["value_loss"] > 0.0
+    with torch.no_grad():
+        _, values = trainer.student_policy_model(
+            torch.tensor([[1.0, -0.5, 0.25], [1.0, -0.5, 0.25]])
+        )
+    assert values.shape == (2,)
+    assert torch.all(values >= -1.0)
+    assert torch.all(values <= 1.0)
 
 
 def test_distillation_loss_masks_illegal_action_logits() -> None:

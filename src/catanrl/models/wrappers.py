@@ -1,10 +1,24 @@
 import torch.nn as nn
+from typing import Any
 
-from .heads import FlatPolicyHead, HierarchicalPolicyHead, ValueHead
+from .heads import FlatPolicyHead, HierarchicalPolicyHead, ValueHead, WDLValueHead
 
 
 class PolicyNetworkWrapper(nn.Module):
     """Wrapper for policy network."""
+
+    backbone_config: Any
+    action_space_size: int
+    flat_to_hierarchical: dict[Any, Any]
+    hierarchical_to_flat: dict[Any, Any]
+    NUM_ACTION_TYPES: int
+    NUM_RESOURCES: int
+    num_tiles: int
+    num_edges: int
+    num_nodes: int
+    num_year_of_plenty_combos: int
+    num_maritime_trades: int
+    num_discard_combinations: int
 
     def __init__(self, backbone: nn.Module, policy_head: FlatPolicyHead | HierarchicalPolicyHead):
         super().__init__()
@@ -24,6 +38,8 @@ class PolicyNetworkWrapper(nn.Module):
 class ValueNetworkWrapper(nn.Module):
     """Wrapper for value network."""
 
+    backbone_config: Any
+
     def __init__(self, backbone: nn.Module, value_head: nn.Module):
         super().__init__()
         self.backbone = backbone
@@ -37,11 +53,24 @@ class ValueNetworkWrapper(nn.Module):
 class PolicyValueNetworkWrapper(nn.Module):
     """Wrapper for joint policy and value networks."""
 
+    backbone_config: Any
+    action_space_size: int
+    flat_to_hierarchical: dict[Any, Any]
+    hierarchical_to_flat: dict[Any, Any]
+    NUM_ACTION_TYPES: int
+    NUM_RESOURCES: int
+    num_tiles: int
+    num_edges: int
+    num_nodes: int
+    num_year_of_plenty_combos: int
+    num_maritime_trades: int
+    num_discard_combinations: int
+
     def __init__(
         self,
         backbone: nn.Module,
         policy_head: FlatPolicyHead | HierarchicalPolicyHead,
-        value_head: ValueHead,
+        value_head: ValueHead | WDLValueHead,
     ):
         super().__init__()
         self.backbone = backbone
