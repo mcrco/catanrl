@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
@@ -59,6 +60,18 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--inference-batch-size", type=int, default=64)
     parser.add_argument("--inference-wait-ms", type=float, default=2.0)
     parser.add_argument("--c-puct", type=float, default=1.5)
+    parser.add_argument(
+        "--value-scale",
+        type=float,
+        default=1.0,
+        help="Multiplier for non-terminal network values backed up by native MCTS",
+    )
+    parser.add_argument(
+        "--canonical-pruning",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable exact successor/discard-order deduplication during search",
+    )
     parser.add_argument("--seed", type=int, default=123)
     parser.add_argument("--turns-limit", type=int, default=1000)
     parser.add_argument("--device", default=None)
@@ -74,6 +87,8 @@ def _parse_args() -> argparse.Namespace:
         parser.error("--budgets must contain positive integers")
     if len(set(args.budgets)) != len(args.budgets):
         parser.error("--budgets must not contain duplicates")
+    if not math.isfinite(args.value_scale) or args.value_scale < 0.0:
+        parser.error("--value-scale must be finite and non-negative")
     if args.skip_probes and args.skip_games:
         parser.error("Cannot combine --skip-probes and --skip-games")
     return args
@@ -150,6 +165,8 @@ def main() -> None:
         "inference_batch_size": args.inference_batch_size,
         "inference_wait_ms": args.inference_wait_ms,
         "c_puct": args.c_puct,
+        "value_scale": args.value_scale,
+        "canonical_pruning": args.canonical_pruning,
         "seed": args.seed,
         "turns_limit": args.turns_limit,
         "device": str(device),
@@ -202,6 +219,8 @@ def main() -> None:
                 inference_batch_size=args.inference_batch_size,
                 inference_wait_ms=args.inference_wait_ms,
                 c_puct=args.c_puct,
+                value_scale=args.value_scale,
+                canonical_pruning=args.canonical_pruning,
                 seed=args.seed,
                 vps_to_win=vps_to_win,
                 discard_limit=discard_limit,
@@ -254,6 +273,8 @@ def main() -> None:
                     device=device,
                     turns_limit=args.turns_limit,
                     game_opponent=args.game_opponent,
+                    value_scale=args.value_scale,
+                    canonical_pruning=args.canonical_pruning,
                 )
                 summary = games.summary()
                 payload["game_sweeps"][str(budget)] = {
