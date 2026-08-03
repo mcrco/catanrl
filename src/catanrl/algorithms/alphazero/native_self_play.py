@@ -6,6 +6,7 @@ import multiprocessing as mp
 import traceback
 from collections import Counter
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Literal
 
 import numpy as np
@@ -35,6 +36,41 @@ from .native_search import run_native_search_policy
 MapType = Literal["BASE", "MINI", "TOURNAMENT"]
 
 
+@dataclass(frozen=True)
+class _NativeSelfPlaySample:
+    actor_state: np.ndarray
+    critic_state: np.ndarray
+    policy: np.ndarray
+    action_mask: np.ndarray
+    player: int
+    search_value: float
+
+    def __iter__(self):
+        """Preserve the historical five-field unpacking used by diagnostics/tests."""
+        return iter(
+            (
+                self.actor_state,
+                self.critic_state,
+                self.policy,
+                self.action_mask,
+                self.player,
+            )
+        )
+
+
+def _blend_terminal_search_value(
+    terminal_value: float,
+    search_value: float,
+    search_weight: float,
+) -> float:
+    """Blend root Q into a terminal win/loss target without changing its scale."""
+    if not 0.0 <= search_weight <= 1.0:
+        raise ValueError("search_weight must be between 0 and 1")
+    terminal = float(np.clip(terminal_value, -1.0, 1.0))
+    search = float(np.clip(search_value, -1.0, 1.0))
+    return (1.0 - search_weight) * terminal + search_weight * search
+
+
 def _native_search_policy(
     *,
     game: NativeGame,
@@ -54,7 +90,7 @@ def _native_search_policy(
     value_scale: float = 1.0,
     canonical_pruning: bool = False,
     search: NativeMCTSSearch | None = None,
-) -> tuple[np.ndarray, int, np.ndarray]:
+) -> tuple[np.ndarray, int, np.ndarray, float]:
     result = run_native_search_policy(
         game=game,
         map_type=map_type,
@@ -74,7 +110,12 @@ def _native_search_policy(
         canonical_pruning=canonical_pruning,
         search=search,
     )
-    return result.policy, result.action, result.full_state
+    return (
+        result.policy,
+        result.action,
+        result.full_state,
+        result.diagnostics.search_value,
+    )
 
 
 def _play_native_self_play_game(
@@ -83,7 +124,7 @@ def _play_native_self_play_game(
     args_dict: dict,
     inference_backend: _NNMCTSInferenceBackend,
 ) -> tuple[
-    list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int]],
+    list[_NativeSelfPlaySample],
     int | None,
 ]:
     map_type: MapType = args_dict["map_type"]
@@ -109,7 +150,7 @@ def _play_native_self_play_game(
         discard_limit=int(args_dict["discard_limit"]),
         vps_to_win=int(args_dict["vps_to_win"]),
     )
-    samples: list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int]] = []
+    samples: list[_NativeSelfPlaySample] = []
     move_number = 0
     search: NativeMCTSSearch | None = None
     turns_limit = int(args_dict.get("turns_limit", TURNS_LIMIT))
@@ -136,13 +177,22 @@ def _play_native_self_play_game(
                         seed=derive_seed(episode_seed, "native_mcts", move_number),
                         canonical_pruning=bool(args_dict.get("canonical_pruning", False)),
                     )
-                policy, action, full_state = _native_search_policy(
+                full_search_probability = float(args_dict.get("full_search_probability", 1.0))
+                full_search = full_search_probability >= 1.0 or (
+                    rng.random() < full_search_probability
+                )
+                num_simulations = (
+                    int(args_dict["num_simulations"])
+                    if full_search
+                    else int(args_dict.get("fast_simulations", args_dict["num_simulations"]))
+                )
+                policy, action, full_state, search_value = _native_search_policy(
                     game=game,
                     map_type=map_type,
                     inference_backend=inference_backend,
                     actor_indices=actor_indices,
                     critic_indices=critic_indices,
-                    num_simulations=int(args_dict["num_simulations"]),
+                    num_simulations=num_simulations,
                     c_puct=float(args_dict["c_puct"]),
                     search_seed=derive_seed(
                         episode_seed,
@@ -163,15 +213,17 @@ def _play_native_self_play_game(
                     canonical_pruning=bool(args_dict.get("canonical_pruning", False)),
                     search=search,
                 )
-                samples.append(
-                    (
-                        full_state[actor_indices].copy(),
-                        full_state[critic_indices].copy(),
-                        policy,
-                        action_mask.copy(),
-                        current_player,
+                if full_search:
+                    samples.append(
+                        _NativeSelfPlaySample(
+                            actor_state=full_state[actor_indices].copy(),
+                            critic_state=full_state[critic_indices].copy(),
+                            policy=policy,
+                            action_mask=action_mask.copy(),
+                            player=current_player,
+                            search_value=search_value,
+                        )
                     )
-                )
             if search is not None and not search.advance(action):
                 search.close()
                 search = None
@@ -209,9 +261,26 @@ def _native_training_worker_main(
             stats["games"] += 1
             if winner is not None:
                 stats[f"wins_{COLOR_ORDER[winner].value}"] += 1
-            for actor_state, critic_state, policy, action_mask, player in samples:
-                value = 0.0 if winner is None else (1.0 if player == winner else -1.0)
-                experiences.append((actor_state, critic_state, policy, action_mask, value))
+            search_value_weight = float(args_dict.get("search_value_weight", 0.0))
+            for sample in samples:
+                terminal_value = (
+                    0.0 if winner is None else (1.0 if sample.player == winner else -1.0)
+                )
+                value = _blend_terminal_search_value(
+                    terminal_value,
+                    sample.search_value,
+                    search_value_weight,
+                )
+                experiences.append(
+                    (
+                        sample.actor_state,
+                        sample.critic_state,
+                        sample.policy,
+                        sample.action_mask,
+                        value,
+                    )
+                )
+            stats["full_search_decisions"] += len(samples)
         result_queue.put(
             {
                 "worker_id": worker_id,
@@ -259,12 +328,23 @@ def generate_native_self_play_data(
     value_scale: float = 1.0,
     tree_reuse: bool = False,
     canonical_pruning: bool = False,
+    full_search_probability: float = 1.0,
+    fast_simulations: int = 64,
+    search_value_weight: float = 0.0,
 ) -> tuple[list[SelfPlayExperience], dict[str, int]]:
     """Generate the trainer's standard replay records with native C++ MCTS."""
     if prunning:
         raise ValueError("Native MCTS does not implement Python action pruning")
     if ismcts_determinizations != 1:
         raise ValueError("Native MCTS currently requires --ismcts-determinizations 1")
+    if not 0.0 < full_search_probability <= 1.0:
+        raise ValueError("full_search_probability must be in (0, 1]")
+    if fast_simulations < 1 or (
+        full_search_probability < 1.0 and fast_simulations > num_simulations
+    ):
+        raise ValueError("fast_simulations must be between 1 and num_simulations")
+    if not 0.0 <= search_value_weight <= 1.0:
+        raise ValueError("search_value_weight must be between 0 and 1")
     if num_games <= 0:
         return [], {}
 
@@ -293,6 +373,9 @@ def generate_native_self_play_data(
         "value_scale": value_scale,
         "tree_reuse": tree_reuse,
         "canonical_pruning": canonical_pruning,
+        "full_search_probability": full_search_probability,
+        "fast_simulations": fast_simulations,
+        "search_value_weight": search_value_weight,
     }
     experiences: list[SelfPlayExperience] = []
     stats: Counter[str] = Counter()

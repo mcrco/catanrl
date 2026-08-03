@@ -225,8 +225,36 @@ def test_collect_self_play_can_dispatch_to_native_backend(
     stats = trainer.collect_self_play(1)
 
     assert called["policy_model"] is trainer.teacher_policy_model
+    assert called["full_search_probability"] == 1.0
+    assert called["fast_simulations"] == 64
+    assert called["search_value_weight"] == 0.0
     assert stats["experiences"] == 1.0
     assert len(trainer.replay_buffer) == 1
+
+
+def test_native_search_value_weight_ramps_by_self_play_iteration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trainer = _trainer()
+    trainer.config.self_play_backend = "cppanatron"
+    trainer.config.search_value_weight_max = 0.6
+    trainer.config.search_value_weight_ramp_iterations = 2
+    weights = []
+
+    def fake_generate_native_self_play_data(**kwargs):
+        weights.append(kwargs["search_value_weight"])
+        return [_experience(1, -1.0)], {"games": 1}
+
+    monkeypatch.setattr(
+        "catanrl.algorithms.alphazero.trainer.generate_native_self_play_data",
+        fake_generate_native_self_play_data,
+    )
+
+    trainer.collect_self_play(1)
+    trainer.collect_self_play(1)
+    trainer.collect_self_play(1)
+
+    assert weights == pytest.approx([0.0, 0.3, 0.6])
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")

@@ -56,6 +56,10 @@ class AlphaZeroConfig:
     value_scale: float = 1.0
     tree_reuse: bool = False
     canonical_pruning: bool = False
+    full_search_probability: float = 1.0
+    fast_simulations: int = 64
+    search_value_weight_max: float = 0.0
+    search_value_weight_ramp_iterations: int = 1
     prunning: bool = False
     ismcts_determinizations: int = 1
     temperature: float = 1.0
@@ -137,6 +141,16 @@ class AlphaZeroTrainer:
             raise ValueError("policy_loss_weight must be positive.")
         if config.value_loss_weight < 0:
             raise ValueError("value_loss_weight cannot be negative.")
+        if not 0.0 < config.full_search_probability <= 1.0:
+            raise ValueError("full_search_probability must be in (0, 1].")
+        if config.fast_simulations < 1 or (
+            config.full_search_probability < 1.0 and config.fast_simulations > config.simulations
+        ):
+            raise ValueError("fast_simulations must be between 1 and simulations.")
+        if not 0.0 <= config.search_value_weight_max <= 1.0:
+            raise ValueError("search_value_weight_max must be between 0 and 1.")
+        if config.search_value_weight_ramp_iterations < 0:
+            raise ValueError("search_value_weight_ramp_iterations cannot be negative.")
 
         self.device = torch.device(
             config.device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -295,8 +309,16 @@ class AlphaZeroTrainer:
         if num_games <= 0:
             return {}
         self._activate_teacher()
-        base_seed = (self.config.seed or 0) + self._self_play_calls * 1_000_003
+        self_play_iteration = self._self_play_calls
+        base_seed = (self.config.seed or 0) + self_play_iteration * 1_000_003
         self._self_play_calls += 1
+        if self.config.search_value_weight_ramp_iterations == 0:
+            search_value_weight = self.config.search_value_weight_max
+        else:
+            search_value_weight = self.config.search_value_weight_max * min(
+                1.0,
+                self_play_iteration / self.config.search_value_weight_ramp_iterations,
+            )
 
         self_play_generator = (
             generate_native_self_play_data
@@ -336,6 +358,9 @@ class AlphaZeroTrainer:
                 value_scale=self.config.value_scale,
                 tree_reuse=self.config.tree_reuse,
                 canonical_pruning=self.config.canonical_pruning,
+                full_search_probability=self.config.full_search_probability,
+                fast_simulations=self.config.fast_simulations,
+                search_value_weight=search_value_weight,
             )
         experiences, stats = self_play_generator(**self_play_kwargs)
         self.replay_buffer.extend(experiences)
@@ -346,6 +371,7 @@ class AlphaZeroTrainer:
             **{key: float(value) for key, value in stats.items()},
             "experiences": float(len(experiences)),
             "replay_size": float(len(self.replay_buffer)),
+            "search_value_weight": float(search_value_weight),
         }
 
     # Retain the old method name for code using the trainer programmatically.

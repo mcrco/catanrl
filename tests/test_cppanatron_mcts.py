@@ -239,6 +239,50 @@ def test_native_self_play_game_emits_standard_legal_training_fields():
         assert player in (0, 1)
 
 
+def test_terminal_search_value_blend_stays_on_win_loss_scale():
+    from catanrl.algorithms.alphazero.native_self_play import (
+        _blend_terminal_search_value,
+    )
+
+    assert _blend_terminal_search_value(1.0, -0.5, 0.0) == 1.0
+    assert _blend_terminal_search_value(1.0, -0.5, 0.25) == pytest.approx(0.625)
+    assert _blend_terminal_search_value(-1.0, 2.0, 0.25) == pytest.approx(-0.5)
+
+
+def test_native_playout_cap_only_records_full_search_decisions():
+    action_space_size = 187
+    backend = MockInferenceBackend(action_space_size)
+    args = {
+        "map_type": "MINI",
+        "num_players": 2,
+        "num_simulations": 2,
+        "fast_simulations": 1,
+        "full_search_probability": 0.0,
+        "c_puct": 1.5,
+        "actor_observation_level": "private",
+        "critic_observation_level": "full",
+        "temperature": 1.0,
+        "final_temperature": 0.1,
+        "target_temperature": 1.0,
+        "temperature_drop_move": 30,
+        "noise_turns": 20,
+        "dirichlet_alpha": 0.3,
+        "dirichlet_frac": 0.25,
+        "vps_to_win": 10,
+        "discard_limit": 7,
+        "turns_limit": 2,
+    }
+
+    samples, winner = _play_native_self_play_game(
+        episode_seed=101,
+        args_dict=args,
+        inference_backend=backend,
+    )
+
+    assert winner is None
+    assert samples == []
+
+
 def test_native_parallel_self_play_returns_shared_experience_type():
     torch.manual_seed(0)
     actor_size = len(get_observation_indices_from_full(2, "MINI", "private"))

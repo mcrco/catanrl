@@ -132,6 +132,33 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         default=False,
         help="Enable exact successor and discard-order deduplication in native MCTS.",
     )
+    search.add_argument(
+        "--full-search-probability",
+        type=float,
+        default=1.0,
+        help=(
+            "Probability that a non-forced decision uses the full search budget and "
+            "is stored as a training target. Other decisions use --fast-simulations."
+        ),
+    )
+    search.add_argument(
+        "--fast-simulations",
+        type=int,
+        default=64,
+        help="Search budget for playout-cap decisions that are not stored in replay.",
+    )
+    search.add_argument(
+        "--search-value-weight-max",
+        type=float,
+        default=0.0,
+        help="Maximum root-search-Q contribution to terminal win/loss value targets.",
+    )
+    search.add_argument(
+        "--search-value-weight-ramp-iterations",
+        type=int,
+        default=1,
+        help="Self-play iterations over which root-Q target weight ramps from zero.",
+    )
     search.add_argument("--prunning", action="store_true")
     search.add_argument("--temperature", type=float, default=1.0)
     search.add_argument("--final-temperature", type=float, default=0.1)
@@ -216,6 +243,7 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         "optimizer-steps": args.optimizer_steps,
         "num-workers": args.num_workers,
         "simulations": args.simulations,
+        "fast-simulations": args.fast_simulations,
         "ismcts-determinizations": args.ismcts_determinizations,
         "batch-size": args.batch_size,
         "buffer-size": args.buffer_size,
@@ -238,6 +266,14 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         parser.error("--max-baseline-regression cannot be negative")
     if not math.isfinite(args.value_scale) or args.value_scale < 0.0:
         parser.error("--value-scale must be finite and non-negative")
+    if not 0.0 < args.full_search_probability <= 1.0:
+        parser.error("--full-search-probability must be in (0, 1]")
+    if args.full_search_probability < 1.0 and args.fast_simulations > args.simulations:
+        parser.error("--fast-simulations cannot exceed --simulations")
+    if not 0.0 <= args.search_value_weight_max <= 1.0:
+        parser.error("--search-value-weight-max must be between 0 and 1")
+    if args.search_value_weight_ramp_iterations < 0:
+        parser.error("--search-value-weight-ramp-iterations cannot be negative")
     if args.value_loss_weight is None:
         args.value_loss_weight = 0.0 if args.mode == "distill" else 1.0
     if args.self_play_backend == "cppanatron":
@@ -728,6 +764,10 @@ def main() -> None:
         value_scale=args.value_scale,
         tree_reuse=args.tree_reuse,
         canonical_pruning=args.canonical_pruning,
+        full_search_probability=args.full_search_probability,
+        fast_simulations=args.fast_simulations,
+        search_value_weight_max=args.search_value_weight_max,
+        search_value_weight_ramp_iterations=args.search_value_weight_ramp_iterations,
         prunning=args.prunning,
         ismcts_determinizations=args.ismcts_determinizations,
         temperature=args.temperature,
