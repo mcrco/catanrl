@@ -445,9 +445,9 @@ def test_native_playout_cap_keeps_fast_decisions_for_value_training():
     assert all(not sample.full_search for sample in samples)
 
 
-def test_native_parallel_self_play_streams_multiple_games_per_worker():
+def test_native_parallel_self_play_streams_and_deduplicates_shared_observations():
     torch.manual_seed(0)
-    actor_size = len(get_observation_indices_from_full(2, "MINI", "private"))
+    actor_size = len(get_observation_indices_from_full(2, "MINI", "full"))
     critic_size = len(get_observation_indices_from_full(2, "MINI", "full"))
     action_space_size = 187
     policy_model = PolicyNetworkWrapper(
@@ -470,7 +470,7 @@ def test_native_parallel_self_play_streams_multiple_games_per_worker():
         num_simulations=1,
         c_puct=1.5,
         prunning=False,
-        actor_observation_level="private",
+        actor_observation_level="full",
         critic_observation_level="full",
         ismcts_determinizations=1,
         inference_batch_size=4,
@@ -492,6 +492,7 @@ def test_native_parallel_self_play_streams_multiple_games_per_worker():
 
     assert stats["games"] == 2
     assert experiences
+    assert all(exp.actor_state is exp.critic_state for exp in experiences)
     assert all(exp.full_search for exp in experiences)
     assert all(exp.policy.shape == (action_space_size,) for exp in experiences)
     assert all(np.all(exp.policy[~exp.action_mask] == 0.0) for exp in experiences)

@@ -148,6 +148,7 @@ def _play_native_self_play_game(
         map_type,
         args_dict["critic_observation_level"],
     )
+    shared_observation = np.array_equal(actor_indices, critic_indices)
     map_seed, game_seed = derive_map_and_game_seeds(episode_seed)
     rng = np.random.default_rng(derive_seed(episode_seed, "native_self_play_actions"))
     game = NativeGame(
@@ -229,10 +230,16 @@ def _play_native_self_play_game(
                     c_scale=float(args_dict.get("c_scale", 1.0)),
                     search_selection=args_dict.get("search_selection", "puct"),
                 )
+                actor_state = full_state[actor_indices].copy()
+                critic_state = (
+                    actor_state
+                    if shared_observation
+                    else full_state[critic_indices].copy()
+                )
                 samples.append(
                     _NativeSelfPlaySample(
-                        actor_state=full_state[actor_indices].copy(),
-                        critic_state=full_state[critic_indices].copy(),
+                        actor_state=actor_state,
+                        critic_state=critic_state,
                         policy=policy,
                         action_mask=action_mask.copy(),
                         player=current_player,

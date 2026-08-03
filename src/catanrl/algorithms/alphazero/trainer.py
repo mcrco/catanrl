@@ -17,20 +17,20 @@ from __future__ import annotations
 import os
 import random
 from collections import deque
-from dataclasses import dataclass
 from collections.abc import Iterator, Sequence
+from dataclasses import dataclass
 from typing import Any, Deque, Literal, Optional
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 
-from ...features.catanatron_utils import ActorObservationLevel, COLOR_ORDER, CriticObservationLevel
-from ...models.inference_utils import values_to_wdl_targets
+from ...features.catanatron_utils import COLOR_ORDER, ActorObservationLevel, CriticObservationLevel
 from ...models.heads import FlatPolicyHead, HierarchicalPolicyHead, WDLValueHead
+from ...models.inference_utils import values_to_wdl_targets
 from ...models.wrappers import PolicyNetworkWrapper, PolicyValueNetworkWrapper, ValueNetworkWrapper
-from .native_self_play import generate_native_self_play_data
 from .native_search import PolicyTarget
+from .native_self_play import generate_native_self_play_data
 from .parallel_self_play import SelfPlayExperience, generate_self_play_data
 
 TrainingMode = Literal["distill", "iterate"]
@@ -522,8 +522,11 @@ class AlphaZeroTrainer:
         critic_states: torch.Tensor | None = None
         value_targets: torch.Tensor | None = None
         if self.config.value_loss_weight > 0:
-            critic_states = torch.from_numpy(np.stack([exp.critic_state for exp in batch])).float()
-            critic_states = critic_states.to(self.device)
+            if not self.uses_shared_network:
+                critic_states = torch.from_numpy(
+                    np.stack([exp.critic_state for exp in batch])
+                ).float()
+                critic_states = critic_states.to(self.device)
             value_targets = torch.from_numpy(
                 np.asarray([exp.value for exp in batch], dtype=np.float32)
             ).to(self.device)
