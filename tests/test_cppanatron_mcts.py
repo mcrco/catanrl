@@ -8,6 +8,7 @@ from typing import cast
 
 from catanrl.algorithms.alphazero.native_search import (
     _completed_q_policy,
+    _native_observations_match,
     run_native_search_policy,
     step_game_and_reconcile_search,
 )
@@ -24,6 +25,7 @@ from catanrl.envs.cppanatron import (
 from catanrl.features.catanatron_utils import get_observation_indices_from_full
 from catanrl.models.heads import FlatPolicyHead
 from catanrl.models.wrappers import PolicyNetworkWrapper, ValueNetworkWrapper
+from catanrl.utils.seeding import derive_map_and_game_seeds
 from nn_mcts_helpers import MockInferenceBackend
 
 
@@ -198,6 +200,39 @@ def test_reused_search_divergence_falls_back_to_fresh_tree() -> None:
 
     assert reconciled is None
     assert search.closed
+
+
+def test_native_observation_contract_tolerates_only_float_roundoff() -> None:
+    reference = np.array([0.0, 1.0, 0.3055555522441864], dtype=np.float32)
+    copied = np.array([0.0, 1.0, 0.3055555820465088], dtype=np.float32)
+
+    assert not np.array_equal(reference, copied)
+    assert _native_observations_match(reference, copied)
+    assert not _native_observations_match(reference, copied + 1e-3)
+
+
+def test_base_native_search_accepts_known_game_copy_roundoff() -> None:
+    episode_seed = 6855958560543738072
+    map_seed, game_seed = derive_map_and_game_seeds(episode_seed)
+    game = NativeGame(
+        2,
+        "BASE",
+        seed=game_seed,
+        map_seed=map_seed,
+        number_placement="random",
+        discard_limit=9,
+        vps_to_win=15,
+    )
+    try:
+        with NativeMCTSSearch(game, "BASE", seed=episode_seed) as search:
+            copied, player = search.root_observation()
+        reference = full_native_features(game, "BASE", game.current_player)
+    finally:
+        game.close()
+
+    assert player == 0
+    assert not np.array_equal(copied, reference)
+    assert _native_observations_match(copied, reference)
 
 
 def test_native_search_policy_reports_depth_and_policy_effect():

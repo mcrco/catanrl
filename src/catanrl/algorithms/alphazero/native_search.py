@@ -13,6 +13,8 @@ from catanrl.players.nn_mcts_player import _NNMCTSInferenceBackend, _visit_distr
 
 MapType = Literal["BASE", "MINI", "TOURNAMENT"]
 PolicyTarget = Literal["visits", "completed-q"]
+_OBSERVATION_ATOL = 1e-7
+_OBSERVATION_RTOL = 1e-6
 
 
 @dataclass(frozen=True)
@@ -50,6 +52,18 @@ class NativeSearchResult:
     diagnostics: NativeSearchDiagnostics
 
 
+def _native_observations_match(left: np.ndarray, right: np.ndarray) -> bool:
+    """Compare native float features while rejecting semantic state drift."""
+    return left.shape == right.shape and bool(
+        np.allclose(
+            left,
+            right,
+            atol=_OBSERVATION_ATOL,
+            rtol=_OBSERVATION_RTOL,
+        )
+    )
+
+
 def step_game_and_reconcile_search(
     *,
     game: NativeGame,
@@ -68,7 +82,7 @@ def step_game_and_reconcile_search(
     if search is not None:
         root_observation, root_player = search.root_observation()
         source_observation = full_native_features(game, map_type, game.current_player)
-        if root_player != game.current_player or not np.array_equal(
+        if root_player != game.current_player or not _native_observations_match(
             root_observation, source_observation
         ):
             # A canonicalized path can invalidate an otherwise reusable child.
@@ -207,8 +221,8 @@ def run_native_search_policy(
         if root_player != game.current_player:
             raise RuntimeError("Native MCTS root player does not match its source game")
         source_state = full_native_features(game, map_type, game.current_player)
-        if not np.array_equal(full_state, source_state):
-            raise RuntimeError("Reused native MCTS tree diverged from its source game")
+        if not _native_observations_match(full_state, source_state):
+            raise RuntimeError("Native MCTS root diverged from its source game")
         root_evaluation = inference_backend.evaluate_leaf(
             full_state[actor_indices],
             full_state[critic_indices],
