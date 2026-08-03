@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+from types import SimpleNamespace
+from typing import Any, cast
 
 import numpy as np
 import pytest
@@ -11,7 +13,7 @@ from torch import nn
 from catanrl.algorithms.alphazero.parallel_self_play import SelfPlayExperience
 from catanrl.algorithms.alphazero.trainer import AlphaZeroConfig, AlphaZeroTrainer
 from catanrl.eval.search_training import decide_promotion
-from catanrl.experiments.train_alphazero import parse_args
+from catanrl.experiments.train_alphazero import _load_initial_weights, parse_args
 from catanrl.models.heads import FlatPolicyHead, ValueHead, WDLValueHead
 from catanrl.models.wrappers import (
     PolicyNetworkWrapper,
@@ -489,6 +491,76 @@ def test_cli_replay_epochs_override_is_opt_in() -> None:
 
     assert fixed_steps.optimizer_epochs == 0
     assert replay_epochs.optimizer_epochs == 2
+
+
+def test_warm_start_can_keep_policy_but_reset_shared_value_head(tmp_path) -> None:
+    torch.manual_seed(11)
+    source = PolicyValueNetworkWrapper(
+        nn.Linear(3, 3),
+        FlatPolicyHead(3, 4),
+        WDLValueHead(3),
+    )
+    checkpoint = tmp_path / "policy_value.pt"
+    torch.save(source.state_dict(), checkpoint)
+
+    torch.manual_seed(17)
+    student = PolicyValueNetworkWrapper(
+        nn.Linear(3, 3),
+        FlatPolicyHead(3, 4),
+        WDLValueHead(3),
+    )
+    teacher = copy.deepcopy(student)
+    fresh_value_state = copy.deepcopy(student.value_head.state_dict())
+    warm_start = SimpleNamespace(
+        checkpoints=SimpleNamespace(
+            policy=str(checkpoint),
+            critic=None,
+            experiment_name="dagger",
+            which="best",
+        )
+    )
+
+    _load_initial_weights(
+        student_policy=student,
+        student_critic=None,
+        teacher_policy=teacher,
+        teacher_critic=None,
+        warm_start=cast(Any, warm_start),
+        reset_value_head=True,
+    )
+
+    assert _same_parameters(student.backbone, source.backbone)
+    assert _same_parameters(student.policy_head, source.policy_head)
+    assert all(
+        torch.equal(value, fresh_value_state[key])
+        for key, value in student.value_head.state_dict().items()
+    )
+    assert not _same_parameters(student.value_head, source.value_head)
+    assert _same_parameters(student, teacher)
+
+
+def test_reset_loaded_value_head_requires_new_warm_start() -> None:
+    with pytest.raises(SystemExit):
+        parse_args(
+            [
+                "--mode",
+                "iterate",
+                "--config",
+                "model.yaml",
+                "--reset-loaded-value-head",
+            ]
+        )
+    with pytest.raises(SystemExit):
+        parse_args(
+            [
+                "--mode",
+                "iterate",
+                "--load-from-experiment",
+                "dagger",
+                "--resume",
+                "--reset-loaded-value-head",
+            ]
+        )
 
 
 def test_cli_native_self_play_requires_plain_mcts() -> None:

@@ -27,10 +27,10 @@ from catanrl.eval.search_training import (
 )
 from catanrl.experiment_store import (
     CHECKPOINTS_DIRNAME,
-    GameConfig,
     KIND_POLICY,
     KIND_POLICY_VALUE,
     KIND_VALUE,
+    GameConfig,
     ResumeContext,
     TrainingWarmStart,
     add_load_from_experiment_arguments,
@@ -66,8 +66,11 @@ from catanrl.models.model_builders import (
     build_policy_model,
     build_policy_value_model,
 )
-from catanrl.models.wrappers import PolicyNetworkWrapper, PolicyValueNetworkWrapper
-from catanrl.models.wrappers import ValueNetworkWrapper
+from catanrl.models.wrappers import (
+    PolicyNetworkWrapper,
+    PolicyValueNetworkWrapper,
+    ValueNetworkWrapper,
+)
 
 PolicyModel = PolicyNetworkWrapper | PolicyValueNetworkWrapper
 CriticModel = ValueNetworkWrapper | None
@@ -277,6 +280,15 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     )
     add_load_from_experiment_arguments(parser)
     add_resume_argument(parser)
+    parser.add_argument(
+        "--reset-loaded-value-head",
+        action="store_true",
+        help=(
+            "Warm-start the policy/backbone from --load-from-experiment but keep a "
+            "freshly initialized value head. This prevents imitation value targets "
+            "from seeding search-guided win/loss training."
+        ),
+    )
     add_experiment_name_argument(parser)
     add_device_argument(parser)
     parser.add_argument("--seed", type=int, default=42)
@@ -314,6 +326,10 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         parser.error("--buffer-size must be at least --batch-size")
     if args.mode == "distill" and not args.load_from_experiment:
         parser.error("--mode distill requires --load-from-experiment as the frozen teacher")
+    if args.reset_loaded_value_head and not args.load_from_experiment:
+        parser.error("--reset-loaded-value-head requires --load-from-experiment")
+    if args.reset_loaded_value_head and args.resume:
+        parser.error("--reset-loaded-value-head cannot be used with --resume")
     if not 0.0 <= args.promotion_threshold <= 1.0:
         parser.error("--promotion-threshold must be between 0 and 1")
     if args.max_baseline_regression < 0:
@@ -415,12 +431,27 @@ def _load_initial_weights(
     teacher_policy: PolicyModel,
     teacher_critic: CriticModel,
     warm_start: TrainingWarmStart | None,
+    reset_value_head: bool = False,
 ) -> None:
+    fresh_value_state: dict[str, torch.Tensor] | None = None
+    value_head: torch.nn.Module | None = None
+    if reset_value_head:
+        if warm_start is None:
+            raise ValueError("reset_value_head requires a warm-start checkpoint")
+        if isinstance(student_policy, PolicyValueNetworkWrapper):
+            value_head = student_policy.value_head
+        elif student_critic is not None:
+            value_head = student_critic.value_head
+        else:
+            raise ValueError("Warm-started model does not expose a value head to reset")
+        fresh_value_state = {
+            key: value.detach().clone() for key, value in value_head.state_dict().items()
+        }
+
     if warm_start is not None:
         checkpoints = warm_start.checkpoints
         policy_state = torch.load(checkpoints.policy, map_location="cpu")
         student_policy.load_state_dict(policy_state)
-        teacher_policy.load_state_dict(policy_state)
         if student_critic is not None:
             if checkpoints.critic is None:
                 raise FileNotFoundError(
@@ -429,8 +460,13 @@ def _load_initial_weights(
                 )
             critic_state = torch.load(checkpoints.critic, map_location="cpu")
             student_critic.load_state_dict(critic_state)
+        if fresh_value_state is not None:
+            assert value_head is not None
+            value_head.load_state_dict(fresh_value_state)
+        teacher_policy.load_state_dict(student_policy.state_dict())
+        if student_critic is not None:
             assert teacher_critic is not None
-            teacher_critic.load_state_dict(critic_state)
+            teacher_critic.load_state_dict(student_critic.state_dict())
         return
 
     teacher_policy.load_state_dict(student_policy.state_dict())
@@ -896,6 +932,7 @@ def main() -> None:
         teacher_policy=teacher_policy,
         teacher_critic=teacher_critic,
         warm_start=setup.warm_start,
+        reset_value_head=args.reset_loaded_value_head,
     )
     trainer = AlphaZeroTrainer(
         config,
