@@ -72,12 +72,12 @@ def step_game_and_reconcile_search(
     search: NativeMCTSSearch | None,
 ) -> NativeMCTSSearch | None:
     """Play an action and retain a subtree only when it exactly follows the game."""
-    retained = search is not None and search.advance(action)
+    game.step(action)
+
+    retained = search is not None and search.advance(action, game)
     if search is not None and not retained:
         search.close()
         search = None
-
-    game.step(action)
 
     if search is not None:
         root_observation, root_player = search.root_observation()

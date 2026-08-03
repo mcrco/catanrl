@@ -193,6 +193,13 @@ class NativeMCTSSearch:
         library.cppanatron_search_reset_metrics.argtypes = [handle]
         library.cppanatron_search_advance.argtypes = [handle, ctypes.c_size_t]
         library.cppanatron_search_advance.restype = ctypes.c_int32
+        if hasattr(library, "cppanatron_search_advance_to_game"):
+            library.cppanatron_search_advance_to_game.argtypes = [
+                handle,
+                ctypes.c_size_t,
+                handle,
+            ]
+            library.cppanatron_search_advance_to_game.restype = ctypes.c_int32
 
     def _raise_last_error(self) -> None:
         message = self._library.cppanatron_last_error()
@@ -307,10 +314,18 @@ class NativeMCTSSearch:
     def reset_metrics(self) -> None:
         self._check_result(self._library.cppanatron_search_reset_metrics(self._handle))
 
-    def advance(self, action: int) -> bool:
+    def advance(self, action: int, observed_game: NativeGame | None = None) -> bool:
         if not 0 <= action < self.action_space_size:
             raise ValueError(f"Action index {action} is outside the flat action space")
-        result = int(self._library.cppanatron_search_advance(self._handle, action))
+        advance_to_game = getattr(
+            self._library,
+            "cppanatron_search_advance_to_game",
+            None,
+        )
+        if observed_game is not None and advance_to_game is not None:
+            result = int(advance_to_game(self._handle, action, observed_game._handle))
+        else:
+            result = int(self._library.cppanatron_search_advance(self._handle, action))
         if result < 0:
             self._raise_last_error()
         return bool(result)

@@ -214,13 +214,45 @@ def test_native_mcts_reuses_a_deterministic_played_subtree():
         game.close()
 
 
+def test_native_mcts_reuses_the_exact_observed_dice_outcome():
+    game = NativeGame(2, "MINI", seed=75, map_seed=77)
+    logits = np.zeros(game.action_space_size, dtype=np.float32)
+    try:
+        while game.current_prompt in (0, 1):
+            game.step(int(np.flatnonzero(game.valid_action_mask())[0]))
+        assert game.current_prompt == 2  # play_turn
+        valid_actions = np.flatnonzero(game.valid_action_mask())
+        assert valid_actions.size == 1
+        roll_action = int(valid_actions[0])
+
+        with NativeMCTSSearch(game, "MINI", seed=79) as search:
+            search.initialize_root(logits)
+            retained_search = step_game_and_reconcile_search(
+                game=game,
+                map_type="MINI",
+                action=roll_action,
+                search=search,
+            )
+
+            assert retained_search is search
+            assert search.metrics().tree_reused
+            root_observation, root_player = search.root_observation()
+            assert root_player == game.current_player
+            np.testing.assert_array_equal(
+                root_observation,
+                full_native_features(game, "MINI", game.current_player),
+            )
+    finally:
+        game.close()
+
+
 def test_reused_search_divergence_falls_back_to_fresh_tree() -> None:
     game = NativeGame(2, "MINI", seed=79, map_seed=83)
 
     class _DivergedSearch:
         closed = False
 
-        def advance(self, _action: int) -> bool:
+        def advance(self, _action: int, _observed_game: NativeGame) -> bool:
             return True
 
         def root_observation(self) -> tuple[np.ndarray, int]:
