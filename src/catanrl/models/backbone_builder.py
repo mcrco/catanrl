@@ -19,7 +19,7 @@ def build_backbone_config(
     xdim_fusion_hidden_dim: int | None = None,
 ) -> BackboneConfig:
     """Build either an MLP or cross-dimensional backbone config."""
-    if backbone_type not in ("mlp", "xdim", "xdim_res"):
+    if backbone_type not in ("mlp", "xdim", "xdim_res", "xdim_compact"):
         raise ValueError(f"Unknown backbone_type '{backbone_type}'")
 
     if backbone_type == "mlp":
@@ -37,14 +37,20 @@ def build_backbone_config(
             "board_height, board_width, board_channels, and numeric_dim are required "
             "for cross-dimensional backbones"
         )
+    assert board_height is not None
+    assert board_width is not None
+    assert board_channels is not None
+    assert numeric_dim is not None
 
     output_dim = hidden_dims[-1] if hidden_dims else 256
     fusion_hidden_dim = (
         xdim_fusion_hidden_dim if xdim_fusion_hidden_dim is not None else output_dim
     )
-    architecture = (
-        "residual_cross_dimensional" if backbone_type == "xdim_res" else "cross_dimensional"
-    )
+    architecture = {
+        "xdim": "cross_dimensional",
+        "xdim_res": "residual_cross_dimensional",
+        "xdim_compact": "compact_cross_dimensional",
+    }[backbone_type]
     return BackboneConfig(
         architecture=architecture,
         args=CrossDimensionalBackboneConfig(

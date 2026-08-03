@@ -164,7 +164,12 @@ def train(
 
     assert 2 <= num_players <= 4, "num_players must be between 2 and 4"
     assert num_envs >= 1, "num_envs must be >= 1"
-    assert backbone_type in ("mlp", "xdim", "xdim_res"), f"Unknown backbone_type '{backbone_type}'"
+    assert backbone_type in (
+        "mlp",
+        "xdim",
+        "xdim_res",
+        "xdim_compact",
+    ), f"Unknown backbone_type '{backbone_type}'"
     if network_mode not in ("separate", "shared"):
         raise ValueError(f"Unknown network_mode '{network_mode}'")
     uses_shared_network = network_mode == "shared"
@@ -228,7 +233,7 @@ def train(
         f"Critic observation: {critic_observation_level}"
     )
     print(f"Actor input dim: {actor_input_dim} | Critic input dim: {critic_input_dim}")
-    if backbone_type in ("xdim", "xdim_res"):
+    if backbone_type in ("xdim", "xdim_res", "xdim_compact"):
         print(f"Board shape (C, W, H): {board_shape} | Actor numeric dim: {actor_numeric_dim}")
         print(
             f"XDim config: cnn_channels={xdim_cnn_channels}, kernel={xdim_cnn_kernel_size}, "

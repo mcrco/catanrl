@@ -722,7 +722,12 @@ def train(
             f"({eval_every_iterations})"
         )
 
-    assert backbone_type in ("mlp", "xdim", "xdim_res"), f"Unknown backbone_type '{backbone_type}'"
+    assert backbone_type in (
+        "mlp",
+        "xdim",
+        "xdim_res",
+        "xdim_compact",
+    ), f"Unknown backbone_type '{backbone_type}'"
     xdim_cnn_channels = list(xdim_cnn_channels)
     if not xdim_cnn_channels:
         raise ValueError("xdim_cnn_channels cannot be empty")
@@ -789,7 +794,7 @@ def train(
         f"Critic observation: {critic_observation_level}"
     )
     print(f"Actor input dim: {actor_dim} | Critic input dim: {critic_dim}")
-    if backbone_type in ("xdim", "xdim_res"):
+    if backbone_type in ("xdim", "xdim_res", "xdim_compact"):
         print(
             f"Board shape (C, W, H): ({board_channels}, {BOARD_WIDTH}, {BOARD_HEIGHT}) | "
             f"Actor numeric dim: {actor_numeric_dim} | Critic numeric dim: {critic_numeric_dim}"

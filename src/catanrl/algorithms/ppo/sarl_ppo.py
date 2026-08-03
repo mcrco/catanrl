@@ -189,7 +189,7 @@ def train(
         save_path = os.path.join("weights", wandb.run.name)
 
     xdim_cnn_channels = list(xdim_cnn_channels)
-    if backbone_type not in ("mlp", "xdim", "xdim_res"):
+    if backbone_type not in ("mlp", "xdim", "xdim_res", "xdim_compact"):
         raise ValueError(f"Unknown backbone_type '{backbone_type}'")
     if backbone_type != "mlp" and not xdim_cnn_channels:
         raise ValueError("xdim_cnn_channels cannot be empty")

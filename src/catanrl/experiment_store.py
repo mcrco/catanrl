@@ -32,9 +32,12 @@ import re
 import subprocess
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Union, cast
 
 import torch
+
+if TYPE_CHECKING:
+    from catanrl.experiments.architecture_config import ArchitecturePreset
 
 from .models.backbones import (
     BackboneConfig,
@@ -48,7 +51,7 @@ from .models.models import (
     build_hierarchical_policy_value_network,
     build_value_network,
 )
-from .models.wrappers import policy_value_to_policy_only
+from .models.wrappers import PolicyValueNetworkWrapper, policy_value_to_policy_only
 from .utils.catanatron_action_space import get_action_space_size
 
 SCHEMA_VERSION = 1
@@ -111,7 +114,11 @@ def backbone_config_from_dict(data: Dict[str, Any]) -> BackboneConfig:
     args = dict(data["args"])
     if architecture == "mlp":
         return BackboneConfig(architecture=architecture, args=MLPBackboneConfig(**args))
-    if architecture in ("cross_dimensional", "residual_cross_dimensional"):
+    if architecture in (
+        "cross_dimensional",
+        "residual_cross_dimensional",
+        "compact_cross_dimensional",
+    ):
         if "cnn_kernel_size" in args and args["cnn_kernel_size"] is not None:
             args["cnn_kernel_size"] = tuple(args["cnn_kernel_size"])
         return BackboneConfig(
@@ -274,9 +281,10 @@ class CheckpointRegistry:
 # --------------------------------------------------------------------------- #
 def build_network(spec: NetworkSpec, game: GameConfig) -> torch.nn.Module:
     """Reconstruct a network module (without weights) from its spec."""
+    map_type = cast(Literal["BASE", "MINI", "TOURNAMENT"], game.map_type)
     num_actions = spec.num_actions
     if num_actions is None and spec.kind in (KIND_POLICY, KIND_POLICY_VALUE):
-        num_actions = get_action_space_size(game.num_players, game.map_type)
+        num_actions = get_action_space_size(game.num_players, map_type)
 
     if spec.kind == KIND_VALUE:
         return build_value_network(spec.backbone)
@@ -284,13 +292,15 @@ def build_network(spec: NetworkSpec, game: GameConfig) -> torch.nn.Module:
     if spec.model_type == "hierarchical":
         if spec.kind == KIND_POLICY_VALUE:
             return build_hierarchical_policy_value_network(
-                spec.backbone, game.num_players, game.map_type
+                spec.backbone, game.num_players, map_type
             )
         return build_hierarchical_policy_network(
-            spec.backbone, game.num_players, game.map_type
+            spec.backbone, game.num_players, map_type
         )
 
     # Default to flat heads.
+    if num_actions is None:
+        raise ValueError("Flat policy network spec is missing num_actions")
     if spec.kind == KIND_POLICY_VALUE:
         return build_flat_policy_value_network(spec.backbone, num_actions)
     return build_flat_policy_network(spec.backbone, num_actions)
@@ -343,6 +353,8 @@ class Experiment:
         model = model.to(device)
 
         if as_policy_only and spec.kind == KIND_POLICY_VALUE:
+            if not isinstance(model, PolicyValueNetworkWrapper):
+                raise TypeError("Policy-value spec rebuilt an incompatible model type")
             model = policy_value_to_policy_only(model).to(device)
 
         if eval_mode:
@@ -402,6 +414,7 @@ _BACKBONE_DISPLAY = {
     "mlp": "mlp",
     "cross_dimensional": "xdim",
     "residual_cross_dimensional": "xdim_res",
+    "compact_cross_dimensional": "xdim_compact",
 }
 
 
@@ -470,7 +483,11 @@ def _hidden_dims_csv(backbone: BackboneConfig) -> str:
 
 
 def _apply_xdim_backbone_args(args: argparse.Namespace, backbone: BackboneConfig) -> None:
-    if backbone.architecture not in ("cross_dimensional", "residual_cross_dimensional"):
+    if backbone.architecture not in (
+        "cross_dimensional",
+        "residual_cross_dimensional",
+        "compact_cross_dimensional",
+    ):
         return
     bb_args = backbone.args
     if not isinstance(bb_args, CrossDimensionalBackboneConfig):
@@ -1145,7 +1162,11 @@ def discover_checkpoints(ckpt_dir: str) -> Dict[str, Dict]:
         )
         if best is None:
             best = next((f for f in role_files if "best" in f.lower()), None)
-        stepped = [(f, _step_of(f)) for f in role_files if _step_of(f) is not None]
+        stepped = [
+            (f, step)
+            for f in role_files
+            if (step := _step_of(f)) is not None
+        ]
         latest = max(stepped, key=lambda x: x[1])[0] if stepped else best
         roles[role] = {
             "files": sorted(role_files),

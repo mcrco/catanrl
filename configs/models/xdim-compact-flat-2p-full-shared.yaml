@@ -1,0 +1,21 @@
+# Compact shared policy/value model for high-throughput AlphaZero self-play.
+name: xdim-compact-flat-2p-full-shared
+
+model:
+  model_type: flat
+  backbone_type: xdim_compact
+  policy_hidden_dims: [256, 256]
+  critic_hidden_dims: [256, 256]
+  policy_mode: full
+  critic_mode: full
+  network_mode: shared
+  xdim_cnn_channels: [64, 128, 128]
+  xdim_cnn_kernel_size: [3, 5]
+  xdim_policy_fusion_hidden_dim: 256
+  xdim_critic_fusion_hidden_dim: 256
+
+game:
+  map_type: BASE
+  vps_to_win: 15
+  discard_limit: 9
+  num_players: 2

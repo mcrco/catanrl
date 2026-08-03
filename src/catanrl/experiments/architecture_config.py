@@ -11,12 +11,12 @@ import yaml
 
 ObservationLevel = Literal["private", "public", "full"]
 NetworkMode = Literal["shared", "separate"]
-BackboneType = Literal["mlp", "xdim", "xdim_res"]
+BackboneType = Literal["mlp", "xdim", "xdim_res", "xdim_compact"]
 MapType = Literal["BASE", "MINI", "TOURNAMENT"]
 
 OBSERVATION_LEVEL_CHOICES = ("private", "public", "full")
 NETWORK_MODE_CHOICES = ("shared", "separate")
-BACKBONE_TYPE_CHOICES = ("mlp", "xdim", "xdim_res")
+BACKBONE_TYPE_CHOICES = ("mlp", "xdim", "xdim_res", "xdim_compact")
 MAP_TYPE_CHOICES = ("BASE", "MINI", "TOURNAMENT")
 MODEL_TYPE_CHOICES = ("flat", "hierarchical")
 

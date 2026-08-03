@@ -15,6 +15,7 @@ class MLPBackboneConfig:
 @dataclass
 class CrossDimensionalBackboneConfig:
     """Based on this paper: https://arxiv.org/pdf/2008.07079."""
+
     board_height: int = 11
     board_width: int = 21
     board_channels: int = 20
@@ -145,8 +146,8 @@ class CrossDimensionalBackbone(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Split flattened input into numeric and board components
-        numeric_features = x[:, :self.numeric_dim]
-        board_flat = x[:, self.numeric_dim:]
+        numeric_features = x[:, : self.numeric_dim]
+        board_flat = x[:, self.numeric_dim :]
 
         # Reshape board to (batch, H, W, C) then permute to (batch, C, H, W) for Conv2d
         board_tensor = board_flat.reshape(
@@ -166,6 +167,105 @@ class CrossDimensionalBackbone(nn.Module):
         output = self.fusion(combined)
 
         return output
+
+
+class CompactCrossDimensionalBackbone(nn.Module):
+    """Strided xdim encoder sized for high-throughput search self-play.
+
+    The observation and action contracts are identical to the established xdim
+    models. Unlike :class:`CrossDimensionalBackbone`, the spatial branch is
+    downsampled before projection, avoiding a tens-of-millions-parameter dense
+    layer over the full 11x21 grid.
+    """
+
+    def __init__(self, config: CrossDimensionalBackboneConfig):
+        super().__init__()
+        if not config.cnn_channels:
+            raise ValueError("cnn_channels cannot be empty")
+        if not config.numeric_hidden_dims:
+            raise ValueError("numeric_hidden_dims cannot be empty")
+        self.config = config
+        self.numeric_dim = config.numeric_dim
+        self.board_height = config.board_height
+        self.board_width = config.board_width
+        self.board_channels = config.board_channels
+
+        cnn_layers: list[nn.Module] = []
+        in_channels = config.board_channels
+        current_h = config.board_height
+        current_w = config.board_width
+        pad_h = (config.cnn_kernel_size[0] - 1) // 2
+        pad_w = (config.cnn_kernel_size[1] - 1) // 2
+        for out_channels in config.cnn_channels:
+            cnn_layers.append(
+                nn.Conv2d(
+                    in_channels,
+                    out_channels,
+                    kernel_size=config.cnn_kernel_size,
+                    stride=2,
+                    padding=(pad_h, pad_w),
+                )
+            )
+            groups = next(
+                candidate
+                for candidate in range(min(8, out_channels), 0, -1)
+                if out_channels % candidate == 0
+            )
+            cnn_layers.append(nn.GroupNorm(groups, out_channels))
+            cnn_layers.append(nn.SiLU())
+            in_channels = out_channels
+            current_h = (current_h + 1) // 2
+            current_w = (current_w + 1) // 2
+        self.cnn = nn.Sequential(*cnn_layers)
+        spatial_dim = config.cnn_channels[-1] * current_h * current_w
+        self.spatial_projection = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(spatial_dim, config.fusion_hidden_dim),
+            nn.LayerNorm(config.fusion_hidden_dim),
+            nn.SiLU(),
+        )
+
+        numeric_layers: list[nn.Module] = []
+        in_dim = config.numeric_dim
+        for hidden_dim in config.numeric_hidden_dims:
+            numeric_layers.extend(
+                (nn.Linear(in_dim, hidden_dim), nn.LayerNorm(hidden_dim), nn.SiLU())
+            )
+            in_dim = hidden_dim
+        self.numeric_mlp = nn.Sequential(*numeric_layers)
+
+        self.fusion = nn.Sequential(
+            nn.Linear(config.fusion_hidden_dim + in_dim, config.fusion_hidden_dim),
+            nn.LayerNorm(config.fusion_hidden_dim),
+            nn.SiLU(),
+            nn.Linear(config.fusion_hidden_dim, config.output_dim),
+            nn.LayerNorm(config.output_dim),
+            nn.SiLU(),
+        )
+        self.output_dim = config.output_dim
+        self._init_weights()
+
+    def _init_weights(self) -> None:
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                orthogonal_init(module)
+            elif isinstance(module, nn.Conv2d):
+                nn.init.orthogonal_(module.weight)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        numeric_features = x[:, : self.numeric_dim]
+        board_tensor = x[:, self.numeric_dim :].reshape(
+            -1,
+            self.board_height,
+            self.board_width,
+            self.board_channels,
+        )
+        board_tensor = board_tensor.permute(0, 3, 1, 2)
+        spatial_features = self.spatial_projection(self.cnn(board_tensor))
+        numeric_features = self.numeric_mlp(numeric_features)
+        return self.fusion(torch.cat((spatial_features, numeric_features), dim=-1))
 
 
 class ResidualCrossDimensionalBackbone(nn.Module):
@@ -253,8 +353,8 @@ class ResidualCrossDimensionalBackbone(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Split flattened input into numeric and board components
-        numeric_features = x[:, :self.numeric_dim]
-        board_flat = x[:, self.numeric_dim:]
+        numeric_features = x[:, : self.numeric_dim]
+        board_flat = x[:, self.numeric_dim :]
 
         # Reshape board to (batch, H, W, C) then permute to (batch, C, H, W) for Conv2d
         board_tensor = board_flat.reshape(
@@ -313,6 +413,10 @@ def create_backbone(config: BackboneConfig) -> Tuple[nn.Module, int]:
     elif config.architecture == "residual_cross_dimensional":
         assert isinstance(config.args, CrossDimensionalBackboneConfig)
         backbone = ResidualCrossDimensionalBackbone(config.args)
+        return backbone, config.args.output_dim
+    elif config.architecture == "compact_cross_dimensional":
+        assert isinstance(config.args, CrossDimensionalBackboneConfig)
+        backbone = CompactCrossDimensionalBackbone(config.args)
         return backbone, config.args.output_dim
     else:
         raise ValueError(f"Unsupported architecture: {config.architecture}")
