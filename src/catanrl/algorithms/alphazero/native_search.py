@@ -49,6 +49,34 @@ class NativeSearchResult:
     diagnostics: NativeSearchDiagnostics
 
 
+def step_game_and_reconcile_search(
+    *,
+    game: NativeGame,
+    map_type: MapType,
+    action: int,
+    search: NativeMCTSSearch | None,
+) -> NativeMCTSSearch | None:
+    """Play an action and retain a subtree only when it exactly follows the game."""
+    retained = search is not None and search.advance(action)
+    if search is not None and not retained:
+        search.close()
+        search = None
+
+    game.step(action)
+
+    if search is not None:
+        root_observation, root_player = search.root_observation()
+        source_observation = full_native_features(game, map_type, game.current_player)
+        if root_player != game.current_player or not np.array_equal(
+            root_observation, source_observation
+        ):
+            # A canonicalized path can invalidate an otherwise reusable child.
+            # A fresh tree is exact and preferable to aborting a self-play batch.
+            search.close()
+            search = None
+    return search
+
+
 def _softmax(values: np.ndarray) -> np.ndarray:
     finite_values = np.where(np.isfinite(values), values, -np.inf)
     maximum = float(np.max(finite_values))
@@ -210,4 +238,5 @@ __all__ = [
     "NativeSearchDiagnostics",
     "NativeSearchResult",
     "run_native_search_policy",
+    "step_game_and_reconcile_search",
 ]

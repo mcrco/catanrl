@@ -31,7 +31,7 @@ from .parallel_self_play import (
     _assign_episode_seeds,
     run_inference_server_workers,
 )
-from .native_search import run_native_search_policy
+from .native_search import run_native_search_policy, step_game_and_reconcile_search
 
 MapType = Literal["BASE", "MINI", "TOURNAMENT"]
 
@@ -225,10 +225,12 @@ def _play_native_self_play_game(
                         full_search=full_search,
                     )
                 )
-            if search is not None and not search.advance(action):
-                search.close()
-                search = None
-            game.step(action)
+            search = step_game_and_reconcile_search(
+                game=game,
+                map_type=map_type,
+                action=action,
+                search=search,
+            )
             move_number += 1
         return samples, game.winner
     finally:

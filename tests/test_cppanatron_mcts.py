@@ -4,8 +4,12 @@ import numpy as np
 import pytest
 import torch
 from torch import nn
+from typing import cast
 
-from catanrl.algorithms.alphazero.native_search import run_native_search_policy
+from catanrl.algorithms.alphazero.native_search import (
+    run_native_search_policy,
+    step_game_and_reconcile_search,
+)
 from catanrl.algorithms.alphazero.native_self_play import (
     _play_native_self_play_game,
     generate_native_self_play_data,
@@ -117,8 +121,13 @@ def test_native_mcts_reuses_a_deterministic_played_subtree():
                 if leaf is not None:
                     search.evaluate_leaf(logits, 0.2)
             action = int(np.argmax(search.root_visits()))
-            assert search.advance(action)
-            game.step(action)
+            retained_search = step_game_and_reconcile_search(
+                game=game,
+                map_type="MINI",
+                action=action,
+                search=search,
+            )
+            assert retained_search is search
             root_observation, root_player = search.root_observation()
             assert root_player == game.current_player
             np.testing.assert_array_equal(
@@ -151,6 +160,38 @@ def test_native_mcts_reuses_a_deterministic_played_subtree():
             assert result.diagnostics.backed_up_network_value == pytest.approx(0.2)
     finally:
         game.close()
+
+
+def test_reused_search_divergence_falls_back_to_fresh_tree() -> None:
+    game = NativeGame(2, "MINI", seed=79, map_seed=83)
+
+    class _DivergedSearch:
+        closed = False
+
+        def advance(self, _action: int) -> bool:
+            return True
+
+        def root_observation(self) -> tuple[np.ndarray, int]:
+            observation = full_native_features(game, "MINI", game.current_player)
+            return np.zeros_like(observation), game.current_player
+
+        def close(self) -> None:
+            self.closed = True
+
+    search = _DivergedSearch()
+    action = int(np.flatnonzero(game.valid_action_mask())[0])
+    try:
+        reconciled = step_game_and_reconcile_search(
+            game=game,
+            map_type="MINI",
+            action=action,
+            search=cast(NativeMCTSSearch, search),
+        )
+    finally:
+        game.close()
+
+    assert reconciled is None
+    assert search.closed
 
 
 def test_native_search_policy_reports_depth_and_policy_effect():
@@ -216,6 +257,8 @@ def test_native_self_play_game_emits_standard_legal_training_fields():
         "vps_to_win": 10,
         "discard_limit": 7,
         "turns_limit": 2,
+        "tree_reuse": True,
+        "canonical_pruning": True,
     }
 
     samples, winner = _play_native_self_play_game(
@@ -228,15 +271,15 @@ def test_native_self_play_game_emits_standard_legal_training_fields():
     assert samples
     actor_size = len(get_observation_indices_from_full(2, "MINI", "private"))
     critic_size = len(get_observation_indices_from_full(2, "MINI", "full"))
-    for actor_state, critic_state, policy, action_mask, player in samples:
-        assert actor_state.shape == (actor_size,)
-        assert critic_state.shape == (critic_size,)
-        assert policy.shape == action_mask.shape == (action_space_size,)
-        assert action_mask.dtype == np.bool_
-        assert np.count_nonzero(action_mask) > 1
-        assert float(policy.sum()) == pytest.approx(1.0)
-        assert np.all(policy[~action_mask] == 0.0)
-        assert player in (0, 1)
+    for sample in samples:
+        assert sample.actor_state.shape == (actor_size,)
+        assert sample.critic_state.shape == (critic_size,)
+        assert sample.policy.shape == sample.action_mask.shape == (action_space_size,)
+        assert sample.action_mask.dtype == np.bool_
+        assert np.count_nonzero(sample.action_mask) > 1
+        assert float(sample.policy.sum()) == pytest.approx(1.0)
+        assert np.all(sample.policy[~sample.action_mask] == 0.0)
+        assert sample.player in (0, 1)
 
 
 def test_terminal_search_value_blend_stays_on_win_loss_scale():

@@ -13,6 +13,7 @@ import torch
 from catanrl.algorithms.alphazero.native_search import (
     NativeSearchDiagnostics,
     run_native_search_policy,
+    step_game_and_reconcile_search,
 )
 from catanrl.algorithms.alphazero.parallel_self_play import run_inference_server_workers
 from catanrl.envs.cppanatron import NativeGame, NativeMCTSSearch, full_native_features
@@ -371,10 +372,12 @@ def _play_budget_game(
                     critic_indices,
                     inference_backend,
                 )
-            if search is not None and not search.advance(action):
-                search.close()
-                search = None
-            game.step(action)
+            search = step_game_and_reconcile_search(
+                game=game,
+                map_type=args_dict["map_type"],
+                action=action,
+                search=search,
+            )
             decision_index += 1
 
         winner = game.winner
