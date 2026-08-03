@@ -323,6 +323,9 @@ def _search(
         value_scale=float(args_dict.get("value_scale", 1.0)),
         canonical_pruning=bool(args_dict.get("canonical_pruning", False)),
         search=search,
+        search_selection=args_dict.get("search_selection", "puct"),
+        c_visit=float(args_dict.get("c_visit", 50.0)),
+        c_scale=float(args_dict.get("c_scale", 1.0)),
     )
 
 
@@ -374,6 +377,9 @@ def _play_budget_game(
                             decision_index,
                         ),
                         canonical_pruning=bool(args_dict.get("canonical_pruning", False)),
+                        search_selection=args_dict.get("search_selection", "puct"),
+                        c_visit=float(args_dict.get("c_visit", 50.0)),
+                        c_scale=float(args_dict.get("c_scale", 1.0)),
                     )
                 search_result = _search(
                     game=game,
@@ -592,6 +598,9 @@ def _common_args(
     tree_reuse: bool = False,
     canonical_pruning: bool = False,
     game_opponent: GameOpponent = "raw",
+    search_selection: str = "puct",
+    c_visit: float = 50.0,
+    c_scale: float = 1.0,
 ) -> dict[str, Any]:
     return {
         "map_type": map_type,
@@ -606,6 +615,9 @@ def _common_args(
         "tree_reuse": tree_reuse,
         "canonical_pruning": canonical_pruning,
         "game_opponent": game_opponent,
+        "search_selection": search_selection,
+        "c_visit": c_visit,
+        "c_scale": c_scale,
     }
 
 
@@ -633,6 +645,9 @@ def run_native_budget_games(
     tree_reuse: bool = False,
     canonical_pruning: bool = False,
     game_opponent: GameOpponent = "raw",
+    search_selection: str = "puct",
+    c_visit: float = 50.0,
+    c_scale: float = 1.0,
 ) -> NativeBudgetGameResult:
     if budget < 1:
         raise ValueError("budget must be at least 1")
@@ -640,6 +655,8 @@ def run_native_budget_games(
         raise ValueError("games_per_seat must be at least 1")
     if game_opponent not in ("raw", "value"):
         raise ValueError("game_opponent must be 'raw' or 'value'")
+    if search_selection not in ("puct", "completed-q"):
+        raise ValueError("search_selection must be 'puct' or 'completed-q'")
     scenarios = [
         (seat, derive_seed(seed, "native_budget_episode", game_index))
         for seat in range(2)
@@ -658,6 +675,9 @@ def run_native_budget_games(
         tree_reuse=tree_reuse,
         canonical_pruning=canonical_pruning,
         game_opponent=game_opponent,
+        search_selection=search_selection,
+        c_visit=c_visit,
+        c_scale=c_scale,
     )
     aggregate = NativeBudgetGameResult()
 
@@ -711,6 +731,9 @@ def run_native_budget_position_probes(
     show_tqdm: bool = True,
     value_scale: float = 1.0,
     canonical_pruning: bool = False,
+    search_selection: str = "puct",
+    c_visit: float = 50.0,
+    c_scale: float = 1.0,
 ) -> NativeBudgetProbeResult:
     if not budgets or any(int(budget) < 1 for budget in budgets):
         raise ValueError("budgets must contain positive simulation counts")
@@ -718,6 +741,8 @@ def run_native_budget_position_probes(
         raise ValueError("num_games must be at least 1")
     if probe_stride < 1:
         raise ValueError("probe_stride must be at least 1")
+    if search_selection not in ("puct", "completed-q"):
+        raise ValueError("search_selection must be 'puct' or 'completed-q'")
     indexed_seeds = [
         (game_index, derive_seed(seed, "native_probe_episode", game_index))
         for game_index in range(num_games)
@@ -734,6 +759,9 @@ def run_native_budget_position_probes(
         probe_stride=probe_stride,
         value_scale=value_scale,
         canonical_pruning=canonical_pruning,
+        search_selection=search_selection,
+        c_visit=c_visit,
+        c_scale=c_scale,
     )
     aggregate = NativeBudgetProbeResult()
 

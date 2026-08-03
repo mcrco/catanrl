@@ -37,6 +37,8 @@ class NativeMCTSSearchMetrics:
     pruned_actions: int
     coalesced_outcomes: int
     tree_reused: bool
+    q_min: float | None
+    q_max: float | None
 
 
 class NativeMCTSSearch:
@@ -56,7 +58,12 @@ class NativeMCTSSearch:
         c_puct: float = 1.5,
         seed: int = 0,
         canonical_pruning: bool = False,
+        search_selection: str = "puct",
+        c_visit: float = 50.0,
+        c_scale: float = 1.0,
     ) -> None:
+        if search_selection not in ("puct", "completed-q"):
+            raise ValueError("search_selection must be 'puct' or 'completed-q'")
         self._handle = None
         self._library = _load_library()
         self._configure_signatures()
@@ -87,6 +94,19 @@ class NativeMCTSSearch:
         )
         if not self._handle:
             self._raise_last_error()
+        self.search_selection = search_selection
+        if search_selection == "completed-q":
+            configure = getattr(
+                self._library,
+                "cppanatron_search_enable_completed_q_selection",
+                None,
+            )
+            if configure is None:
+                self.close()
+                raise RuntimeError(
+                    "cppanatron library does not support completed-Q search selection"
+                )
+            self._check_result(configure(self._handle, float(c_visit), float(c_scale)))
 
     def _configure_signatures(self) -> None:
         library = self._library
@@ -113,6 +133,17 @@ class NativeMCTSSearch:
             float_pointer,
             ctypes.c_size_t,
         ]
+        if hasattr(library, "cppanatron_search_set_root_value"):
+            library.cppanatron_search_set_root_value.argtypes = [
+                handle,
+                ctypes.c_double,
+            ]
+        if hasattr(library, "cppanatron_search_enable_completed_q_selection"):
+            library.cppanatron_search_enable_completed_q_selection.argtypes = [
+                handle,
+                ctypes.c_double,
+                ctypes.c_double,
+            ]
         library.cppanatron_search_add_root_dirichlet_noise.argtypes = [
             handle,
             ctypes.c_double,
@@ -147,6 +178,12 @@ class NativeMCTSSearch:
             ctypes.POINTER(ctypes.c_double),
             ctypes.c_size_t,
         ]
+        if hasattr(library, "cppanatron_search_q_bounds"):
+            library.cppanatron_search_q_bounds.argtypes = [
+                handle,
+                ctypes.POINTER(ctypes.c_double),
+                ctypes.POINTER(ctypes.c_double),
+            ]
         library.cppanatron_search_get_metrics.argtypes = [
             handle,
             ctypes.POINTER(_SearchMetrics),
@@ -182,6 +219,12 @@ class NativeMCTSSearch:
                 logits.size,
             )
         )
+
+    def set_root_value(self, value: float) -> None:
+        setter = getattr(self._library, "cppanatron_search_set_root_value", None)
+        if setter is None:
+            raise RuntimeError("cppanatron library does not support root network values")
+        self._check_result(setter(self._handle, float(value)))
 
     def add_root_dirichlet_noise(self, alpha: float, fraction: float) -> None:
         self._check_result(
@@ -280,6 +323,15 @@ class NativeMCTSSearch:
                 ctypes.byref(metrics),
             )
         )
+        q_min_value: float | None = None
+        q_max_value: float | None = None
+        bounds = getattr(self._library, "cppanatron_search_q_bounds", None)
+        if bounds is not None:
+            q_min = ctypes.c_double()
+            q_max = ctypes.c_double()
+            self._check_result(bounds(self._handle, ctypes.byref(q_min), ctypes.byref(q_max)))
+            q_min_value = float(q_min.value)
+            q_max_value = float(q_max.value)
         return NativeMCTSSearchMetrics(
             simulations=int(metrics.simulations),
             principal_variation_depth=int(metrics.principal_variation_depth),
@@ -290,6 +342,8 @@ class NativeMCTSSearch:
             pruned_actions=int(metrics.pruned_actions),
             coalesced_outcomes=int(metrics.coalesced_outcomes),
             tree_reused=bool(metrics.tree_reused),
+            q_min=q_min_value,
+            q_max=q_max_value,
         )
 
     def close(self) -> None:

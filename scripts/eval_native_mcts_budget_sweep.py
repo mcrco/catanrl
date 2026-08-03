@@ -61,6 +61,14 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--inference-wait-ms", type=float, default=2.0)
     parser.add_argument("--c-puct", type=float, default=1.5)
     parser.add_argument(
+        "--search-selection",
+        choices=("puct", "completed-q"),
+        default="puct",
+        help="Ordinary PUCT or Canopy-style completed-Q interior allocation",
+    )
+    parser.add_argument("--c-visit", type=float, default=50.0)
+    parser.add_argument("--c-scale", type=float, default=1.0)
+    parser.add_argument(
         "--value-scale",
         type=float,
         default=1.0,
@@ -89,6 +97,10 @@ def _parse_args() -> argparse.Namespace:
         parser.error("--budgets must not contain duplicates")
     if not math.isfinite(args.value_scale) or args.value_scale < 0.0:
         parser.error("--value-scale must be finite and non-negative")
+    if not math.isfinite(args.c_visit) or args.c_visit < 0.0:
+        parser.error("--c-visit must be finite and non-negative")
+    if not math.isfinite(args.c_scale) or args.c_scale < 0.0:
+        parser.error("--c-scale must be finite and non-negative")
     if args.skip_probes and args.skip_games:
         parser.error("Cannot combine --skip-probes and --skip-games")
     return args
@@ -165,6 +177,9 @@ def main() -> None:
         "inference_batch_size": args.inference_batch_size,
         "inference_wait_ms": args.inference_wait_ms,
         "c_puct": args.c_puct,
+        "search_selection": args.search_selection,
+        "c_visit": args.c_visit,
+        "c_scale": args.c_scale,
         "value_scale": args.value_scale,
         "canonical_pruning": args.canonical_pruning,
         "seed": args.seed,
@@ -219,6 +234,9 @@ def main() -> None:
                 inference_batch_size=args.inference_batch_size,
                 inference_wait_ms=args.inference_wait_ms,
                 c_puct=args.c_puct,
+                search_selection=args.search_selection,
+                c_visit=args.c_visit,
+                c_scale=args.c_scale,
                 value_scale=args.value_scale,
                 canonical_pruning=args.canonical_pruning,
                 seed=args.seed,
@@ -267,6 +285,9 @@ def main() -> None:
                     inference_batch_size=args.inference_batch_size,
                     inference_wait_ms=args.inference_wait_ms,
                     c_puct=args.c_puct,
+                    search_selection=args.search_selection,
+                    c_visit=args.c_visit,
+                    c_scale=args.c_scale,
                     seed=args.seed,
                     vps_to_win=vps_to_win,
                     discard_limit=discard_limit,

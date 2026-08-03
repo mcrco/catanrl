@@ -142,6 +142,15 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         help="Enable exact successor and discard-order deduplication in native MCTS.",
     )
     search.add_argument(
+        "--search-selection",
+        choices=("puct", "completed-q"),
+        default="puct",
+        help=(
+            "Tree allocation rule: ordinary PUCT at every node or Canopy-style "
+            "root PUCT plus completed-Q improved-policy allocation below the root."
+        ),
+    )
+    search.add_argument(
         "--full-search-probability",
         type=float,
         default=1.0,
@@ -333,6 +342,8 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         parser.error("--c-scale must be finite and non-negative")
     if args.policy_target == "completed-q" and args.self_play_backend != "cppanatron":
         parser.error("--policy-target completed-q currently requires cppanatron self-play")
+    if args.search_selection == "completed-q" and args.self_play_backend != "cppanatron":
+        parser.error("--search-selection completed-q currently requires cppanatron self-play")
     if args.value_loss_weight is None:
         args.value_loss_weight = 0.0 if args.mode == "distill" else 1.0
     if args.self_play_backend == "cppanatron":
@@ -841,6 +852,7 @@ def main() -> None:
         value_scale=args.value_scale,
         tree_reuse=args.tree_reuse,
         canonical_pruning=args.canonical_pruning,
+        search_selection=args.search_selection,
         policy_target=args.policy_target,
         c_visit=args.c_visit,
         c_scale=args.c_scale,

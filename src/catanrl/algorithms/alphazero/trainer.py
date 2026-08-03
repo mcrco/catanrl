@@ -59,6 +59,7 @@ class AlphaZeroConfig:
     value_scale: float = 1.0
     tree_reuse: bool = False
     canonical_pruning: bool = False
+    search_selection: str = "puct"
     policy_target: PolicyTarget = "visits"
     c_visit: float = 50.0
     c_scale: float = 1.0
@@ -192,6 +193,8 @@ class AlphaZeroTrainer:
             raise ValueError("search_value_weight_ramp_iterations cannot be negative.")
         if config.policy_target not in ("visits", "completed-q"):
             raise ValueError("policy_target must be 'visits' or 'completed-q'.")
+        if config.search_selection not in ("puct", "completed-q"):
+            raise ValueError("search_selection must be 'puct' or 'completed-q'.")
         if (
             not np.isfinite(config.c_visit)
             or config.c_visit < 0.0
@@ -449,6 +452,7 @@ class AlphaZeroTrainer:
                 value_scale=self.config.value_scale,
                 tree_reuse=self.config.tree_reuse,
                 canonical_pruning=self.config.canonical_pruning,
+                search_selection=self.config.search_selection,
                 full_search_probability=self.config.full_search_probability,
                 fast_simulations=self.config.fast_simulations,
                 search_value_weight=search_value_weight,

@@ -388,6 +388,7 @@ def test_collect_self_play_can_dispatch_to_native_backend(
     assert called["policy_target"] == "visits"
     assert called["c_visit"] == 50.0
     assert called["c_scale"] == 1.0
+    assert called["search_selection"] == "puct"
     assert stats["experiences"] == 1.0
     assert len(trainer.replay_buffer) == 1
 
@@ -553,6 +554,36 @@ def test_cli_completed_q_policy_target_requires_native_search() -> None:
                 "--config",
                 "model.yaml",
                 "--policy-target",
+                "completed-q",
+            ]
+        )
+
+
+def test_cli_completed_q_search_selection_requires_native_search() -> None:
+    args = parse_args(
+        [
+            "--mode",
+            "iterate",
+            "--config",
+            "model.yaml",
+            "--self-play-backend",
+            "cppanatron",
+            "--ismcts-determinizations",
+            "1",
+            "--search-selection",
+            "completed-q",
+        ]
+    )
+    assert args.search_selection == "completed-q"
+
+    with pytest.raises(SystemExit):
+        parse_args(
+            [
+                "--mode",
+                "iterate",
+                "--config",
+                "model.yaml",
+                "--search-selection",
                 "completed-q",
             ]
         )

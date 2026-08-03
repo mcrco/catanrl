@@ -110,6 +110,42 @@ def test_native_mcts_rejects_wrong_policy_shape():
         game.close()
 
 
+def test_completed_q_search_uses_canopy_root_allocation_and_global_q_bounds():
+    game = NativeGame(2, "MINI", seed=11, map_seed=13)
+    legal_indices = np.flatnonzero(game.valid_action_mask())
+    assert legal_indices.size > 1
+    logits = np.full(game.action_space_size, -20.0, dtype=np.float32)
+    logits[legal_indices[-1]] = 20.0
+
+    def first_visit(search_selection: str) -> tuple[np.ndarray, object]:
+        with NativeMCTSSearch(
+            game,
+            "MINI",
+            seed=17,
+            search_selection=search_selection,
+            c_visit=50.0,
+            c_scale=1.0,
+        ) as search:
+            if search_selection == "completed-q":
+                search.set_root_value(0.25)
+            search.initialize_root(logits)
+            leaf = search.select_leaf()
+            assert leaf is not None
+            search.evaluate_leaf(logits, -0.75)
+            return search.root_visits(), search.metrics()
+
+    try:
+        puct_visits, _ = first_visit("puct")
+        completed_visits, completed_metrics = first_visit("completed-q")
+    finally:
+        game.close()
+
+    assert int(np.argmax(puct_visits)) == int(legal_indices[-1])
+    assert int(np.argmax(completed_visits)) == int(legal_indices[0])
+    assert completed_metrics.q_min <= -0.75
+    assert completed_metrics.q_max >= 0.25
+
+
 def test_native_mcts_reuses_a_deterministic_played_subtree():
     game = NativeGame(2, "MINI", seed=59, map_seed=61)
     logits = np.zeros(game.action_space_size, dtype=np.float32)
@@ -293,6 +329,24 @@ def test_completed_q_policy_improves_logits_and_completes_unvisited_actions():
     expected /= expected.sum()
     np.testing.assert_allclose(policy, expected)
     assert policy[0] > policy[2] > policy[1]
+
+
+def test_completed_q_policy_uses_search_wide_q_bounds_when_available():
+    policy = _completed_q_policy(
+        logits=np.zeros(3),
+        visits=np.array([10.0, 2.0, 0.0]),
+        action_values=np.array([0.5, -0.5, np.nan]),
+        network_value=0.0,
+        c_visit=0.0,
+        c_scale=1.0,
+        temperature=1.0,
+        q_min=-1.0,
+        q_max=1.0,
+    )
+
+    expected = np.exp(np.array([7.5, 2.5, 5.0]))
+    expected /= expected.sum()
+    np.testing.assert_allclose(policy, expected)
 
 
 def test_native_self_play_game_emits_standard_legal_training_fields():

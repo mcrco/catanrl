@@ -130,6 +130,8 @@ def _completed_q_policy(
     c_visit: float,
     c_scale: float,
     temperature: float,
+    q_min: float | None = None,
+    q_max: float | None = None,
 ) -> np.ndarray:
     """Canopy/Gumbel-AZ-style policy improvement with completed root Q values."""
     logits = np.asarray(logits, dtype=np.float64)
@@ -152,10 +154,21 @@ def _completed_q_policy(
     v_mix = (float(network_value) + total_visits * weighted_q) / (1.0 + total_visits)
     completed_q = np.where(visited, action_values, v_mix)
 
-    # Canopy widens global search bounds from an initial [0, 0]. Root bounds
-    # preserve that zero anchor while avoiding an extra traversal export.
-    q_min = min(0.0, float(np.min(completed_q)))
-    q_max = max(0.0, float(np.max(completed_q)))
+    # Canopy normalizes against bounds widened across the entire search. Older
+    # PUCT backends can still use the conservative root-only approximation.
+    has_search_bounds = (
+        q_min is not None
+        and q_max is not None
+        and np.isfinite(q_min)
+        and np.isfinite(q_max)
+    )
+    if has_search_bounds:
+        assert q_min is not None and q_max is not None
+        q_min = float(q_min)
+        q_max = float(q_max)
+    else:
+        q_min = min(0.0, float(np.min(completed_q)))
+        q_max = max(0.0, float(np.max(completed_q)))
     if q_max - q_min <= np.finfo(np.float64).eps:
         normalized_q = np.full_like(completed_q, 0.5)
     else:
@@ -192,6 +205,7 @@ def run_native_search_policy(
     policy_target: PolicyTarget = "visits",
     c_visit: float = 50.0,
     c_scale: float = 1.0,
+    search_selection: str = "puct",
 ) -> NativeSearchResult:
     """Run one search and report how much it changed the root network prediction."""
     if num_simulations < 1:
@@ -204,6 +218,8 @@ def run_native_search_policy(
         raise ValueError("c_visit must be finite and non-negative")
     if not np.isfinite(c_scale) or c_scale < 0.0:
         raise ValueError("c_scale must be finite and non-negative")
+    if search_selection not in ("puct", "completed-q"):
+        raise ValueError("search_selection must be 'puct' or 'completed-q'")
 
     started = time.perf_counter()
     owns_search = search is None
@@ -214,6 +230,9 @@ def run_native_search_policy(
             c_puct=c_puct,
             seed=search_seed,
             canonical_pruning=canonical_pruning,
+            search_selection=search_selection,
+            c_visit=c_visit,
+            c_scale=c_scale,
         )
     try:
         search.reset_metrics()
@@ -228,6 +247,9 @@ def run_native_search_policy(
             full_state[critic_indices],
         )
         neural_evaluations = 1
+        backed_up_root_value = float(np.clip(root_evaluation.value * value_scale, -1.0, 1.0))
+        if search_selection == "completed-q":
+            search.set_root_value(backed_up_root_value)
         if not search.root_expanded:
             search.initialize_root(root_evaluation.policy_logits)
         if add_noise and dirichlet_frac > 0.0:
@@ -272,6 +294,8 @@ def run_native_search_policy(
             c_visit=c_visit,
             c_scale=c_scale,
             temperature=effective_target_temperature,
+            q_min=search_metrics.q_min,
+            q_max=search_metrics.q_max,
         )
     else:
         target_probabilities = _visit_distribution(
@@ -306,7 +330,7 @@ def run_native_search_policy(
         search_value=search_value,
         value_shift=search_value - network_value,
         value_scale=value_scale,
-        backed_up_network_value=float(np.clip(network_value * value_scale, -1.0, 1.0)),
+        backed_up_network_value=backed_up_root_value,
         retained_root_visits=search_metrics.retained_root_visits,
         tree_reused=float(search_metrics.tree_reused),
         pruned_actions=search_metrics.pruned_actions,
