@@ -18,6 +18,7 @@ import os
 import random
 from collections import deque
 from dataclasses import dataclass
+from collections.abc import Iterator, Sequence
 from typing import Any, Deque, Literal, Optional
 
 import numpy as np
@@ -382,12 +383,29 @@ class AlphaZeroTrainer:
     # Student optimization
     # ------------------------------------------------------------------
 
-    def update_weights(self) -> Optional[dict[str, float]]:
-        if len(self.replay_buffer) < self.config.batch_size:
+    def iter_replay_epoch_batches(
+        self, epochs: int
+    ) -> Iterator[list[SelfPlayExperience]]:
+        """Yield complete shuffled passes over a stable replay snapshot."""
+        if epochs < 1:
+            raise ValueError("epochs must be at least 1")
+        replay_snapshot = list(self.replay_buffer)
+        for _ in range(epochs):
+            random.shuffle(replay_snapshot)
+            for offset in range(0, len(replay_snapshot), self.config.batch_size):
+                yield replay_snapshot[offset : offset + self.config.batch_size]
+
+    def update_weights(
+        self, batch: Sequence[SelfPlayExperience] | None = None
+    ) -> Optional[dict[str, float]]:
+        if batch is None:
+            if len(self.replay_buffer) < self.config.batch_size:
+                return None
+            batch = random.sample(self.replay_buffer, self.config.batch_size)
+        elif not batch:
             return None
         self._activate_student()
 
-        batch = random.sample(self.replay_buffer, self.config.batch_size)
         actor_states = torch.from_numpy(np.stack([exp.actor_state for exp in batch])).float()
         policy_targets = torch.from_numpy(np.stack([exp.policy for exp in batch])).float()
         action_masks = torch.from_numpy(np.stack([exp.action_mask for exp in batch])).bool()

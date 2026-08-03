@@ -88,6 +88,15 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--games-per-iteration", type=int, default=64)
     parser.add_argument("--optimizer-steps", type=int, default=128)
     parser.add_argument(
+        "--optimizer-epochs",
+        type=int,
+        default=0,
+        help=(
+            "Complete shuffled passes over the current replay buffer per iteration. "
+            "A positive value overrides --optimizer-steps."
+        ),
+    )
+    parser.add_argument(
         "--num-workers",
         type=int,
         default=min(16, os.cpu_count() or 4),
@@ -138,14 +147,15 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         default=1.0,
         help=(
             "Probability that a non-forced decision uses the full search budget and "
-            "is stored as a training target. Other decisions use --fast-simulations."
+            "contributes a policy target. Other decisions use --fast-simulations and "
+            "contribute value targets only."
         ),
     )
     search.add_argument(
         "--fast-simulations",
         type=int,
         default=64,
-        help="Search budget for playout-cap decisions that are not stored in replay.",
+        help="Search budget for playout-cap decisions whose policy loss is masked.",
     )
     search.add_argument(
         "--search-value-weight-max",
@@ -252,6 +262,8 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
     for name, value in positive.items():
         if value < 1:
             parser.error(f"--{name} must be at least 1")
+    if args.optimizer_epochs < 0:
+        parser.error("--optimizer-epochs cannot be negative")
     for name in ("eval_games", "h2h_games"):
         value = int(getattr(args, name))
         if value < 2 or value % 2:
@@ -624,8 +636,21 @@ def run_training(
 
             updates: list[dict[str, float]] = []
             skipped = 0
-            for _ in tqdm(range(args.optimizer_steps), desc="Student SGD", leave=False):
-                metrics = trainer.update_weights()
+            if args.optimizer_epochs > 0:
+                optimizer_batches = trainer.iter_replay_epoch_batches(args.optimizer_epochs)
+                optimizer_total = args.optimizer_epochs * math.ceil(
+                    len(trainer.replay_buffer) / config.batch_size
+                )
+            else:
+                optimizer_batches = (None for _ in range(args.optimizer_steps))
+                optimizer_total = args.optimizer_steps
+            for batch in tqdm(
+                optimizer_batches,
+                total=optimizer_total,
+                desc="Student SGD",
+                leave=False,
+            ):
+                metrics = trainer.update_weights(batch)
                 if metrics is None:
                     skipped += 1
                     continue
@@ -723,8 +748,12 @@ def main() -> None:
         validate_ismcts_observation_levels(
             ismcts_determinizations=args.ismcts_determinizations,
             num_players=arch.num_players,
-            actor_observation_level=arch.actor_observation_level,
-            critic_observation_level=arch.critic_observation_level,
+            actor_observation_level=cast(
+                ActorObservationLevel, arch.actor_observation_level
+            ),
+            critic_observation_level=cast(
+                CriticObservationLevel, arch.critic_observation_level
+            ),
         )
         resume = prepare_resume(args, setup.warm_start)
     except (FileNotFoundError, ValueError) as exc:

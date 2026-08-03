@@ -243,6 +243,21 @@ def test_fast_search_samples_only_contribute_to_value_loss() -> None:
     assert metrics["full_search_fraction"] == 0.5
 
 
+def test_replay_epochs_visit_every_sample_once_per_epoch() -> None:
+    trainer = _trainer(value_loss_weight=1.0)
+    trainer.config.batch_size = 2
+    experiences = [_experience(index % 4, float(index % 2)) for index in range(5)]
+    trainer.replay_buffer.extend(experiences)
+
+    batches = list(trainer.iter_replay_epoch_batches(2))
+
+    assert [len(batch) for batch in batches] == [2, 2, 1, 2, 2, 1]
+    assert sorted(id(sample) for batch in batches for sample in batch) == sorted(
+        id(sample) for sample in experiences for _ in range(2)
+    )
+    assert trainer.update_weights(batches[2]) is not None
+
+
 def test_promote_and_restore_keep_policy_critic_pairs_together() -> None:
     trainer = _trainer(value_loss_weight=1.0)
     assert trainer.student_critic_model is not None
@@ -401,6 +416,16 @@ def test_cli_mode_defaults_freeze_value_only_for_distillation() -> None:
 
     assert distill.value_loss_weight == 0.0
     assert iterate.value_loss_weight == 1.0
+
+
+def test_cli_replay_epochs_override_is_opt_in() -> None:
+    fixed_steps = parse_args(["--mode", "iterate", "--config", "model.yaml"])
+    replay_epochs = parse_args(
+        ["--mode", "iterate", "--config", "model.yaml", "--optimizer-epochs", "2"]
+    )
+
+    assert fixed_steps.optimizer_epochs == 0
+    assert replay_epochs.optimizer_epochs == 2
 
 
 def test_cli_native_self_play_requires_plain_mcts() -> None:
