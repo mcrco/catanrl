@@ -12,8 +12,12 @@ from catanrl.algorithms.alphazero.parallel_self_play import SelfPlayExperience
 from catanrl.algorithms.alphazero.trainer import AlphaZeroConfig, AlphaZeroTrainer
 from catanrl.eval.search_training import decide_promotion
 from catanrl.experiments.train_alphazero import parse_args
-from catanrl.models.heads import FlatPolicyHead
-from catanrl.models.wrappers import PolicyNetworkWrapper, ValueNetworkWrapper
+from catanrl.models.heads import FlatPolicyHead, ValueHead
+from catanrl.models.wrappers import (
+    PolicyNetworkWrapper,
+    PolicyValueNetworkWrapper,
+    ValueNetworkWrapper,
+)
 from catanrl.players import BeliefAveragedPolicyPlayer, NNPolicyPlayer
 
 
@@ -53,6 +57,29 @@ def _trainer(
         teacher_policy,
         teacher_critic,
     )
+
+
+def _shared_trainer() -> AlphaZeroTrainer:
+    torch.manual_seed(0)
+    student = PolicyValueNetworkWrapper(
+        nn.Linear(3, 3),
+        FlatPolicyHead(3, 4),
+        ValueHead(3),
+    )
+    teacher = copy.deepcopy(student)
+    config = AlphaZeroConfig(
+        mode="iterate",
+        model_type="flat",
+        num_players=2,
+        buffer_size=8,
+        batch_size=2,
+        policy_lr=0.1,
+        critic_lr=99.0,
+        value_loss_weight=1.0,
+        device="cpu",
+        seed=7,
+    )
+    return AlphaZeroTrainer(config, student, None, teacher, None)
 
 
 def _experience(
@@ -132,6 +159,38 @@ def test_value_training_updates_separate_critic() -> None:
     assert any(
         not torch.equal(before, after)
         for before, after in zip(critic_before, trainer.student_critic_model.parameters())
+    )
+
+
+def test_shared_policy_value_network_uses_one_combined_optimizer_step() -> None:
+    trainer = _shared_trainer()
+    trainer.replay_buffer.extend([_experience(0, 1.0), _experience(1, -1.0)])
+    assert trainer.uses_shared_network
+    assert trainer.student_critic_model is None
+    assert trainer.critic_optimizer is None
+    shared_student = trainer.student_policy_model
+    assert isinstance(shared_student, PolicyValueNetworkWrapper)
+
+    policy_head_before = _parameters(shared_student.policy_head)
+    value_head_before = _parameters(shared_student.value_head)
+    teacher_before = _parameters(trainer.teacher_policy_model)
+
+    metrics = trainer.update_weights()
+
+    assert metrics is not None
+    assert metrics["policy_loss"] > 0.0
+    assert metrics["value_loss"] > 0.0
+    assert any(
+        not torch.equal(before, after)
+        for before, after in zip(policy_head_before, shared_student.policy_head.parameters())
+    )
+    assert any(
+        not torch.equal(before, after)
+        for before, after in zip(value_head_before, shared_student.value_head.parameters())
+    )
+    assert all(
+        torch.equal(before, after)
+        for before, after in zip(teacher_before, trainer.teacher_policy_model.parameters())
     )
 
 
