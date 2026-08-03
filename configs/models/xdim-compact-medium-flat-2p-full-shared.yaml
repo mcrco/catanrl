@@ -1,0 +1,22 @@
+# Medium-capacity shared policy/value model for Canopy-parity training.
+name: xdim-compact-medium-flat-2p-full-shared
+
+model:
+  model_type: flat
+  backbone_type: xdim_compact
+  policy_hidden_dims: [384, 384]
+  critic_hidden_dims: [384, 384]
+  policy_mode: full
+  critic_mode: full
+  network_mode: shared
+  value_head_type: wdl
+  xdim_cnn_channels: [96, 192, 192]
+  xdim_cnn_kernel_size: [3, 5]
+  xdim_policy_fusion_hidden_dim: 384
+  xdim_critic_fusion_hidden_dim: 384
+
+game:
+  map_type: BASE
+  vps_to_win: 15
+  discard_limit: 9
+  num_players: 2

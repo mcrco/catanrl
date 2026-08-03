@@ -158,6 +158,31 @@ def test_compact_xdim_training_preset_loads() -> None:
     assert preset.actor_observation_level == preset.critic_observation_level == "full"
 
 
+def test_medium_compact_parity_preset_has_canopy_scale() -> None:
+    preset = load_architecture_preset(
+        "configs/models/xdim-compact-medium-flat-2p-full-shared.yaml"
+    )
+    model = build_policy_value_model(
+        backbone_type=preset.backbone_type,
+        model_type=preset.model_type,
+        hidden_dims=preset.policy_hidden_dims,
+        num_players=2,
+        map_type="BASE",
+        actor_observation_level="full",
+        critic_observation_level="full",
+        device="cpu",
+        xdim_cnn_channels=preset.xdim_cnn_channels,
+        xdim_cnn_kernel_size=preset.xdim_cnn_kernel_size,
+        xdim_fusion_hidden_dim=preset.xdim_policy_fusion_hidden_dim,
+        value_head_type=preset.value_head_type,
+    )
+
+    assert isinstance(model.backbone, CompactCrossDimensionalBackbone)
+    assert model.backbone.board_layout == "width_height"
+    parameter_count = sum(parameter.numel() for parameter in model.parameters())
+    assert 1_500_000 < parameter_count < 2_500_000
+
+
 def test_compact_wdl_head_runs_through_shared_dagger_update() -> None:
     num_players = 2
     map_type = "MINI"

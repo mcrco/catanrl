@@ -10,9 +10,10 @@ experiment_name=$1
 seed=${2:-43}
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$repo_root"
+model_config=${CATANRL_PARITY_MODEL_CONFIG:-configs/models/xdim-compact-medium-flat-2p-full-shared.yaml}
 
 env -u VIRTUAL_ENV PYTHONUNBUFFERED=1 uv run python -m catanrl.experiments.train_dagger \
-  --config configs/models/xdim-compact-flat-2p-full-shared.yaml \
+  --config "$model_config" \
   --iterations 10 \
   --steps-per-iter 8192 \
   --train-epochs 2 \
