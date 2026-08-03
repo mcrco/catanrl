@@ -17,7 +17,12 @@ from catanrl.experiment_store import (
 )
 from catanrl.experiments.architecture_config import load_architecture_preset
 from catanrl.models.backbone_builder import build_backbone_config
-from catanrl.models.backbones import CompactCrossDimensionalBackbone, create_backbone
+from catanrl.models.backbones import (
+    CompactCrossDimensionalBackbone,
+    CrossDimensionalBackboneConfig,
+    _reshape_board_tensor,
+    create_backbone,
+)
 from catanrl.models.model_builders import build_policy_value_model
 from catanrl.utils.catanatron_action_space import get_action_space_size
 
@@ -84,6 +89,52 @@ def test_compact_xdim_config_round_trips_through_experiment_schema() -> None:
     assert restored == config
     assert output_dim == 256
     assert backbone(torch.zeros(2, 3770)).shape == (2, 256)
+
+
+def test_fresh_xdim_config_preserves_catanatron_board_layout() -> None:
+    config = build_backbone_config(
+        backbone_type="xdim_compact",
+        hidden_dims=(32,),
+        board_height=11,
+        board_width=21,
+        board_channels=2,
+        numeric_dim=4,
+        xdim_cnn_channels=(8,),
+    )
+    assert isinstance(config.args, CrossDimensionalBackboneConfig)
+    assert config.args.board_layout == "width_height"
+
+    board = torch.arange(21 * 11 * 2).reshape(21, 11, 2)
+    restored = _reshape_board_tensor(board.flatten().unsqueeze(0), config.args)
+
+    assert restored.shape == (1, 2, 21, 11)
+    assert torch.equal(restored[0], board.permute(2, 0, 1))
+
+
+def test_old_xdim_metadata_keeps_legacy_board_layout() -> None:
+    old_metadata = {
+        "architecture": "compact_cross_dimensional",
+        "args": {
+            "board_height": 11,
+            "board_width": 21,
+            "board_channels": 2,
+            "numeric_dim": 4,
+            "cnn_channels": [8],
+            "cnn_kernel_size": [3, 5],
+            "numeric_hidden_dims": [32],
+            "fusion_hidden_dim": 32,
+            "output_dim": 32,
+        },
+    }
+
+    config = backbone_config_from_dict(old_metadata)
+    assert isinstance(config.args, CrossDimensionalBackboneConfig)
+    assert config.args.board_layout == "legacy_height_width"
+
+    board_flat = torch.arange(21 * 11 * 2).unsqueeze(0)
+    restored = _reshape_board_tensor(board_flat, config.args)
+
+    assert restored.shape == (1, 2, 11, 21)
 
 
 def test_compact_xdim_training_preset_loads() -> None:

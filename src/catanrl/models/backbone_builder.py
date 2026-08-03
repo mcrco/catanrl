@@ -17,6 +17,7 @@ def build_backbone_config(
     xdim_cnn_channels: Sequence[int] = (),
     xdim_cnn_kernel_size: Tuple[int, int] = (3, 5),
     xdim_fusion_hidden_dim: int | None = None,
+    xdim_board_layout: str = "width_height",
 ) -> BackboneConfig:
     """Build either an MLP or cross-dimensional backbone config."""
     if backbone_type not in ("mlp", "xdim", "xdim_res", "xdim_compact"):
@@ -63,6 +64,7 @@ def build_backbone_config(
             numeric_hidden_dims=list(hidden_dims),
             fusion_hidden_dim=fusion_hidden_dim,
             output_dim=output_dim,
+            board_layout=xdim_board_layout,
         ),
     )
 

@@ -25,12 +25,42 @@ class CrossDimensionalBackboneConfig:
     numeric_hidden_dims: List[int] = field(default_factory=lambda: [64, 64])
     fusion_hidden_dim: int = 256
     output_dim: int = 256
+    # Catanatron flattens board tensors as (WIDTH, HEIGHT, CHANNELS).
+    # Legacy checkpoints reconstructed them as (HEIGHT, WIDTH, CHANNELS), so
+    # the layout is explicit to preserve those checkpoints while fixing new
+    # training runs.
+    board_layout: str = "legacy_height_width"
 
 
 @dataclass
 class BackboneConfig:
     architecture: str
     args: Union[MLPBackboneConfig, CrossDimensionalBackboneConfig]
+
+
+def _board_spatial_shape(config: CrossDimensionalBackboneConfig) -> tuple[int, int]:
+    if config.board_layout == "legacy_height_width":
+        return config.board_height, config.board_width
+    if config.board_layout == "width_height":
+        return config.board_width, config.board_height
+    raise ValueError(
+        "board_layout must be 'legacy_height_width' or 'width_height', "
+        f"got {config.board_layout!r}"
+    )
+
+
+def _reshape_board_tensor(
+    board_flat: torch.Tensor,
+    config: CrossDimensionalBackboneConfig,
+) -> torch.Tensor:
+    first_spatial, second_spatial = _board_spatial_shape(config)
+    board_tensor = board_flat.reshape(
+        -1,
+        first_spatial,
+        second_spatial,
+        config.board_channels,
+    )
+    return board_tensor.permute(0, 3, 1, 2)
 
 
 class MLPBackbone(nn.Module):
@@ -72,6 +102,7 @@ class CrossDimensionalBackbone(nn.Module):
         self.board_height = config.board_height
         self.board_width = config.board_width
         self.board_channels = config.board_channels
+        self.board_layout = config.board_layout
         self.board_flat_dim = config.board_height * config.board_width * config.board_channels
 
         # CNN branch for board tensor
@@ -150,10 +181,7 @@ class CrossDimensionalBackbone(nn.Module):
         board_flat = x[:, self.numeric_dim :]
 
         # Reshape board to (batch, H, W, C) then permute to (batch, C, H, W) for Conv2d
-        board_tensor = board_flat.reshape(
-            -1, self.board_height, self.board_width, self.board_channels
-        )
-        board_tensor = board_tensor.permute(0, 3, 1, 2)
+        board_tensor = _reshape_board_tensor(board_flat, self.config)
 
         # CNN branch
         cnn_out = self.cnn(board_tensor)
@@ -189,11 +217,11 @@ class CompactCrossDimensionalBackbone(nn.Module):
         self.board_height = config.board_height
         self.board_width = config.board_width
         self.board_channels = config.board_channels
+        self.board_layout = config.board_layout
 
         cnn_layers: list[nn.Module] = []
         in_channels = config.board_channels
-        current_h = config.board_height
-        current_w = config.board_width
+        current_h, current_w = _board_spatial_shape(config)
         pad_h = (config.cnn_kernel_size[0] - 1) // 2
         pad_w = (config.cnn_kernel_size[1] - 1) // 2
         for out_channels in config.cnn_channels:
@@ -256,13 +284,7 @@ class CompactCrossDimensionalBackbone(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         numeric_features = x[:, : self.numeric_dim]
-        board_tensor = x[:, self.numeric_dim :].reshape(
-            -1,
-            self.board_height,
-            self.board_width,
-            self.board_channels,
-        )
-        board_tensor = board_tensor.permute(0, 3, 1, 2)
+        board_tensor = _reshape_board_tensor(x[:, self.numeric_dim :], self.config)
         spatial_features = self.spatial_projection(self.cnn(board_tensor))
         numeric_features = self.numeric_mlp(numeric_features)
         return self.fusion(torch.cat((spatial_features, numeric_features), dim=-1))
@@ -283,6 +305,7 @@ class ResidualCrossDimensionalBackbone(nn.Module):
         self.board_height = config.board_height
         self.board_width = config.board_width
         self.board_channels = config.board_channels
+        self.board_layout = config.board_layout
         self.board_flat_dim = config.board_height * config.board_width * config.board_channels
 
         # CNN branch
@@ -357,10 +380,7 @@ class ResidualCrossDimensionalBackbone(nn.Module):
         board_flat = x[:, self.numeric_dim :]
 
         # Reshape board to (batch, H, W, C) then permute to (batch, C, H, W) for Conv2d
-        board_tensor = board_flat.reshape(
-            -1, self.board_height, self.board_width, self.board_channels
-        )
-        board_tensor = board_tensor.permute(0, 3, 1, 2)
+        board_tensor = _reshape_board_tensor(board_flat, self.config)
 
         # Process CNN branch
         x_spatial = board_tensor
