@@ -31,6 +31,8 @@ esac
 parity_workers=${CATANRL_PARITY_WORKERS:-32}
 parity_games=${CATANRL_PARITY_GAMES_PER_ITERATION:-256}
 parity_iterations=${CATANRL_PARITY_ITERATIONS:-60}
+parity_full_simulations=${CATANRL_PARITY_FULL_SIMULATIONS:-1600}
+parity_fast_simulations=${CATANRL_PARITY_FAST_SIMULATIONS:-64}
 
 env -u VIRTUAL_ENV PYTHONUNBUFFERED=1 uv run python -m catanrl.experiments.train_alphazero \
   --mode iterate \
@@ -40,8 +42,8 @@ env -u VIRTUAL_ENV PYTHONUNBUFFERED=1 uv run python -m catanrl.experiments.train
   "${value_init_args[@]}" \
   --self-play-backend cppanatron \
   --ismcts-determinizations 1 \
-  --simulations 512 \
-  --fast-simulations 64 \
+  --simulations "$parity_full_simulations" \
+  --fast-simulations "$parity_fast_simulations" \
   --full-search-probability 0.25 \
   --c-puct 2.5 \
   --value-scale 1.0 \
