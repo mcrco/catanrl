@@ -20,6 +20,10 @@ search_workers=${CATANRL_PARITY_EVAL_WORKERS:-16}
 search_simulations=${CATANRL_PARITY_FULL_SIMULATIONS:-1600}
 mkdir -p "$output_root"
 
+env -u VIRTUAL_ENV uv run python scripts/verify_canopy_contract.py \
+  --experiment "$experiment" \
+  --which "$checkpoint"
+
 env -u VIRTUAL_ENV PYTHONUNBUFFERED=1 uv run python scripts/eval_vs_catanatron.py \
   --experiment "$experiment" \
   --which "$checkpoint" \

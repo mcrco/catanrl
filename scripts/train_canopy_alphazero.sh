@@ -34,6 +34,11 @@ parity_iterations=${CATANRL_PARITY_ITERATIONS:-60}
 parity_full_simulations=${CATANRL_PARITY_FULL_SIMULATIONS:-1600}
 parity_fast_simulations=${CATANRL_PARITY_FAST_SIMULATIONS:-64}
 
+env -u VIRTUAL_ENV uv run python scripts/verify_canopy_contract.py \
+  --experiment "$dagger_experiment" \
+  --which best \
+  --require-terminal-dagger
+
 env -u VIRTUAL_ENV PYTHONUNBUFFERED=1 uv run python -m catanrl.experiments.train_alphazero \
   --mode iterate \
   --teacher-update latest \
