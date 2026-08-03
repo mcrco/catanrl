@@ -171,6 +171,7 @@ class SelfPlayExperience:
     policy: np.ndarray
     action_mask: np.ndarray
     value: float
+    full_search: bool = True
 
 
 class _TrainingSelfPlayPlayer(NNMCTSPlayer):

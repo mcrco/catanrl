@@ -44,6 +44,7 @@ class _NativeSelfPlaySample:
     action_mask: np.ndarray
     player: int
     search_value: float
+    full_search: bool
 
     def __iter__(self):
         """Preserve the historical five-field unpacking used by diagnostics/tests."""
@@ -213,17 +214,17 @@ def _play_native_self_play_game(
                     canonical_pruning=bool(args_dict.get("canonical_pruning", False)),
                     search=search,
                 )
-                if full_search:
-                    samples.append(
-                        _NativeSelfPlaySample(
-                            actor_state=full_state[actor_indices].copy(),
-                            critic_state=full_state[critic_indices].copy(),
-                            policy=policy,
-                            action_mask=action_mask.copy(),
-                            player=current_player,
-                            search_value=search_value,
-                        )
+                samples.append(
+                    _NativeSelfPlaySample(
+                        actor_state=full_state[actor_indices].copy(),
+                        critic_state=full_state[critic_indices].copy(),
+                        policy=policy,
+                        action_mask=action_mask.copy(),
+                        player=current_player,
+                        search_value=search_value,
+                        full_search=full_search,
                     )
+                )
             if search is not None and not search.advance(action):
                 search.close()
                 search = None
@@ -250,7 +251,7 @@ def _native_training_worker_main(
         response_queue=response_queue,
     )
     try:
-        experiences: list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]] = []
+        experiences: list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float, bool]] = []
         stats: Counter[str] = Counter()
         for episode_seed in episode_seeds:
             samples, winner = _play_native_self_play_game(
@@ -278,9 +279,11 @@ def _native_training_worker_main(
                         sample.policy,
                         sample.action_mask,
                         value,
+                        sample.full_search,
                     )
                 )
-            stats["full_search_decisions"] += len(samples)
+            stats["full_search_decisions"] += sum(int(sample.full_search) for sample in samples)
+            stats["fast_search_decisions"] += sum(int(not sample.full_search) for sample in samples)
         result_queue.put(
             {
                 "worker_id": worker_id,
@@ -381,7 +384,9 @@ def generate_native_self_play_data(
     stats: Counter[str] = Counter()
 
     def handle_result(message: dict) -> None:
-        for actor_state, critic_state, policy, action_mask, value in message["experiences"]:
+        for actor_state, critic_state, policy, action_mask, value, full_search in message[
+            "experiences"
+        ]:
             experiences.append(
                 SelfPlayExperience(
                     actor_state=actor_state,
@@ -389,6 +394,7 @@ def generate_native_self_play_data(
                     policy=policy,
                     action_mask=action_mask,
                     value=float(value),
+                    full_search=bool(full_search),
                 )
             )
         for key, count in message["stats"].items():

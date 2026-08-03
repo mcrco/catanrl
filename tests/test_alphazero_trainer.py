@@ -60,6 +60,7 @@ def _experience(
     value: float,
     *,
     legal_actions: tuple[int, ...] = (0, 1, 2, 3),
+    full_search: bool = True,
 ) -> SelfPlayExperience:
     policy = np.zeros(4, dtype=np.float32)
     policy[action] = 1.0
@@ -71,6 +72,7 @@ def _experience(
         policy=policy,
         action_mask=action_mask,
         value=value,
+        full_search=full_search,
     )
 
 
@@ -156,6 +158,30 @@ def test_distillation_loss_masks_illegal_action_logits() -> None:
         rel=1e-5,
     )
     assert metrics["top1_agreement"] == 1.0
+
+
+def test_fast_search_samples_only_contribute_to_value_loss() -> None:
+    trainer = _trainer(value_loss_weight=1.0)
+    policy_head = trainer.student_policy_model.policy_head
+    assert isinstance(policy_head, FlatPolicyHead)
+    with torch.no_grad():
+        head = policy_head.policy_head
+        head.weight.zero_()
+        head.bias.copy_(torch.tensor([2.0, 0.0, -2.0, -4.0]))
+    trainer.replay_buffer.extend(
+        [
+            _experience(0, 1.0, full_search=True),
+            _experience(3, -1.0, full_search=False),
+        ]
+    )
+
+    metrics = trainer.update_weights()
+
+    assert metrics is not None
+    expected = -torch.log_softmax(torch.tensor([2.0, 0.0, -2.0, -4.0]), dim=0)[0]
+    assert metrics["policy_loss"] == pytest.approx(expected.item(), rel=1e-5)
+    assert metrics["value_loss"] > 0.0
+    assert metrics["full_search_fraction"] == 0.5
 
 
 def test_promote_and_restore_keep_policy_critic_pairs_together() -> None:

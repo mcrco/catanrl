@@ -391,9 +391,13 @@ class AlphaZeroTrainer:
         actor_states = torch.from_numpy(np.stack([exp.actor_state for exp in batch])).float()
         policy_targets = torch.from_numpy(np.stack([exp.policy for exp in batch])).float()
         action_masks = torch.from_numpy(np.stack([exp.action_mask for exp in batch])).bool()
+        policy_weights = torch.from_numpy(
+            np.asarray([float(exp.full_search) for exp in batch], dtype=np.float32)
+        )
         actor_states = actor_states.to(self.device)
         policy_targets = policy_targets.to(self.device)
         action_masks = action_masks.to(self.device)
+        policy_weights = policy_weights.to(self.device)
         if not bool(action_masks.any(dim=1).all()):
             raise RuntimeError("Encountered a search target without any legal actions.")
         illegal_target_mass = policy_targets.masked_select(~action_masks).abs().sum()
@@ -436,15 +440,13 @@ class AlphaZeroTrainer:
 
         masked_logits = logits.masked_fill(~action_masks, float("-inf"))
         log_probs = torch.log_softmax(masked_logits, dim=-1)
-        policy_loss = (
-            -torch.where(
-                action_masks,
-                policy_targets * log_probs,
-                torch.zeros_like(log_probs),
-            )
-            .sum(dim=1)
-            .mean()
-        )
+        per_sample_policy_loss = -torch.where(
+            action_masks,
+            policy_targets * log_probs,
+            torch.zeros_like(log_probs),
+        ).sum(dim=1)
+        policy_weight_sum = policy_weights.sum().clamp_min(1.0)
+        policy_loss = (per_sample_policy_loss * policy_weights).sum() / policy_weight_sum
         if values is not None and value_targets is not None:
             value_loss = F.mse_loss(values, value_targets)
         else:
@@ -468,22 +470,23 @@ class AlphaZeroTrainer:
             self.critic_optimizer.step()
 
         with torch.no_grad():
-            target_entropy = (
-                -(policy_targets * torch.log(policy_targets.clamp_min(1e-12))).sum(dim=1).mean()
-            )
+            per_sample_target_entropy = -(
+                policy_targets * torch.log(policy_targets.clamp_min(1e-12))
+            ).sum(dim=1)
+            target_entropy = (per_sample_target_entropy * policy_weights).sum() / policy_weight_sum
             probabilities = torch.softmax(masked_logits, dim=-1)
+            per_sample_prediction_entropy = -torch.where(
+                action_masks,
+                probabilities * log_probs,
+                torch.zeros_like(log_probs),
+            ).sum(dim=1)
             prediction_entropy = (
-                -torch.where(
-                    action_masks,
-                    probabilities * log_probs,
-                    torch.zeros_like(log_probs),
-                )
-                .sum(dim=1)
-                .mean()
-            )
-            top1_agreement = (
-                (masked_logits.argmax(dim=-1) == policy_targets.argmax(dim=-1)).float().mean()
-            )
+                per_sample_prediction_entropy * policy_weights
+            ).sum() / policy_weight_sum
+            per_sample_top1_agreement = (
+                masked_logits.argmax(dim=-1) == policy_targets.argmax(dim=-1)
+            ).float()
+            top1_agreement = (per_sample_top1_agreement * policy_weights).sum() / policy_weight_sum
 
         return {
             "loss": float(loss.item()),
@@ -492,6 +495,7 @@ class AlphaZeroTrainer:
             "target_entropy": float(target_entropy.item()),
             "prediction_entropy": float(prediction_entropy.item()),
             "top1_agreement": float(top1_agreement.item()),
+            "full_search_fraction": float(policy_weights.mean().item()),
             "policy_grad_norm": float(policy_grad_norm.item()),
             "critic_grad_norm": float(critic_grad_norm.item()),
             "replay_size": float(len(self.replay_buffer)),

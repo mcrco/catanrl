@@ -249,7 +249,7 @@ def test_terminal_search_value_blend_stays_on_win_loss_scale():
     assert _blend_terminal_search_value(-1.0, 2.0, 0.25) == pytest.approx(-0.5)
 
 
-def test_native_playout_cap_only_records_full_search_decisions():
+def test_native_playout_cap_keeps_fast_decisions_for_value_training():
     action_space_size = 187
     backend = MockInferenceBackend(action_space_size)
     args = {
@@ -280,7 +280,8 @@ def test_native_playout_cap_only_records_full_search_decisions():
     )
 
     assert winner is None
-    assert samples == []
+    assert samples
+    assert all(not sample.full_search for sample in samples)
 
 
 def test_native_parallel_self_play_returns_shared_experience_type():
@@ -330,5 +331,6 @@ def test_native_parallel_self_play_returns_shared_experience_type():
 
     assert stats["games"] == 1
     assert experiences
+    assert all(exp.full_search for exp in experiences)
     assert all(exp.policy.shape == (action_space_size,) for exp in experiences)
     assert all(np.all(exp.policy[~exp.action_mask] == 0.0) for exp in experiences)
