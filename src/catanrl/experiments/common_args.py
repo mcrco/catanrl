@@ -4,11 +4,27 @@ from __future__ import annotations
 
 import argparse
 
+from ..utils.catanatron_map import NUMBER_PLACEMENT_CHOICES
+
 DEFAULT_MAX_GRAD_NORM = 1.0
 DEFAULT_METRIC_WINDOW = 200
 DEFAULT_EVAL_SEED = 67
 DEFAULT_TREND_EVAL_SEED = DEFAULT_EVAL_SEED
 DEFAULT_WANDB_PROJECT = "catan"
+
+
+def add_number_placement_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--number-placement",
+        choices=NUMBER_PLACEMENT_CHOICES,
+        default=argparse.SUPPRESS,
+        help=(
+            "Number-token placement for generated boards. 'official_spiral' uses the "
+            "official token sequence while still shuffling terrain and ports; 'random' "
+            "also shuffles number tokens. New runs default to official_spiral; resumed "
+            "runs inherit their saved setting"
+        ),
+    )
 
 
 def add_device_argument(parser: argparse.ArgumentParser) -> None:

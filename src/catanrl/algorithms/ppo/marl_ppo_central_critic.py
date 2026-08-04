@@ -35,6 +35,7 @@ from ...models.models import (
 )
 from ...models.wrappers import PolicyNetworkWrapper, ValueNetworkWrapper
 from ...utils.catanatron_action_space import build_action_type_metadata, get_action_space_size
+from ...utils.catanatron_map import NumberPlacement
 from ...utils.seeding import set_global_seeds
 from ...models.backbone_builder import build_backbone_config
 from ..common import PolicyAgent
@@ -89,6 +90,7 @@ def load_critic_warm_start(
 def train(
     num_players: int = 2,
     map_type: Literal["BASE", "TOURNAMENT", "MINI"] = "BASE",
+    number_placement: NumberPlacement = "official_spiral",
     actor_observation_level: ActorObservationLevel = "private",
     critic_observation_level: CriticObservationLevel = "full",
     network_mode: Literal["separate", "shared"] = "separate",
@@ -203,7 +205,7 @@ def train(
     print("Centralized Critic Multi-Agent PPO Training")
     print(f"{'=' * 60}")
     print(f"Device: {device}")
-    print(f"Map type: {map_type} | Players: {num_players}")
+    print(f"Map type: {map_type} | Players: {num_players} | Number placement: {number_placement}")
     print(f"Game config: vps_to_win={vps_to_win} | discard_limit={discard_limit}")
     print(
         f"Backbone: {backbone_type} | Model type: {model_type} | "
@@ -341,6 +343,7 @@ def train(
         reward_function=reward_function,
         num_envs=num_envs,
         actor_observation_level=actor_observation_level,
+        number_placement=number_placement,
     )
     driver_env = envs.driver_env
     obs_space = driver_env.env_single_observation_space
@@ -445,6 +448,7 @@ def train(
                 global_step=global_step,
                 device=device,
                 num_envs=num_envs,
+                number_placement=number_placement,
             )
             trend_eval_metrics = eval_policy_value_against_baselines(
                 policy_model=policy_model,
@@ -465,6 +469,7 @@ def train(
                 global_step=global_step,
                 device=device,
                 num_envs=num_envs,
+                number_placement=number_placement,
             )
 
         fresh_log = {}
@@ -511,6 +516,7 @@ def train(
                     device=device,
                     nn_seat=seat_mode,
                     actor_observation_level=actor_observation_level,
+                    number_placement=number_placement,
                 )
                 games = seat_metrics["eval_h2h/games"]
                 win_rate = seat_metrics["eval_h2h/win_rate_vs_champion"]

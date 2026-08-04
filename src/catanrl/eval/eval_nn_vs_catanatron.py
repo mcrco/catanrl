@@ -6,7 +6,7 @@ from catanatron.models.player import Player
 from catanatron.state_functions import get_actual_victory_points
 
 from catanrl.utils.catanatron_game import SeatOption, build_players_for_seat, force_player_order
-from catanrl.utils.catanatron_map import build_catan_map
+from catanrl.utils.catanatron_map import NumberPlacement, build_catan_map
 from catanrl.utils.seeding import derive_map_and_game_seeds, derive_seed
 
 
@@ -21,6 +21,7 @@ def eval(
     show_tqdm: bool = False,
     nn_seat: SeatOption = "random",
     game_records: list[dict[str, Any]] | None = None,
+    number_placement: NumberPlacement = "official_spiral",
 ):
     wins = 0
     vps = []
@@ -37,7 +38,11 @@ def eval(
             player.reset_state()
         game = Game(
             players=players,
-            catan_map=build_catan_map(map_type, seed=map_seed, number_placement="random"),
+            catan_map=build_catan_map(
+                map_type,
+                seed=map_seed,
+                number_placement=number_placement,
+            ),
             seed=game_seed,
             discard_limit=discard_limit,
             vps_to_win=vps_to_win,

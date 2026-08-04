@@ -33,7 +33,7 @@ from catanrl.utils.catanatron_action_space import (
     to_action_space,
 )
 from catanrl.utils.catanatron_game import SeatOption, build_players_for_seat, force_player_order
-from catanrl.utils.catanatron_map import build_catan_map
+from catanrl.utils.catanatron_map import NumberPlacement, build_catan_map
 from catanrl.utils.seeding import derive_map_and_game_seeds, derive_seed
 
 
@@ -55,6 +55,9 @@ class SingleAgentCatanatronPufferEnv(PufferEnv):
         self.map_type: MapType = self.config.get("map_type", "BASE")
         self.vps_to_win = int(self.config.get("vps_to_win", 15))
         self.discard_limit = int(self.config.get("discard_limit", 9))
+        self.number_placement: NumberPlacement = self.config.get(
+            "number_placement", "official_spiral"
+        )
         self.enemies: List[Player] = self.config.get(
             "enemies",
             [RandomPlayer(Color.RED)],
@@ -214,7 +217,11 @@ class SingleAgentCatanatronPufferEnv(PufferEnv):
         if episode_seed is not None:
             map_seed, game_seed = derive_map_and_game_seeds(episode_seed)
 
-        catan_map = build_catan_map(self.map_type, seed=map_seed, number_placement="random")
+        catan_map = build_catan_map(
+            self.map_type,
+            seed=map_seed,
+            number_placement=self.number_placement,
+        )
         for player in self.players:
             player.reset_state()
         self.game = Game(
@@ -325,6 +332,7 @@ def _make_puffer_env(
     discard_limit: int = 9,
     expert_config: str | None = None,
     actor_observation_level: ActorObservationLevel = "private",
+    number_placement: NumberPlacement = "official_spiral",
 ) -> Callable[..., SingleAgentCatanatronPufferEnv]:
     def _config() -> Dict[str, Any]:
         expert_player = create_expert(expert_config) if expert_config else None
@@ -338,6 +346,7 @@ def _make_puffer_env(
             "expert_player": expert_player,
             "actor_observation_level": actor_observation_level,
             "nn_seat": nn_seat,
+            "number_placement": number_placement,
         }
 
     return lambda **kwargs: SingleAgentCatanatronPufferEnv(config=_config(), **kwargs)
@@ -353,6 +362,7 @@ def make_puffer_vectorized_envs(
     discard_limit: int = 9,
     expert_config: str | None = None,
     actor_observation_level: ActorObservationLevel = "private",
+    number_placement: NumberPlacement = "official_spiral",
 ):
     return puffer_vector.make(
         _make_puffer_env(
@@ -364,6 +374,7 @@ def make_puffer_vectorized_envs(
             discard_limit,
             expert_config,
             actor_observation_level,
+            number_placement,
         ),
         num_envs=num_envs,
         backend=puffer_vector.Multiprocessing,

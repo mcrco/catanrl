@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as _datetime
+import hashlib
 import json
 import os
 import re
@@ -125,12 +126,13 @@ def backbone_config_from_dict(data: Dict[str, Any]) -> BackboneConfig:
 # --------------------------------------------------------------------------- #
 @dataclass
 class GameConfig:
-    """Environment/game settings that affect feature and action dimensions."""
+    """Environment/game settings used to train and evaluate an experiment."""
 
     num_players: int
     map_type: str
     vps_to_win: Optional[int] = None
     discard_limit: Optional[int] = None
+    number_placement: str = "random"
 
 
 @dataclass
@@ -389,6 +391,10 @@ class Experiment:
     @property
     def num_players(self) -> int:
         return self.metadata.game.num_players
+
+    @property
+    def number_placement(self) -> str:
+        return self.metadata.game.number_placement
 
     def __repr__(self) -> str:
         return (
@@ -679,6 +685,17 @@ def add_resume_argument(parser: argparse.ArgumentParser) -> None:
 
 LINEAGE_TAG_PREFIX = "lineage:"
 WARMSTART_TAG_PREFIX = "warmstart:"
+WANDB_TAG_MAX_LENGTH = 64
+
+
+def _normalize_wandb_tag(tag: str) -> str:
+    """Keep a W&B tag valid while retaining a stable uniqueness suffix."""
+    tag = tag.strip()
+    if len(tag) <= WANDB_TAG_MAX_LENGTH:
+        return tag
+    digest = hashlib.sha256(tag.encode("utf-8")).hexdigest()[:8]
+    prefix_length = WANDB_TAG_MAX_LENGTH - len(digest) - 1
+    return f"{tag[:prefix_length]}-{digest}"
 
 
 def _parent_lineage_root(exp: "Experiment") -> str:
@@ -713,11 +730,15 @@ def wandb_grouping_kwargs(
     self-referential warm-start link.
     """
     group = getattr(args, "wandb_group", None) or group_default
-    tags = list(getattr(args, "wandb_tags", None) or [])
+    tags: list[str] = []
 
     def _add(tag: str) -> None:
-        if tag not in tags:
-            tags.append(tag)
+        normalized = _normalize_wandb_tag(tag)
+        if normalized and normalized not in tags:
+            tags.append(normalized)
+
+    for tag in getattr(args, "wandb_tags", None) or []:
+        _add(tag)
 
     is_resume = resume is not None and getattr(resume, "active", False)
     if is_resume:

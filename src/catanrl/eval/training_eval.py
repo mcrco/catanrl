@@ -22,6 +22,7 @@ from ..features.catanatron_utils import ActorObservationLevel, COLOR_ORDER, Crit
 from ..models.wrappers import PolicyNetworkWrapper, PolicyValueNetworkWrapper, ValueNetworkWrapper
 from ..players.nn_policy_player import NNPolicyPlayer
 from ..utils.seeding import derive_seed
+from ..utils.catanatron_map import NumberPlacement
 from .eval_nn_vs_catanatron import eval
 from .vectorized_rollout import (
     SeatOption,
@@ -53,6 +54,7 @@ def eval_policy_against_baselines(
     discard_limit: int = 9,
     log_to_wandb: bool = True,
     global_step: Optional[int] = None,
+    number_placement: NumberPlacement = "official_spiral",
 ) -> Dict[str, float]:
     """
     Evaluate a trained policy against RandomPlayer and ValueFunctionPlayer.
@@ -87,6 +89,7 @@ def eval_policy_against_baselines(
         seed=seed,
         vps_to_win=vps_to_win,
         discard_limit=discard_limit,
+        number_placement=number_placement,
     )
     metrics["eval/win_rate_vs_random"] = wins / num_games
     metrics["eval/avg_vps_vs_random"] = sum(vps) / len(vps)
@@ -102,6 +105,7 @@ def eval_policy_against_baselines(
         seed=seed,
         vps_to_win=vps_to_win,
         discard_limit=discard_limit,
+        number_placement=number_placement,
     )
     metrics["eval/win_rate_vs_value"] = wins / num_games
     metrics["eval/avg_vps_vs_value"] = sum(vps) / len(vps)
@@ -131,6 +135,7 @@ def eval_policy_against_champion(
     nn_seat: SeatOption = "random",
     actor_observation_level: ActorObservationLevel = "private",
     critic_observation_level: CriticObservationLevel = "full",
+    number_placement: NumberPlacement = "official_spiral",
 ) -> Dict[str, float]:
     """Evaluate the current policy against a frozen champion checkpoint."""
     metrics: Dict[str, float] = {}
@@ -163,6 +168,7 @@ def eval_policy_against_champion(
         actor_observation_level=actor_observation_level,
         critic_observation_level=critic_observation_level,
         seed=seed,
+        number_placement=number_placement,
     )
 
     metrics["eval_h2h/win_rate_vs_champion"] = wins / num_games if num_games else 0.0
@@ -198,6 +204,7 @@ def eval_policy_value_against_baselines(
     actor_observation_level: ActorObservationLevel = "private",
     critic_observation_level: CriticObservationLevel = "full",
     progress_desc: Optional[str] = None,
+    number_placement: NumberPlacement = "official_spiral",
 ) -> Dict[str, float]:
     """
     Evaluate policy against baselines and critic prediction accuracy in a single loop.
@@ -308,6 +315,7 @@ def eval_policy_value_against_baselines(
                         critic_observation_level=critic_observation_level,
                         seed=seat_seed,
                         progress_callback=eval_pbar.update,
+                        number_placement=number_placement,
                     )
 
                 (
@@ -375,6 +383,7 @@ def eval_policy_value_against_baselines(
                     actor_observation_level=actor_observation_level,
                     critic_observation_level=critic_observation_level,
                     seed=seat_seed,
+                    number_placement=number_placement,
                 )
 
             (

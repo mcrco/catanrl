@@ -56,7 +56,7 @@ Every training run is a **self-describing experiment** under `experiments/<name>
 experiments/<name>/
   metadata.json      # exact architecture (backbone + head type) of each network,
                      #   plus the game config it was trained on (map_type,
-                     #   num_players, vps_to_win, discard_limit)
+                     #   number_placement, num_players, vps_to_win, discard_limit)
   checkpoints.json   # best/latest/step -> checkpoint file, per role (policy/critic)
   checkpoints/       # the .pt state_dicts
 ```
@@ -83,6 +83,10 @@ uv run train-sarl-ppo \
 Architecture presets define the model backbone, observation levels, and game
 settings (`map_type`, `vps_to_win`, etc.). The full resolved architecture is
 saved into experiment metadata when training finishes — not the YAML path.
+
+MARL board-number generation defaults to `--number-placement official_spiral`
+(shuffle terrain and ports; place number tokens in Catan's official spiral).
+Pass `--number-placement random` when you want every number token shuffled too.
 
 #### Loading a model in code
 

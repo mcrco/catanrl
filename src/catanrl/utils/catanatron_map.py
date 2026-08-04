@@ -8,6 +8,7 @@ from catanatron.models.map import CatanMap, build_map
 
 MapType = Literal["BASE", "TOURNAMENT", "MINI"]
 NumberPlacement = Literal["official_spiral", "random"]
+NUMBER_PLACEMENT_CHOICES: tuple[NumberPlacement, ...] = ("official_spiral", "random")
 
 
 @contextmanager
@@ -28,7 +29,7 @@ def build_catan_map(
     map_type: MapType,
     *,
     seed: int | None = None,
-    number_placement: NumberPlacement = "random",
+    number_placement: NumberPlacement = "official_spiral",
 ) -> CatanMap:
     with _temporary_random_seed(seed):
         return build_map(map_type, number_placement=number_placement)

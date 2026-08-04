@@ -12,6 +12,7 @@ from catanrl.experiments.common_args import (
     DEFAULT_TREND_EVAL_SEED,
     add_device_argument,
     add_experiment_name_argument,
+    add_number_placement_argument,
     add_reward_function_argument,
     add_save_every_updates_argument,
     add_train_epochs_argument,
@@ -148,6 +149,7 @@ def main():
     add_experiment_name_argument(parser)
     add_wandb_arguments(parser)
     add_reward_function_argument(parser)
+    add_number_placement_argument(parser)
     parser.add_argument("--num-envs", type=int, default=4)
     parser.add_argument("--metric-window", type=int, default=DEFAULT_METRIC_WINDOW)
 
@@ -183,6 +185,24 @@ def main():
     except ValueError as exc:
         print(f"Error: {exc}")
         return
+
+    requested_number_placement = getattr(args, "number_placement", None)
+    if resume.active:
+        assert warm_start is not None
+        saved_number_placement = warm_start.experiment.number_placement
+        if (
+            requested_number_placement is not None
+            and requested_number_placement != saved_number_placement
+        ):
+            print(
+                "Error: --resume cannot change number placement from "
+                f"{saved_number_placement!r} to {requested_number_placement!r}. "
+                "Start a new warm-start run to change the board distribution."
+            )
+            return
+        args.number_placement = saved_number_placement
+    else:
+        args.number_placement = requested_number_placement or "official_spiral"
 
     if resume.active:
         if args.critic_warm_start != "full":
@@ -232,6 +252,7 @@ def main():
         "load_from_experiment": args.load_from_experiment,
         "load_from_which": args.load_from_which,
         "reward_function": args.reward_function,
+        "number_placement": args.number_placement,
         "num_envs": args.num_envs,
         "metric_window": args.metric_window,
     }
@@ -256,6 +277,7 @@ def main():
     policy_model, critic_model = train(
         num_players=arch.num_players,
         map_type=arch.map_type,
+        number_placement=args.number_placement,
         actor_observation_level=arch.actor_observation_level,
         critic_observation_level=arch.critic_observation_level,
         network_mode=arch.network_mode,
@@ -337,6 +359,7 @@ def main():
         game=GameConfig(
             num_players=arch.num_players,
             map_type=arch.map_type,
+            number_placement=args.number_placement,
             vps_to_win=arch.vps_to_win,
             discard_limit=arch.discard_limit,
         ),

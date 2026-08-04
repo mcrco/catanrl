@@ -35,7 +35,7 @@ from catanrl.utils.catanatron_action_space import (
     get_end_turn_index,
     to_action_space,
 )
-from catanrl.utils.catanatron_map import build_catan_map
+from catanrl.utils.catanatron_map import NumberPlacement, build_catan_map
 from catanrl.utils.seeding import derive_map_and_game_seeds, derive_seed
 
 @dataclass
@@ -47,6 +47,7 @@ class MultiAgentCatanatronEnvConfig:
     shared_critic: bool = False
     reward_function: Literal["shaped", "win"] = "shaped"
     actor_observation_level: ActorObservationLevel = "private"
+    number_placement: NumberPlacement = "official_spiral"
 
 
 class ParallelCatanatronPufferEnv(PufferEnv):
@@ -62,6 +63,7 @@ class ParallelCatanatronPufferEnv(PufferEnv):
         self.discard_limit = int(self.config.discard_limit)
         self.shared_critic = bool(self.config.shared_critic)
         self.actor_observation_level = self.config.actor_observation_level
+        self.number_placement = self.config.number_placement
 
         self.possible_agents = [f"player_{idx}" for idx in range(self.num_players)]
         self.colors_order = list(COLOR_ORDER[: self.num_players])
@@ -209,7 +211,11 @@ class ParallelCatanatronPufferEnv(PufferEnv):
         if episode_seed is not None:
             map_seed, game_seed = derive_map_and_game_seeds(episode_seed)
 
-        catan_map = build_catan_map(self.map_type, seed=map_seed, number_placement="random")
+        catan_map = build_catan_map(
+            self.map_type,
+            seed=map_seed,
+            number_placement=self.number_placement,
+        )
         players = [Player(color) for color in self.colors_order]
         for player in players:
             player.reset_state()
@@ -358,6 +364,7 @@ def _make_parallel_env(
     shared_critic: bool,
     reward_function: Literal["shaped", "win"],
     actor_observation_level: ActorObservationLevel = "private",
+    number_placement: NumberPlacement = "official_spiral",
 ) -> Callable[..., ParallelCatanatronPufferEnv]:
     def _config() -> MultiAgentCatanatronEnvConfig:
         return MultiAgentCatanatronEnvConfig(
@@ -368,6 +375,7 @@ def _make_parallel_env(
             shared_critic=shared_critic,
             reward_function=reward_function,
             actor_observation_level=actor_observation_level,
+            number_placement=number_placement,
         )
 
     return lambda **kwargs: ParallelCatanatronPufferEnv(config=_config(), **kwargs)
@@ -382,6 +390,7 @@ def make_vectorized_envs(
     reward_function: Literal["shaped", "win"],
     num_envs: int,
     actor_observation_level: ActorObservationLevel = "private",
+    number_placement: NumberPlacement = "official_spiral",
 ):
     return puffer_vector.make(
         _make_parallel_env(
@@ -392,6 +401,7 @@ def make_vectorized_envs(
             shared_critic,
             reward_function,
             actor_observation_level,
+            number_placement,
         ),
         num_envs=num_envs,
         backend=puffer_vector.Multiprocessing,

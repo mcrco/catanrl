@@ -27,12 +27,16 @@ def test_value_only_baseline_skips_random_eval():
             num_envs=1,
             num_games=2,
             eval_baselines=["value"],
+            number_placement="official_spiral",
             device="cpu",
             log_to_wandb=False,
         )
 
     assert rollout.call_count == 2
     assert all(call.kwargs["opponent_configs"] == ["F"] for call in rollout.call_args_list)
+    assert all(
+        call.kwargs["number_placement"] == "official_spiral" for call in rollout.call_args_list
+    )
     assert metrics["eval/win_rate_vs_value"] == 1.0
     assert "eval/win_rate_vs_random" not in metrics
 

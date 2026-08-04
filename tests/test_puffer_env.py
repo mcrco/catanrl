@@ -30,6 +30,7 @@ from catanrl.features.catanatron_utils import (
     get_observation_indices_from_full,
 )
 from catanrl.utils.catanatron_action_space import get_end_turn_index, to_action_space
+from catanrl.utils.catanatron_map import build_catan_map
 
 
 def _make_single_env(**overrides) -> SingleAgentCatanatronPufferEnv:
@@ -448,7 +449,6 @@ def test_multi_agent_terminal_step_reports_winner_metadata():
         env.reset(seed=7)
         winner_color = Color.RED
         with patch.object(type(env.game), "winning_color", return_value=winner_color):
-            end_turn = get_end_turn_index(env.num_players, env.map_type)
             current_color = env.game.state.current_color()
             current_idx = env.possible_agents.index(env.color_to_agent_name[current_color])
             action = int(env._get_info(env.possible_agents[current_idx])["valid_actions"][0])
@@ -492,6 +492,34 @@ def test_multi_agent_reset_is_reproducible_with_seed():
     finally:
         first.close()
         second.close()
+
+
+def test_single_agent_reset_uses_configured_number_placement():
+    env = _make_single_env(number_placement="official_spiral")
+    try:
+        with patch(
+            "catanrl.envs.puffer.single_agent_env.build_catan_map",
+            wraps=build_catan_map,
+        ) as build_map:
+            env.reset(seed=808)
+
+        assert build_map.call_args.kwargs["number_placement"] == "official_spiral"
+    finally:
+        env.close()
+
+
+def test_multi_agent_reset_uses_configured_number_placement():
+    env = _make_multi_env(number_placement="official_spiral")
+    try:
+        with patch(
+            "catanrl.envs.puffer.multi_agent_env.build_catan_map",
+            wraps=build_catan_map,
+        ) as build_map:
+            env.reset(seed=808)
+
+        assert build_map.call_args.kwargs["number_placement"] == "official_spiral"
+    finally:
+        env.close()
 
 
 def test_single_agent_mini_map_reset_has_smaller_action_space():
