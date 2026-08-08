@@ -50,7 +50,7 @@ case "${CATANRL_PARITY_WANDB:-0}" in
       --wandb-tags native-cppanatron compact-xdim corrected-board-layout \
         shared-backbone full-full win-reward fresh-dagger-pretrain \
         canopy-playout-cap canopy-completed-q canopy-soft-policy \
-        canopy-aux-values continuous-teacher tree-reuse "$value_init_tag"
+        canopy-aux-values canopy-adamw continuous-teacher tree-reuse "$value_init_tag"
     )
     ;;
   *)
@@ -109,6 +109,7 @@ env -u VIRTUAL_ENV PYTHONUNBUFFERED=1 uv run python -m catanrl.experiments.train
   --batch-size 1024 \
   --policy-lr 1e-4 \
   --critic-lr 1e-4 \
+  --weight-decay 0.0004 \
   --policy-loss-weight 1.0 \
   --value-loss-weight 1.0 \
   --soft-policy-temperature 4.0 \
@@ -121,7 +122,7 @@ env -u VIRTUAL_ENV PYTHONUNBUFFERED=1 uv run python -m catanrl.experiments.train
   --eval-seed 123 \
   --h2h-games 200 \
   --h2h-seed 67 \
-  --save-every-updates 5 \
+  --save-every-updates 1 \
   --device cuda \
   --seed "$seed" \
   --experiment-name "$experiment_name" \

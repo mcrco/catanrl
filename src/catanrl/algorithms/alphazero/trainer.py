@@ -363,7 +363,7 @@ class AlphaZeroTrainer:
         if self.student_aux_value_head is not None:
             policy_parameters.extend(self.student_aux_value_head.parameters())
         if self.uses_shared_network:
-            self.policy_optimizer = torch.optim.Adam(
+            self.policy_optimizer = torch.optim.AdamW(
                 policy_parameters,
                 lr=self.config.policy_lr,
                 weight_decay=self.config.weight_decay,
@@ -371,13 +371,13 @@ class AlphaZeroTrainer:
             self.critic_optimizer = None
             return
 
-        self.policy_optimizer = torch.optim.Adam(
+        self.policy_optimizer = torch.optim.AdamW(
             policy_parameters,
             lr=self.config.policy_lr,
             weight_decay=self.config.weight_decay,
         )
         self.critic_optimizer = (
-            torch.optim.Adam(
+            torch.optim.AdamW(
                 self.student_critic_model.parameters(),
                 lr=self.config.critic_lr,
                 weight_decay=self.config.weight_decay,
