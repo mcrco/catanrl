@@ -290,6 +290,12 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     optimization.add_argument("--policy-lr", type=float, default=5e-5)
     optimization.add_argument("--critic-lr", type=float, default=1e-4)
     optimization.add_argument("--weight-decay", type=float, default=0.0)
+    optimization.add_argument(
+        "--optimizer-epsilon",
+        type=float,
+        default=1e-8,
+        help="Numerical-stability epsilon used by AdamW.",
+    )
     optimization.add_argument("--policy-loss-weight", type=float, default=1.0)
     optimization.add_argument(
         "--soft-policy-temperature",
@@ -413,6 +419,8 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
             parser.error(f"--{name.replace('_', '-')} must be a positive even number")
     if args.buffer_size < args.batch_size:
         parser.error("--buffer-size must be at least --batch-size")
+    if not math.isfinite(args.optimizer_epsilon) or args.optimizer_epsilon <= 0.0:
+        parser.error("--optimizer-epsilon must be finite and positive")
     if args.mode == "distill" and not args.load_from_experiment:
         parser.error("--mode distill requires --load-from-experiment as the frozen teacher")
     if args.mode != "iterate" and args.teacher_update != "gated":
@@ -1086,6 +1094,7 @@ def main() -> None:
         policy_lr=args.policy_lr,
         critic_lr=args.critic_lr,
         weight_decay=args.weight_decay,
+        optimizer_epsilon=args.optimizer_epsilon,
         policy_loss_weight=args.policy_loss_weight,
         value_loss_weight=args.value_loss_weight,
         soft_policy_temperature=args.soft_policy_temperature,

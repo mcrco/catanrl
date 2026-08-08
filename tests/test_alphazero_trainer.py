@@ -195,6 +195,7 @@ def test_shared_policy_value_network_uses_one_combined_optimizer_step() -> None:
     assert trainer.student_critic_model is None
     assert trainer.critic_optimizer is None
     assert isinstance(trainer.policy_optimizer, torch.optim.AdamW)
+    assert trainer.policy_optimizer.param_groups[0]["eps"] == 1e-8
     shared_student = trainer.student_policy_model
     assert isinstance(shared_student, PolicyValueNetworkWrapper)
 

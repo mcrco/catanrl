@@ -103,6 +103,7 @@ class AlphaZeroConfig:
     policy_lr: float = 5e-5
     critic_lr: float = 1e-4
     weight_decay: float = 0.0
+    optimizer_epsilon: float = 1e-8
     policy_loss_weight: float = 1.0
     value_loss_weight: float = 0.0
     soft_policy_temperature: float = 0.0
@@ -217,6 +218,8 @@ class AlphaZeroTrainer:
             raise ValueError("policy_loss_weight must be positive.")
         if config.value_loss_weight < 0:
             raise ValueError("value_loss_weight cannot be negative.")
+        if not np.isfinite(config.optimizer_epsilon) or config.optimizer_epsilon <= 0.0:
+            raise ValueError("optimizer_epsilon must be finite and positive.")
         if (
             not np.isfinite(config.soft_policy_weight)
             or config.soft_policy_weight < 0.0
@@ -367,6 +370,7 @@ class AlphaZeroTrainer:
                 policy_parameters,
                 lr=self.config.policy_lr,
                 weight_decay=self.config.weight_decay,
+                eps=self.config.optimizer_epsilon,
             )
             self.critic_optimizer = None
             return
@@ -375,12 +379,14 @@ class AlphaZeroTrainer:
             policy_parameters,
             lr=self.config.policy_lr,
             weight_decay=self.config.weight_decay,
+            eps=self.config.optimizer_epsilon,
         )
         self.critic_optimizer = (
             torch.optim.AdamW(
                 self.student_critic_model.parameters(),
                 lr=self.config.critic_lr,
                 weight_decay=self.config.weight_decay,
+                eps=self.config.optimizer_epsilon,
             )
             if self.config.value_loss_weight > 0 and self.student_critic_model is not None
             else None

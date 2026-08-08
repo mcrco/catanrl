@@ -110,6 +110,7 @@ env -u VIRTUAL_ENV PYTHONUNBUFFERED=1 uv run python -m catanrl.experiments.train
   --policy-lr 1e-4 \
   --critic-lr 1e-4 \
   --weight-decay 0.0004 \
+  --optimizer-epsilon 1e-5 \
   --policy-loss-weight 1.0 \
   --value-loss-weight 1.0 \
   --soft-policy-temperature 4.0 \
