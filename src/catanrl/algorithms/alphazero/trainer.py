@@ -528,7 +528,8 @@ class AlphaZeroTrainer:
         else:
             search_value_weight = self.config.search_value_weight_max * min(
                 1.0,
-                self_play_iteration / self.config.search_value_weight_ramp_iterations,
+                (self_play_iteration + 1)
+                / self.config.search_value_weight_ramp_iterations,
             )
 
         self_play_generator = (

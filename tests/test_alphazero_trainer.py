@@ -576,7 +576,7 @@ def test_native_search_value_weight_ramps_by_self_play_iteration(
     trainer.collect_self_play(1)
     trainer.collect_self_play(1)
 
-    assert weights == pytest.approx([0.0, 0.3, 0.6])
+    assert weights == pytest.approx([0.3, 0.6, 0.6])
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
