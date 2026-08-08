@@ -71,6 +71,7 @@ from catanrl.models.wrappers import (
     PolicyValueNetworkWrapper,
     ValueNetworkWrapper,
 )
+from catanrl.utils.jsonl_metrics import append_jsonl_metrics
 
 PolicyModel = PolicyNetworkWrapper | PolicyValueNetworkWrapper
 CriticModel = ValueNetworkWrapper | None
@@ -863,6 +864,7 @@ def run_training(
     training_state_path: str,
     resume: ResumeContext,
 ) -> None:
+    local_metrics_path = os.path.join(os.path.dirname(checkpoint_dir), "metrics.jsonl")
     restored = _restore_training_state(trainer, resume, args.mode) if resume.active else None
     if restored is None:
         global_step = 0
@@ -876,7 +878,17 @@ def run_training(
         trainer.save(checkpoint_dir, "best")
         trainer.save(checkpoint_dir, "iter_0")
         _refresh_checkpoint_registry(experiment_name, checkpoint_dir, trainer)
-        wandb.log(initial_eval.metrics("eval/candidate_vs_value") | {"iteration": 0}, step=0)
+        initial_metrics = initial_eval.metrics("eval/candidate_vs_value") | {"iteration": 0}
+        wandb.log(initial_metrics, step=0)
+        append_jsonl_metrics(
+            local_metrics_path,
+            {
+                "event": "alphazero_initial_evaluation",
+                "iteration": 0,
+                "global_step": 0,
+                "evaluation": initial_metrics,
+            },
+        )
     else:
         (
             global_step,
@@ -1008,6 +1020,22 @@ def run_training(
                 champion_eval_score=champion_eval_score,
                 promotions=promotions,
                 wandb_enabled=args.wandb,
+            )
+            append_jsonl_metrics(
+                local_metrics_path,
+                {
+                    "event": "alphazero_iteration",
+                    "iteration": iteration,
+                    "global_step": global_step,
+                    "selfplay": selfplay,
+                    "train": summary,
+                    "skipped_optimizer_steps": skipped,
+                    "evaluation": eval_metrics or {},
+                    "best_eval_score": best_eval_score,
+                    "best_iteration": best_iteration,
+                    "champion_eval_score": champion_eval_score,
+                    "promotions": promotions,
+                },
             )
             if wandb.run is not None:
                 wandb.run.summary["best_eval/win_rate_vs_value"] = best_eval_score

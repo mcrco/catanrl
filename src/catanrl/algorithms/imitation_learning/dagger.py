@@ -52,6 +52,7 @@ from ...models.models import (
 )
 from ...models.wrappers import PolicyNetworkWrapper, PolicyValueNetworkWrapper, ValueNetworkWrapper
 from ...utils.catanatron_action_space import get_action_array, get_action_space_size
+from ...utils.jsonl_metrics import append_jsonl_metrics
 from ...utils.seeding import derive_seed
 from .dataset import AggregatedDataset, EvictionStrategy
 
@@ -1031,6 +1032,7 @@ def train(
 
     played_action_type_steps: List[int] = []
     played_action_type_history: Dict[str, List[float]] = {name: [] for name in action_type_names}
+    local_metrics_path = os.path.join(os.path.dirname(save_path), "metrics.jsonl")
 
     try:
         last_iteration = start_iteration + n_iterations
@@ -1262,6 +1264,26 @@ def train(
                     )
                 )
                 wandb.log(wandb_log, step=global_step)
+                append_jsonl_metrics(
+                    local_metrics_path,
+                    {
+                        "event": "dagger_iteration",
+                        "iteration": iteration,
+                        "global_step": global_step,
+                        "dataset_size": len(dataset),
+                        "collect_reward": collect_stats.mean_reward,
+                        "expert_fraction": collect_stats.expert_fraction,
+                        "rollout_expert_agreement_pre_train": agreement_pre,
+                        "rollout_expert_agreement_post_train": agreement_post,
+                        "train_total_loss": train_stats["total_loss"],
+                        "train_policy_loss": train_stats["policy_loss"],
+                        "train_value_loss": train_stats["value_loss"],
+                        "train_accuracy": train_stats["accuracy"],
+                        "train_f1_score": train_stats["f1_score"],
+                        "beta": beta,
+                        "evaluation": eval_metrics,
+                    },
+                )
 
                 beta = max(beta * beta_decay, beta_min)
 
