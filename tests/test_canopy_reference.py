@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import pytest
 
-from catanrl.eval.canopy_reference import parse_canopy_tournament_summary
+from catanrl.eval.canopy_reference import (
+    CANOPY_NEXUS_V3_CHECKPOINT_SHA256,
+    CANOPY_NEXUS_V3_RELEASE_COMMIT,
+    CANOPY_NEXUS_V3_RELEASE_TAG,
+    parse_canopy_tournament_summary,
+    validate_official_nexus_v3_reference,
+)
 
 
 def test_parse_canopy_tournament_summary_uses_final_result_and_strips_ansi():
@@ -24,6 +30,22 @@ W 1-2-0 | 100 evals/s
     assert summary.win_rate_ci95_high > summary.win_rate
     assert summary.mean_search_depth == pytest.approx(9.7)
     assert summary.maximum_search_depth == 31
+
+
+def test_official_canopy_reference_requires_release_provenance():
+    config = {
+        "release_tag": CANOPY_NEXUS_V3_RELEASE_TAG,
+        "release_commit": CANOPY_NEXUS_V3_RELEASE_COMMIT,
+        "checkpoint_sha256": CANOPY_NEXUS_V3_CHECKPOINT_SHA256,
+    }
+
+    validate_official_nexus_v3_reference(config)
+
+    for key in config:
+        invalid = dict(config)
+        invalid[key] = "wrong"
+        with pytest.raises(ValueError, match=key):
+            validate_official_nexus_v3_reference(invalid)
 
 
 @pytest.mark.parametrize(

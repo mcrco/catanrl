@@ -7,7 +7,10 @@ import argparse
 import json
 from pathlib import Path
 
-from catanrl.eval.canopy_reference import parse_canopy_tournament_summary
+from catanrl.eval.canopy_reference import (
+    parse_canopy_tournament_summary,
+    validate_official_nexus_v3_reference,
+)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -15,6 +18,9 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("log", type=Path, help="Combined stdout/stderr from Canopy")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--checkpoint", required=True)
+    parser.add_argument("--release-tag", required=True)
+    parser.add_argument("--release-commit", required=True)
+    parser.add_argument("--checkpoint-sha256", required=True)
     parser.add_argument("--opponent", default="random")
     parser.add_argument("--simulations", type=int, required=True)
     parser.add_argument("--max-actions", type=int, default=2000)
@@ -34,6 +40,9 @@ def main() -> None:
         "implementation": "cullback/canopy",
         "config": {
             "checkpoint": args.checkpoint,
+            "release_tag": args.release_tag,
+            "release_commit": args.release_commit,
+            "checkpoint_sha256": args.checkpoint_sha256,
             "opponent": args.opponent,
             "simulations": args.simulations,
             "c_puct": 2.5,
@@ -50,6 +59,7 @@ def main() -> None:
         },
         "summary": summary.payload(),
     }
+    validate_official_nexus_v3_reference(payload["config"])
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
     print(json.dumps(payload["summary"], indent=2, sort_keys=True))

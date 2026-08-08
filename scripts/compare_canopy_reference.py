@@ -13,6 +13,7 @@ from catanrl.eval.canopy_parity import (
     compare_independent_win_rates,
     validate_matching_action_cap,
 )
+from catanrl.eval.canopy_reference import validate_official_nexus_v3_reference
 
 
 def _parse_args() -> argparse.Namespace:
@@ -55,6 +56,7 @@ def main() -> None:
     reference_payload = _mapping(json.loads(args.reference.read_text()), "reference payload")
     candidate_config = _mapping(candidate_payload.get("config"), "candidate config")
     reference_config = _mapping(reference_payload.get("config"), "reference config")
+    validate_official_nexus_v3_reference(reference_config)
 
     if candidate_config.get("game_opponent") != "random":
         raise ValueError("Candidate must be a native search-vs-random result")

@@ -7,6 +7,12 @@ from dataclasses import asdict, dataclass
 
 from catanrl.eval.reporting import wilson_interval
 
+CANOPY_NEXUS_V3_RELEASE_TAG = "catan-nexus-v3"
+CANOPY_NEXUS_V3_RELEASE_COMMIT = "6185983a88ba6802e7fa9893cef5a76a15de2595"
+CANOPY_NEXUS_V3_CHECKPOINT_SHA256 = (
+    "f8e4e6858930243a30243e38c1b2b96b1a8da23970f5cba69906c65b268c60cc"
+)
+
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _RESULT = re.compile(
     r"\bW\s+(?P<wins>\d+)/(?P<w_total>\d+)\s+\([^)]*\)\s*\|\s*"
@@ -32,6 +38,24 @@ class CanopyTournamentSummary:
 
     def payload(self) -> dict[str, int | float | None]:
         return asdict(self)
+
+
+def validate_official_nexus_v3_reference(config: object) -> None:
+    """Reject reference artifacts not tied to the official released model."""
+    if not isinstance(config, dict):
+        raise ValueError("Canopy reference config must be a JSON object")
+    expected = {
+        "release_tag": CANOPY_NEXUS_V3_RELEASE_TAG,
+        "release_commit": CANOPY_NEXUS_V3_RELEASE_COMMIT,
+        "checkpoint_sha256": CANOPY_NEXUS_V3_CHECKPOINT_SHA256,
+    }
+    for key, expected_value in expected.items():
+        actual_value = config.get(key)
+        if actual_value != expected_value:
+            raise ValueError(
+                f"Reference is not official Canopy Nexus-v3: "
+                f"{key}={actual_value!r}, expected {expected_value!r}"
+            )
 
 
 def parse_canopy_tournament_summary(text: str) -> CanopyTournamentSummary:
