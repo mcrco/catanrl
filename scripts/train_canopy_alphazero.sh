@@ -28,10 +28,11 @@ case "$value_init" in
     ;;
 esac
 
-# Keep OS process count at this host's 16 logical CPUs. Multiplex two independent
-# native games per process to expose the same 32 inference streams without the
-# reliability cost of 32 spawned Python processes.
-parity_workers=${CATANRL_PARITY_WORKERS:-16}
+# Sixteen native worker processes exhausted this 32 GiB host before one batch
+# completed. Eight processes with two independent games each preserve the 16
+# concurrent search streams that already saturate inference while avoiding half
+# of the duplicated Python/PyTorch process footprint.
+parity_workers=${CATANRL_PARITY_WORKERS:-8}
 parity_games_per_worker=${CATANRL_PARITY_GAMES_PER_WORKER:-2}
 # Canopy's Nexus-v3 preset collects 150k fresh decision samples per iteration.
 # Native Catan self-play currently yields about 250 trainable decisions per game,
