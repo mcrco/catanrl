@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sweep native MCTS budgets against a raw policy or native F and fixed positions."""
+"""Sweep native MCTS budgets against random, raw policy, or native F opponents."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Measure native MCTS depth/search effect on identical frozen-policy positions, "
-            "then play paired games against either the same raw policy or native F."
+            "then play paired games against random, the same raw policy, or native F."
         )
     )
     parser.add_argument("--experiment", required=True, help="Frozen experiment checkpoint")
@@ -49,11 +49,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--games-per-seat", type=int, default=32)
     parser.add_argument(
         "--game-opponent",
-        choices=("raw", "value"),
+        choices=("random", "raw", "value"),
         default="raw",
         help=(
-            "Opponent for paired games: the frozen raw network (raw) or the native "
-            "C++ Catanatron F/value player (value)"
+            "Opponent for paired games: uniform legal random (random), the frozen "
+            "raw network (raw), or the native C++ Catanatron F/value player (value)"
         ),
     )
     parser.add_argument("--num-workers", type=int, default=16)

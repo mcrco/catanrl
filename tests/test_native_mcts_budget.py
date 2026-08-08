@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 from catanrl.algorithms.alphazero.native_search import NativeSearchDiagnostics
@@ -109,6 +110,57 @@ def test_native_value_opponent_uses_cpp_value_player_without_inference():
 
     assert action == 17
     assert game.calls == 1
+
+
+class _RandomOpponentGame:
+    def valid_action_mask(self):
+        return np.array([False, True, False, True, False], dtype=np.bool_)
+
+
+def test_native_random_opponent_selects_only_legal_actions_and_is_deterministic():
+    game = _RandomOpponentGame()
+    first_rng = np.random.default_rng(1977)
+    second_rng = np.random.default_rng(1977)
+
+    first = [
+        _game_opponent_action(
+            game,  # type: ignore[arg-type]
+            "random",
+            "BASE",
+            pytest.fail,  # type: ignore[arg-type]
+            pytest.fail,  # type: ignore[arg-type]
+            pytest.fail,  # type: ignore[arg-type]
+            first_rng,
+        )
+        for _ in range(100)
+    ]
+    second = [
+        _game_opponent_action(
+            game,  # type: ignore[arg-type]
+            "random",
+            "BASE",
+            pytest.fail,  # type: ignore[arg-type]
+            pytest.fail,  # type: ignore[arg-type]
+            pytest.fail,  # type: ignore[arg-type]
+            second_rng,
+        )
+        for _ in range(100)
+    ]
+
+    assert first == second
+    assert set(first) == {1, 3}
+
+
+def test_native_random_opponent_requires_rng():
+    with pytest.raises(ValueError, match="random generator"):
+        _game_opponent_action(
+            _RandomOpponentGame(),  # type: ignore[arg-type]
+            "random",
+            "BASE",
+            pytest.fail,  # type: ignore[arg-type]
+            pytest.fail,  # type: ignore[arg-type]
+            pytest.fail,  # type: ignore[arg-type]
+        )
 
 
 def test_native_budget_worker_streams_each_game(monkeypatch):

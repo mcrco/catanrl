@@ -29,7 +29,7 @@ from catanrl.players.nn_mcts_player import _RemoteNNMCTSInferenceBackend
 from catanrl.utils.seeding import derive_map_and_game_seeds, derive_seed
 
 MapType = Literal["BASE", "MINI", "TOURNAMENT"]
-GameOpponent = Literal["raw", "value"]
+GameOpponent = Literal["random", "raw", "value"]
 
 _MEAN_DIAGNOSTIC_FIELDS = (
     "simulations",
@@ -278,7 +278,15 @@ def _game_opponent_action(
     actor_indices: np.ndarray,
     critic_indices: np.ndarray,
     inference_backend: _RemoteNNMCTSInferenceBackend,
+    rng: np.random.Generator | None = None,
 ) -> int:
+    if opponent == "random":
+        if rng is None:
+            raise ValueError("A random generator is required for the random opponent")
+        valid_indices = np.flatnonzero(game.valid_action_mask())
+        if valid_indices.size == 0:
+            raise RuntimeError("Random native opponent has no legal action")
+        return int(rng.choice(valid_indices))
     if opponent == "value":
         return game.value_action()
     if opponent == "raw":
@@ -358,6 +366,7 @@ def _play_budget_game(
         vps_to_win=int(args_dict["vps_to_win"]),
     )
     decision_index = 0
+    opponent_rng = np.random.default_rng(derive_seed(episode_seed, "native_budget_random_opponent"))
     search: NativeMCTSSearch | None = None
     try:
         while game.winner is None and game.num_turns < int(args_dict["turns_limit"]):
@@ -406,6 +415,7 @@ def _play_budget_game(
                     actor_indices,
                     critic_indices,
                     inference_backend,
+                    opponent_rng,
                 )
             search = step_game_and_reconcile_search(
                 game=game,
@@ -667,8 +677,8 @@ def run_native_budget_games(
         raise ValueError("budget must be at least 1")
     if games_per_seat < 1:
         raise ValueError("games_per_seat must be at least 1")
-    if game_opponent not in ("raw", "value"):
-        raise ValueError("game_opponent must be 'raw' or 'value'")
+    if game_opponent not in ("random", "raw", "value"):
+        raise ValueError("game_opponent must be 'random', 'raw', or 'value'")
     if search_selection not in ("puct", "completed-q"):
         raise ValueError("search_selection must be 'puct' or 'completed-q'")
     scenarios = [
