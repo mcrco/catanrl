@@ -327,6 +327,7 @@ def main():
         graph_num_layers=arch.graph_num_layers,
         graph_head_hidden_dim=arch.graph_head_hidden_dim,
         graph_normalize_inputs=arch.graph_normalize_inputs,
+        graph_semantic_inputs=arch.graph_semantic_inputs,
         load_policy_weights=warm_start.checkpoints.policy if warm_start else None,
         load_critic_weights=warm_start.checkpoints.critic if warm_start else None,
         n_iterations=args.iterations,

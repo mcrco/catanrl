@@ -609,6 +609,7 @@ def train(
     graph_num_layers: int = 4,
     graph_head_hidden_dim: int = 256,
     graph_normalize_inputs: bool = False,
+    graph_semantic_inputs: bool = False,
     load_policy_weights: Optional[str] = None,
     load_critic_weights: Optional[str] = None,
     n_iterations: int = 10,
@@ -871,6 +872,7 @@ def train(
         graph_num_layers=graph_num_layers,
         graph_head_hidden_dim=graph_head_hidden_dim,
         graph_normalize_inputs=graph_normalize_inputs,
+        graph_semantic_inputs=graph_semantic_inputs,
     )
 
     if uses_shared_network:
@@ -922,6 +924,7 @@ def train(
             graph_num_layers=graph_num_layers,
             graph_head_hidden_dim=graph_head_hidden_dim,
             graph_normalize_inputs=graph_normalize_inputs,
+            graph_semantic_inputs=graph_semantic_inputs,
         )
         critic_model = build_value_network(backbone_config=critic_backbone_config).to(torch_device)
 

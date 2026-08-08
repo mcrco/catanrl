@@ -55,6 +55,7 @@ class CatanGraphBackboneConfig:
     head_hidden_dim: int = 256
     board_layout: str = "width_height"
     normalize_inputs: bool = False
+    semantic_inputs: bool = False
 
 
 @dataclass
@@ -451,6 +452,8 @@ class CatanGraphBackbone(nn.Module):
     node_edge_incidence: torch.Tensor
     road_channel_indices: torch.Tensor
     node_adjacency: torch.Tensor
+    node_adjacency_binary: torch.Tensor
+    node_tile_incidence: torch.Tensor
     tile_to_node: torch.Tensor
     node_to_tile: torch.Tensor
     tile_decoder: torch.Tensor
@@ -509,6 +512,7 @@ class CatanGraphBackbone(nn.Module):
             node_edge_incidence[second_local, edge_index] = 1.0
             edge_pairs.append((first_local, second_local))
             edge_positions.append(edge_position_map[(first, second)])
+        node_adjacency_binary = node_adjacency.clone()
         node_adjacency /= node_adjacency.sum(dim=1, keepdim=True).clamp_min(1.0)
         tile_to_node = incidence / incidence.sum(dim=1, keepdim=True).clamp_min(1.0)
         # ``transpose`` returns a view.  Clone before normalizing so this does
@@ -555,6 +559,12 @@ class CatanGraphBackbone(nn.Module):
             persistent=False,
         )
         self.register_buffer("node_adjacency", node_adjacency, persistent=False)
+        self.register_buffer(
+            "node_adjacency_binary",
+            node_adjacency_binary,
+            persistent=False,
+        )
+        self.register_buffer("node_tile_incidence", incidence, persistent=False)
         self.register_buffer("tile_to_node", tile_to_node, persistent=False)
         self.register_buffer("node_to_tile", node_to_tile, persistent=False)
         self.register_buffer("tile_decoder", tile_decoder, persistent=False)
@@ -572,10 +582,17 @@ class CatanGraphBackbone(nn.Module):
             persistent=False,
         )
 
-        self.global_projection = nn.Linear(config.numeric_dim, config.global_hidden_dim)
-        self.node_projection = nn.Linear(config.board_channels, config.hidden_dim)
-        # Five resource-production planes plus the robber plane.
-        self.tile_projection = nn.Linear(6, config.hidden_dim)
+        semantic_global_dim = 5 + 15 * config.num_players if config.semantic_inputs else 0
+        self.global_projection = nn.Linear(
+            config.numeric_dim + semantic_global_dim,
+            config.global_hidden_dim,
+        )
+        node_input_dim = (
+            16 + 3 * config.num_players if config.semantic_inputs else config.board_channels
+        )
+        tile_input_dim = 8 + config.num_players if config.semantic_inputs else 6
+        self.node_projection = nn.Linear(node_input_dim, config.hidden_dim)
+        self.tile_projection = nn.Linear(tile_input_dim, config.hidden_dim)
         self.node_injection = nn.Sequential(
             nn.Linear(config.hidden_dim + config.global_hidden_dim, config.hidden_dim),
             nn.LayerNorm(config.hidden_dim),
@@ -596,6 +613,124 @@ class CatanGraphBackbone(nn.Module):
             if isinstance(module, nn.Linear):
                 orthogonal_init(module)
 
+    def _network_distances(
+        self,
+        buildings: torch.Tensor,
+        incident_roads: torch.Tensor,
+    ) -> torch.Tensor:
+        """Canopy-style distance to each player's road/building network."""
+        visited = (buildings > 0.0) | (incident_roads > 0.0)
+        distances = torch.ones_like(buildings)
+        distances = torch.where(visited, torch.zeros_like(distances), distances)
+        frontier = visited
+        for distance in range(1, 7):
+            neighbors = (
+                torch.einsum(
+                    "nm,bmp->bnp",
+                    self.node_adjacency_binary,
+                    frontier.to(dtype=buildings.dtype),
+                )
+                > 0.0
+            )
+            new_frontier = neighbors & ~visited
+            distances = torch.where(
+                new_frontier,
+                torch.full_like(distances, distance / 6.0),
+                distances,
+            )
+            visited = visited | new_frontier
+            frontier = new_frontier
+        return distances
+
+    def _semantic_spatial_inputs(
+        self,
+        node_raw: torch.Tensor,
+        tile_raw: torch.Tensor,
+        incident_roads: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Recover normalized Nexus-v3-style features from the same board vector."""
+        resource_offset = 2 * self.config.num_players
+        buildings_raw = node_raw[..., 0:resource_offset:2]
+        buildings = buildings_raw / 2.0
+        ports = node_raw[..., resource_offset + 6 : resource_offset + 12]
+
+        tile_resource_prob = tile_raw[..., :5].clamp_min(0.0)
+        tile_robber = (tile_raw[..., 5:6] > 0.5).to(dtype=tile_raw.dtype)
+        tile_resource_pips = tile_resource_prob * 36.0
+        blocked_resource_pips = torch.einsum(
+            "nt,btr->bnr",
+            self.node_tile_incidence,
+            tile_resource_pips * tile_robber,
+        )
+        total_resource_pips = torch.einsum(
+            "nt,btr->bnr",
+            self.node_tile_incidence,
+            tile_resource_pips,
+        )
+        production = (total_resource_pips - blocked_resource_pips) / 13.0
+        blocked_production = blocked_resource_pips / 5.0
+        network_distances = self._network_distances(buildings_raw, incident_roads)
+        node_features = torch.cat(
+            (
+                buildings,
+                ports,
+                production,
+                blocked_production,
+                incident_roads,
+                network_distances,
+            ),
+            dim=-1,
+        )
+
+        tile_building_weights = torch.einsum(
+            "tn,bnp->btp",
+            self.node_to_tile,
+            buildings_raw,
+        )
+        tile_features = torch.cat(
+            (
+                (tile_resource_prob > 1e-6).to(dtype=tile_raw.dtype),
+                tile_resource_prob.sum(dim=-1, keepdim=True) * (36.0 / 5.0),
+                tile_resource_prob.sum(dim=-1, keepdim=True),
+                tile_robber,
+                tile_building_weights,
+            ),
+            dim=-1,
+        )
+
+        player_resource_production = (
+            torch.einsum(
+                "btr,btp->bpr",
+                tile_resource_pips,
+                tile_building_weights * 6.0,
+            )
+            / 35.0
+        )
+        owned_ports = ((buildings_raw > 0.0).unsqueeze(-1) * ports.unsqueeze(2)).amax(dim=1)
+        trade_improvements = torch.maximum(
+            owned_ports[..., :5] * 0.5,
+            owned_ports[..., 5:6] * 0.25,
+        )
+        board_resource_production = tile_resource_pips.sum(dim=1) / 15.0
+        player_blocked_production = (
+            torch.einsum(
+                "bnr,bnp->bpr",
+                blocked_resource_pips,
+                buildings_raw,
+            )
+            / 15.0
+        )
+        global_semantics = torch.cat(
+            (
+                player_resource_production.flatten(start_dim=1),
+                trade_improvements.flatten(start_dim=1),
+                board_resource_production,
+                player_blocked_production.flatten(start_dim=1),
+            ),
+            dim=-1,
+        )
+        return node_features, tile_features, global_semantics
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if x.ndim != 2 or x.shape[1] != self.config.input_dim:
             raise ValueError(
@@ -605,7 +740,6 @@ class CatanGraphBackbone(nn.Module):
         numeric = x[:, : self.numeric_dim]
         if self.config.normalize_inputs:
             numeric = torch.clamp(numeric / self.numeric_denominators, min=-1.0, max=1.0)
-        global_features = torch.relu(self.global_projection(numeric))
         board = x[:, self.numeric_dim :].reshape(
             batch_size,
             self.board_width,
@@ -642,7 +776,14 @@ class CatanGraphBackbone(nn.Module):
         resource_offset = 2 * self.config.num_players
         tile_source = node_raw[:, :, resource_offset : resource_offset + 6]
         tile_raw = torch.einsum("tn,bnc->btc", self.tile_decoder, tile_source)
-        if self.config.normalize_inputs:
+        if self.config.semantic_inputs:
+            node_raw, tile_raw, global_semantics = self._semantic_spatial_inputs(
+                node_raw,
+                tile_raw,
+                incident_roads,
+            )
+            numeric = torch.cat((numeric, global_semantics), dim=-1)
+        elif self.config.normalize_inputs:
             # Catanatron stores dice probabilities (pips/36). Nexus-v3 uses
             # pips/5 for tiles and normalized production at nodes.
             tile_raw = tile_raw.clone()
@@ -650,6 +791,7 @@ class CatanGraphBackbone(nn.Module):
             node_raw[..., 0:resource_offset:2] /= 2.0
             node_raw[..., resource_offset : resource_offset + 5] *= 36.0 / 13.0
 
+        global_features = torch.relu(self.global_projection(numeric))
         nodes = torch.relu(self.node_projection(node_raw))
         tiles = torch.relu(self.tile_projection(tile_raw))
         node_global = global_features.unsqueeze(1).expand(-1, self.num_nodes, -1)

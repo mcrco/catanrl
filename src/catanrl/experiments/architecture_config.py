@@ -45,6 +45,7 @@ class ArchitecturePreset:
     graph_num_layers: int = 4
     graph_head_hidden_dim: int = 256
     graph_normalize_inputs: bool = False
+    graph_semantic_inputs: bool = False
 
     @property
     def actor_observation_level(self) -> str:
@@ -221,6 +222,10 @@ def load_architecture_preset(path: str | Path) -> ArchitecturePreset:
             model.get("graph_normalize_inputs", False),
             field="model.graph_normalize_inputs",
         ),
+        graph_semantic_inputs=_parse_bool(
+            model.get("graph_semantic_inputs", False),
+            field="model.graph_semantic_inputs",
+        ),
     )
 
 
@@ -246,6 +251,7 @@ def architecture_train_config_fields(arch: ArchitecturePreset) -> dict[str, Any]
         "graph_num_layers": arch.graph_num_layers,
         "graph_head_hidden_dim": arch.graph_head_hidden_dim,
         "graph_normalize_inputs": arch.graph_normalize_inputs,
+        "graph_semantic_inputs": arch.graph_semantic_inputs,
         "map_type": arch.map_type,
         "vps_to_win": arch.vps_to_win,
         "discard_limit": arch.discard_limit,

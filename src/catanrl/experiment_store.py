@@ -533,6 +533,7 @@ def _apply_graph_backbone_args(args: argparse.Namespace, backbone: BackboneConfi
     _set_arg(args, "graph_num_layers", bb_args.num_layers)
     _set_arg(args, "graph_head_hidden_dim", bb_args.head_hidden_dim)
     _set_arg(args, "graph_normalize_inputs", bb_args.normalize_inputs)
+    _set_arg(args, "graph_semantic_inputs", bb_args.semantic_inputs)
 
 
 def apply_experiment_architecture_to_args(args: argparse.Namespace, exp: Experiment) -> None:
@@ -988,6 +989,7 @@ def architecture_preset_from_experiment(exp: Experiment) -> "ArchitecturePreset"
     graph_num_layers = 4
     graph_head_hidden_dim = 256
     graph_normalize_inputs = False
+    graph_semantic_inputs = False
 
     if isinstance(policy.backbone.args, CrossDimensionalBackboneConfig):
         bb = policy.backbone.args
@@ -1001,6 +1003,7 @@ def architecture_preset_from_experiment(exp: Experiment) -> "ArchitecturePreset"
         graph_num_layers = bb.num_layers
         graph_head_hidden_dim = bb.head_hidden_dim
         graph_normalize_inputs = bb.normalize_inputs
+        graph_semantic_inputs = bb.semantic_inputs
 
     if critic is not None and isinstance(critic.backbone.args, CrossDimensionalBackboneConfig):
         xdim_critic_fusion_hidden_dim = critic.backbone.args.fusion_hidden_dim
@@ -1024,6 +1027,8 @@ def architecture_preset_from_experiment(exp: Experiment) -> "ArchitecturePreset"
         graph_head_hidden_dim = int(tc["graph_head_hidden_dim"])
     if tc.get("graph_normalize_inputs") is not None:
         graph_normalize_inputs = bool(tc["graph_normalize_inputs"])
+    if tc.get("graph_semantic_inputs") is not None:
+        graph_semantic_inputs = bool(tc["graph_semantic_inputs"])
 
     return ArchitecturePreset(
         model_type=model_type,
@@ -1047,6 +1052,7 @@ def architecture_preset_from_experiment(exp: Experiment) -> "ArchitecturePreset"
         graph_num_layers=graph_num_layers,
         graph_head_hidden_dim=graph_head_hidden_dim,
         graph_normalize_inputs=graph_normalize_inputs,
+        graph_semantic_inputs=graph_semantic_inputs,
     )
 
 

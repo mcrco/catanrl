@@ -41,7 +41,12 @@ from catanrl.utils.catanatron_action_space import get_action_array, get_action_s
 from catanrl.utils.catanatron_map import build_catan_map
 
 
-def _graph_config(*, hidden_dim: int = 16, normalize_inputs: bool = False) -> BackboneConfig:
+def _graph_config(
+    *,
+    hidden_dim: int = 16,
+    normalize_inputs: bool = False,
+    semantic_inputs: bool = False,
+) -> BackboneConfig:
     numeric_dim = 74
     return build_backbone_config(
         backbone_type="catan_graph",
@@ -58,20 +63,29 @@ def _graph_config(*, hidden_dim: int = 16, normalize_inputs: bool = False) -> Ba
         graph_num_layers=2,
         graph_head_hidden_dim=16,
         graph_normalize_inputs=normalize_inputs,
+        graph_semantic_inputs=semantic_inputs,
     )
 
 
-@pytest.mark.parametrize("normalize_inputs", [False, True])
+@pytest.mark.parametrize(
+    ("normalize_inputs", "semantic_inputs"),
+    [(False, False), (True, False), (True, True)],
+)
 def test_catan_graph_config_round_trips_through_experiment_metadata(
     normalize_inputs: bool,
+    semantic_inputs: bool,
 ) -> None:
-    config = _graph_config(normalize_inputs=normalize_inputs)
+    config = _graph_config(
+        normalize_inputs=normalize_inputs,
+        semantic_inputs=semantic_inputs,
+    )
     restored = backbone_config_from_dict(backbone_config_to_dict(config))
 
     assert restored == config
     assert isinstance(restored.args, CatanGraphBackboneConfig)
     assert restored.args.board_layout == "width_height"
     assert restored.args.normalize_inputs is normalize_inputs
+    assert restored.args.semantic_inputs is semantic_inputs
 
 
 def test_catan_graph_preserves_existing_observation_and_action_contracts() -> None:
@@ -215,6 +229,76 @@ def test_catan_graph_normalization_preserves_checkpoint_tensor_contract() -> Non
 
     assert raw.state_dict().keys() == normalized.state_dict().keys()
     normalized.load_state_dict(raw.state_dict())
+
+
+def test_catan_graph_semantic_inputs_recover_nexus_local_features() -> None:
+    model = build_flat_policy_value_network(
+        _graph_config(normalize_inputs=True, semantic_inputs=True),
+        get_action_space_size(2, "BASE"),
+        value_head_type="wdl",
+    )
+    assert isinstance(model.backbone, CatanGraphBackbone)
+    backbone = model.backbone
+    state = torch.zeros(1, backbone.config.input_dim)
+    board = state[:, backbone.numeric_dim :].reshape(
+        1,
+        backbone.board_width,
+        backbone.board_height,
+        backbone.board_channels,
+    )
+
+    tile_index = 0
+    tile_nodes = torch.nonzero(backbone.node_tile_incidence[:, tile_index]).flatten()
+    resource_channel = 2 * backbone.config.num_players
+    robber_channel = resource_channel + 5
+    for node_index in tile_nodes.tolist():
+        node_x, node_y = backbone.node_positions[node_index].tolist()
+        board[0, node_x, node_y, resource_channel] = 5.0 / 36.0
+        board[0, node_x, node_y, robber_channel] = 1.0
+
+    building_node = int(tile_nodes[0])
+    building_x, building_y = backbone.node_positions[building_node].tolist()
+    board[0, building_x, building_y, 0] = 1.0
+    edge_x, edge_y = backbone.edge_positions[0].tolist()
+    board[0, edge_x, edge_y, 1] = 1.0
+
+    captured_nodes: list[torch.Tensor] = []
+    captured_tiles: list[torch.Tensor] = []
+    captured_global: list[torch.Tensor] = []
+    global_handle = backbone.global_projection.register_forward_pre_hook(
+        lambda _module, inputs: captured_global.append(inputs[0].detach().clone())
+    )
+    node_handle = backbone.node_projection.register_forward_pre_hook(
+        lambda _module, inputs: captured_nodes.append(inputs[0].detach().clone())
+    )
+    tile_handle = backbone.tile_projection.register_forward_pre_hook(
+        lambda _module, inputs: captured_tiles.append(inputs[0].detach().clone())
+    )
+    try:
+        output = backbone(state)
+    finally:
+        global_handle.remove()
+        node_handle.remove()
+        tile_handle.remove()
+
+    assert output.shape == (1, backbone.output_dim)
+    nodes = captured_nodes[0][0]
+    tiles = captured_tiles[0][0]
+    global_features = captured_global[0][0]
+    assert nodes.shape == (backbone.num_nodes, 22)
+    assert tiles.shape == (backbone.num_tiles, 10)
+    assert global_features.shape == (109,)
+    assert tiles[tile_index, 0] == 1.0
+    assert tiles[tile_index, 5] == pytest.approx(1.0)
+    assert tiles[tile_index, 6] == pytest.approx(5.0 / 36.0)
+    assert tiles[tile_index, 7] == 1.0
+    assert tiles[tile_index, 8] == pytest.approx(1.0 / 6.0)
+    assert global_features[74] == pytest.approx(1.0 / 7.0)
+    assert nodes[building_node, 0] == 0.5
+    assert nodes[building_node, 8] == pytest.approx(0.0, abs=1e-6)
+    assert nodes[building_node, 13] == pytest.approx(1.0)
+    assert nodes[building_node, 20] == 0.0
+    assert torch.all(nodes[:, 21] == 1.0)
 
 
 def test_catan_graph_rejects_generic_hierarchical_policy_head() -> None:
@@ -376,6 +460,7 @@ def test_nexus_v3_preset_builds_and_reloads_identically() -> None:
         graph_num_layers=preset.graph_num_layers,
         graph_head_hidden_dim=preset.graph_head_hidden_dim,
         graph_normalize_inputs=preset.graph_normalize_inputs,
+        graph_semantic_inputs=preset.graph_semantic_inputs,
     )
     rebuilt = build_flat_policy_value_network(
         backbone_config_from_dict(backbone_config_to_dict(model.backbone_config)),
@@ -408,8 +493,27 @@ def test_normalized_nexus_v3_preset_is_opt_in_and_preserves_game_contract() -> N
 
     assert baseline.graph_normalize_inputs is False
     assert normalized.graph_normalize_inputs is True
+    assert baseline.graph_semantic_inputs is False
+    assert normalized.graph_semantic_inputs is False
     assert normalized.policy_mode == baseline.policy_mode == "full"
     assert normalized.critic_mode == baseline.critic_mode == "full"
     assert normalized.map_type == baseline.map_type == "BASE"
     assert normalized.vps_to_win == baseline.vps_to_win == 15
     assert normalized.discard_limit == baseline.discard_limit == 9
+
+
+def test_semantic_normalized_nexus_v3_preset_preserves_game_contract() -> None:
+    baseline = load_architecture_preset(
+        "configs/models/catan-graph-nexus-v3-flat-2p-full-shared.yaml"
+    )
+    semantic = load_architecture_preset(
+        "configs/models/catan-graph-nexus-v3-semantic-normalized-flat-2p-full-shared.yaml"
+    )
+
+    assert semantic.graph_normalize_inputs is True
+    assert semantic.graph_semantic_inputs is True
+    assert semantic.policy_mode == baseline.policy_mode == "full"
+    assert semantic.critic_mode == baseline.critic_mode == "full"
+    assert semantic.map_type == baseline.map_type == "BASE"
+    assert semantic.vps_to_win == baseline.vps_to_win == 15
+    assert semantic.discard_limit == baseline.discard_limit == 9

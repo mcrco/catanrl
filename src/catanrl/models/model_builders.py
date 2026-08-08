@@ -41,6 +41,7 @@ def build_policy_model(
     graph_num_layers: int = 4,
     graph_head_hidden_dim: int = 256,
     graph_normalize_inputs: bool = False,
+    graph_semantic_inputs: bool = False,
 ) -> PolicyNetworkWrapper:
     dims = compute_single_agent_dims(
         num_players,
@@ -65,6 +66,7 @@ def build_policy_model(
         graph_num_layers=graph_num_layers,
         graph_head_hidden_dim=graph_head_hidden_dim,
         graph_normalize_inputs=graph_normalize_inputs,
+        graph_semantic_inputs=graph_semantic_inputs,
     )
 
     if model_type == "flat":
@@ -100,6 +102,7 @@ def build_critic_model(
     graph_num_layers: int = 4,
     graph_head_hidden_dim: int = 256,
     graph_normalize_inputs: bool = False,
+    graph_semantic_inputs: bool = False,
 ) -> ValueNetworkWrapper:
     dims = compute_single_agent_dims(
         num_players,
@@ -124,6 +127,7 @@ def build_critic_model(
         graph_num_layers=graph_num_layers,
         graph_head_hidden_dim=graph_head_hidden_dim,
         graph_normalize_inputs=graph_normalize_inputs,
+        graph_semantic_inputs=graph_semantic_inputs,
     )
 
     model = build_value_network(backbone_config=backbone_config)
@@ -149,6 +153,7 @@ def build_policy_value_model(
     graph_num_layers: int = 4,
     graph_head_hidden_dim: int = 256,
     graph_normalize_inputs: bool = False,
+    graph_semantic_inputs: bool = False,
 ) -> PolicyValueNetworkWrapper:
     """Build a joint policy-value network with a shared backbone."""
     dims = compute_single_agent_dims(
@@ -175,6 +180,7 @@ def build_policy_value_model(
         graph_num_layers=graph_num_layers,
         graph_head_hidden_dim=graph_head_hidden_dim,
         graph_normalize_inputs=graph_normalize_inputs,
+        graph_semantic_inputs=graph_semantic_inputs,
     )
 
     if model_type == "flat":
