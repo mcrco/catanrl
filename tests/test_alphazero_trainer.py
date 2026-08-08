@@ -520,6 +520,7 @@ def test_collect_self_play_can_dispatch_to_native_backend(
     assert called["search_selection"] == "puct"
     assert called["trajectory_action_selection"] == "visits"
     assert called["explore_actions"] == 24
+    assert called["games_per_worker"] == 1
     assert called["max_actions"] == 0
     assert called["worker_stall_timeout_s"] == 600.0
     assert called["inference_response_timeout_s"] == 120.0
@@ -670,6 +671,8 @@ def test_cli_accepts_bounded_native_self_play_controls() -> None:
             "32",
             "--self-play-max-attempts",
             "4",
+            "--games-per-worker",
+            "3",
         ]
     )
 
@@ -678,6 +681,7 @@ def test_cli_accepts_bounded_native_self_play_controls() -> None:
     assert args.inference_response_timeout_seconds == 60.0
     assert args.self_play_result_chunk_size == 32
     assert args.self_play_max_attempts == 4
+    assert args.games_per_worker == 3
 
 
 def test_warm_start_can_keep_policy_but_reset_shared_value_head(tmp_path) -> None:

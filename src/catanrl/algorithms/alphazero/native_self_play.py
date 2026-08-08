@@ -5,7 +5,8 @@ from __future__ import annotations
 import multiprocessing as mp
 import traceback
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Literal
 
@@ -401,63 +402,17 @@ def _native_training_worker_main(
         response_timeout_s=float(args_dict["inference_response_timeout_s"]),
     )
     try:
-        for episode_seed in episode_seeds:
-            experiences: list[
-                tuple[
-                    np.ndarray,
-                    np.ndarray,
-                    np.ndarray,
-                    np.ndarray,
-                    float,
-                    bool,
-                    np.ndarray,
-                    np.ndarray | None,
-                ]
-            ] = []
-            stats: Counter[str] = Counter()
-            samples, winner = _play_native_self_play_game(
-                episode_seed=episode_seed,
-                args_dict=args_dict,
-                inference_backend=inference_backend,
-            )
-            stats["games"] += 1
-            if winner is not None:
-                stats[f"wins_{COLOR_ORDER[winner].value}"] += 1
-            search_value_weight = float(args_dict.get("search_value_weight", 0.0))
-            aux_value_horizons = tuple(args_dict.get("aux_value_horizons", ()))
-            aux_value_targets = _compute_auxiliary_value_targets(
-                samples,
-                aux_value_horizons,
-            )
-            for sample_index, sample in enumerate(samples):
-                terminal_value = (
-                    0.0 if winner is None else (1.0 if sample.player == winner else -1.0)
-                )
-                value_wdl = _blend_terminal_search_wdl(
-                    terminal_value,
-                    sample.search_wdl,
-                    search_value_weight,
-                )
-                value = float(value_wdl[0] - value_wdl[2])
-                experiences.append(
-                    (
-                        sample.actor_state,
-                        sample.critic_state,
-                        sample.policy,
-                        sample.action_mask,
-                        value,
-                        sample.full_search,
-                        value_wdl,
-                        (aux_value_targets[sample_index] if aux_value_horizons else None),
-                    )
-                )
-            stats["full_search_decisions"] += sum(int(sample.full_search) for sample in samples)
-            stats["fast_search_decisions"] += sum(int(not sample.full_search) for sample in samples)
+        for experiences, stats in _iter_native_training_game_results(
+            episode_seeds=episode_seeds,
+            args_dict=args_dict,
+            inference_backend=inference_backend,
+            game_concurrency=int(args_dict.get("games_per_worker", 1)),
+        ):
             _put_training_result_chunks(
                 result_queue=result_queue,
                 worker_id=worker_id,
                 experiences=experiences,
-                stats=dict(stats),
+                stats=stats,
                 chunk_size=int(args_dict["result_chunk_size"]),
             )
         result_queue.put(
@@ -473,6 +428,109 @@ def _native_training_worker_main(
         result_queue.put({"worker_id": worker_id, "error": traceback.format_exc()})
     finally:
         inference_backend.close()
+
+
+NativeTrainingExperience = tuple[
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    float,
+    bool,
+    np.ndarray,
+    np.ndarray | None,
+]
+
+
+def _build_native_training_game_result(
+    *,
+    episode_seed: int,
+    args_dict: dict,
+    inference_backend: _NNMCTSInferenceBackend,
+) -> tuple[list[NativeTrainingExperience], dict[str, int]]:
+    """Convert one independently seeded native game into replay records."""
+    samples, winner = _play_native_self_play_game(
+        episode_seed=episode_seed,
+        args_dict=args_dict,
+        inference_backend=inference_backend,
+    )
+    stats: Counter[str] = Counter(games=1)
+    if winner is not None:
+        stats[f"wins_{COLOR_ORDER[winner].value}"] += 1
+
+    experiences: list[NativeTrainingExperience] = []
+    search_value_weight = float(args_dict.get("search_value_weight", 0.0))
+    aux_value_horizons = tuple(args_dict.get("aux_value_horizons", ()))
+    aux_value_targets = _compute_auxiliary_value_targets(samples, aux_value_horizons)
+    for sample_index, sample in enumerate(samples):
+        terminal_value = 0.0 if winner is None else (1.0 if sample.player == winner else -1.0)
+        value_wdl = _blend_terminal_search_wdl(
+            terminal_value,
+            sample.search_wdl,
+            search_value_weight,
+        )
+        experiences.append(
+            (
+                sample.actor_state,
+                sample.critic_state,
+                sample.policy,
+                sample.action_mask,
+                float(value_wdl[0] - value_wdl[2]),
+                sample.full_search,
+                value_wdl,
+                (aux_value_targets[sample_index] if aux_value_horizons else None),
+            )
+        )
+    stats["full_search_decisions"] += sum(int(sample.full_search) for sample in samples)
+    stats["fast_search_decisions"] += sum(int(not sample.full_search) for sample in samples)
+    return experiences, dict(stats)
+
+
+def _iter_native_training_game_results(
+    *,
+    episode_seeds: Sequence[int],
+    args_dict: dict,
+    inference_backend: _NNMCTSInferenceBackend,
+    game_concurrency: int,
+) -> Iterator[tuple[list[NativeTrainingExperience], dict[str, int]]]:
+    """Yield completed games while multiplexing native searches in one process.
+
+    The remote inference backend correlates requests by ID and supports
+    concurrent callers. Native games and trees own independent handles, so this
+    increases outstanding neural requests without adding OS processes or
+    changing trajectory semantics.
+    """
+    if game_concurrency < 1:
+        raise ValueError("game_concurrency must be at least 1")
+    if game_concurrency == 1 or len(episode_seeds) <= 1:
+        for episode_seed in episode_seeds:
+            yield _build_native_training_game_result(
+                episode_seed=episode_seed,
+                args_dict=args_dict,
+                inference_backend=inference_backend,
+            )
+        return
+
+    executor = ThreadPoolExecutor(
+        max_workers=min(game_concurrency, len(episode_seeds)),
+        thread_name_prefix="native-self-play-game",
+    )
+    futures: list[Future[tuple[list[NativeTrainingExperience], dict[str, int]]]] = [
+        executor.submit(
+            _build_native_training_game_result,
+            episode_seed=episode_seed,
+            args_dict=args_dict,
+            inference_backend=inference_backend,
+        )
+        for episode_seed in episode_seeds
+    ]
+    try:
+        for future in as_completed(futures):
+            yield future.result()
+    finally:
+        # After an error, the parent coordinator terminates this worker. Do not
+        # delay the error message while waiting for another long game to finish.
+        executor.shutdown(wait=False, cancel_futures=True)
 
 
 def generate_native_self_play_data(
@@ -504,6 +562,7 @@ def generate_native_self_play_data(
     seed: int,
     device: str | torch.device,
     show_tqdm: bool = True,
+    games_per_worker: int = 1,
     turns_limit: int = TURNS_LIMIT,
     max_actions: int = 0,
     value_scale: float = 1.0,
@@ -526,6 +585,8 @@ def generate_native_self_play_data(
     """Generate the trainer's standard replay records with native C++ MCTS."""
     if prunning:
         raise ValueError("Native MCTS does not implement Python action pruning")
+    if games_per_worker < 1:
+        raise ValueError("games_per_worker must be at least 1")
     if ismcts_determinizations != 1:
         raise ValueError("Native MCTS currently requires --ismcts-determinizations 1")
     if not 0.0 < full_search_probability <= 1.0:
@@ -575,6 +636,7 @@ def generate_native_self_play_data(
     args_dict = {
         "map_type": map_type,
         "num_players": num_players,
+        "games_per_worker": games_per_worker,
         "num_simulations": num_simulations,
         "c_puct": c_puct,
         "actor_observation_level": actor_observation_level,

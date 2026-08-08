@@ -89,6 +89,7 @@ class AlphaZeroConfig:
     trajectory_action_selection: Literal["visits", "canopy"] = "visits"
     explore_actions: int = 24
     num_game_workers: int = 1
+    games_per_worker: int = 1
     inference_batch_size: int = 64
     inference_wait_ms: float = 2.0
     max_actions: int = 0
@@ -272,6 +273,8 @@ class AlphaZeroTrainer:
             raise ValueError("worker_stall_timeout_s must be positive.")
         if config.inference_response_timeout_s <= 0.0:
             raise ValueError("inference_response_timeout_s must be positive.")
+        if config.games_per_worker < 1:
+            raise ValueError("games_per_worker must be at least 1.")
         if config.result_chunk_size < 1:
             raise ValueError("result_chunk_size must be at least 1.")
         if config.self_play_max_attempts < 1:
@@ -576,6 +579,7 @@ class AlphaZeroTrainer:
         )
         if self.config.self_play_backend == "cppanatron":
             self_play_kwargs.update(
+                games_per_worker=self.config.games_per_worker,
                 value_scale=self.config.value_scale,
                 tree_reuse=self.config.tree_reuse,
                 canonical_pruning=self.config.canonical_pruning,

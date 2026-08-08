@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 import torch
 
+from catanrl.algorithms.alphazero import native_self_play
 from catanrl.algorithms.alphazero.parallel_self_play import (
     _put_training_result_chunks,
     run_inference_server_workers,
@@ -38,6 +39,48 @@ class _CriticModel(torch.nn.Module):
 
     def forward(self, x):
         return x.sum(dim=1, keepdim=True) / 10.0
+
+
+def test_native_self_play_multiplexes_games_inside_each_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lock = threading.Lock()
+    release = threading.Event()
+    active = 0
+    maximum_active = 0
+    started = 0
+
+    def fake_game_result(*, episode_seed, args_dict, inference_backend):
+        del args_dict, inference_backend
+        nonlocal active, maximum_active, started
+        with lock:
+            active += 1
+            started += 1
+            maximum_active = max(maximum_active, active)
+            if started >= 2:
+                release.set()
+        assert release.wait(timeout=2.0)
+        time.sleep(0.01)
+        with lock:
+            active -= 1
+        return [], {"games": 1, "seed": episode_seed}
+
+    monkeypatch.setattr(
+        native_self_play,
+        "_build_native_training_game_result",
+        fake_game_result,
+    )
+    results = list(
+        native_self_play._iter_native_training_game_results(
+            episode_seeds=(11, 13, 17),
+            args_dict={},
+            inference_backend=object(),
+            game_concurrency=2,
+        )
+    )
+
+    assert maximum_active == 2
+    assert sorted(stats["seed"] for _experiences, stats in results) == [11, 13, 17]
 
 
 def _silent_game_worker(

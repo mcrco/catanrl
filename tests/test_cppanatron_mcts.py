@@ -716,6 +716,7 @@ def test_native_parallel_self_play_streams_and_deduplicates_shared_observations(
         seed=17,
         device="cpu",
         show_tqdm=False,
+        games_per_worker=2,
         turns_limit=1,
         aux_value_horizons=(10, 50, 150),
     )

@@ -115,6 +115,15 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         default=min(16, os.cpu_count() or 4),
         help="Across-game search workers sharing the central inference server.",
     )
+    parser.add_argument(
+        "--games-per-worker",
+        type=int,
+        default=1,
+        help=(
+            "Concurrent native games multiplexed inside each worker process. "
+            "This raises central inference concurrency without adding OS processes."
+        ),
+    )
     add_config_argument(parser)
 
     search = parser.add_argument_group("search teacher")
@@ -393,6 +402,7 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         "games-per-iteration": args.games_per_iteration,
         "optimizer-steps": args.optimizer_steps,
         "num-workers": args.num_workers,
+        "games-per-worker": args.games_per_worker,
         "simulations": args.simulations,
         "fast-simulations": args.fast_simulations,
         "ismcts-determinizations": args.ismcts_determinizations,
@@ -1116,6 +1126,7 @@ def main() -> None:
         trajectory_action_selection=args.trajectory_action_selection,
         explore_actions=args.explore_actions,
         num_game_workers=args.num_workers,
+        games_per_worker=args.games_per_worker,
         inference_batch_size=args.inference_batch_size,
         inference_wait_ms=args.inference_wait_ms,
         max_actions=args.max_actions,

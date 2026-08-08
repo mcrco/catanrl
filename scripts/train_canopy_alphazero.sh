@@ -28,10 +28,11 @@ case "$value_init" in
     ;;
 esac
 
-# This host has 16 logical CPUs. Oversubscribing it with 32 native game
-# processes made the coordinator less observable and contributed no useful GPU
-# batching headroom.
+# Keep OS process count at this host's 16 logical CPUs. Multiplex two independent
+# native games per process to expose the same 32 inference streams without the
+# reliability cost of 32 spawned Python processes.
 parity_workers=${CATANRL_PARITY_WORKERS:-16}
+parity_games_per_worker=${CATANRL_PARITY_GAMES_PER_WORKER:-2}
 # Canopy's Nexus-v3 preset collects 150k fresh decision samples per iteration.
 # Native Catan self-play currently yields about 250 trainable decisions per game,
 # so 600 games matches that data budget without changing game or reward semantics.
@@ -106,6 +107,7 @@ env -u VIRTUAL_ENV PYTHONUNBUFFERED=1 uv run python -m catanrl.experiments.train
   --games-per-iteration "$parity_games" \
   --optimizer-epochs 2 \
   --num-workers "$parity_workers" \
+  --games-per-worker "$parity_games_per_worker" \
   --inference-batch-size 64 \
   --inference-wait-ms 2.0 \
   --max-actions 2000 \
