@@ -43,6 +43,7 @@ parity_full_simulations=${CATANRL_PARITY_FULL_SIMULATIONS:-1600}
 parity_fast_simulations=${CATANRL_PARITY_FAST_SIMULATIONS:-64}
 parity_stall_timeout=${CATANRL_PARITY_STALL_TIMEOUT_SECONDS:-600}
 parity_inference_timeout=${CATANRL_PARITY_INFERENCE_TIMEOUT_SECONDS:-120}
+parity_replay_dir=${CATANRL_PARITY_REPLAY_STORAGE_DIR:-$repo_root/.replay}
 case "${CATANRL_PARITY_AUX_VALUES:-0}" in
   0)
     aux_value_args=()
@@ -126,6 +127,8 @@ env -u VIRTUAL_ENV PYTHONUNBUFFERED=1 uv run python -m catanrl.experiments.train
   --dirichlet-alpha 0.05 \
   --dirichlet-frac 0.25 \
   --buffer-size 500000 \
+  --replay-storage disk \
+  --replay-storage-dir "$parity_replay_dir" \
   --batch-size 1024 \
   --policy-lr 1e-4 \
   --critic-lr 1e-4 \

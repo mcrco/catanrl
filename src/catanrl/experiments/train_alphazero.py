@@ -296,6 +296,17 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
 
     optimization = parser.add_argument_group("student optimization")
     optimization.add_argument("--buffer-size", type=int, default=50_000)
+    optimization.add_argument(
+        "--replay-storage",
+        choices=("memory", "disk"),
+        default="memory",
+        help="Store replay in ordinary RAM or an exact-dtype disk-mapped ring.",
+    )
+    optimization.add_argument(
+        "--replay-storage-dir",
+        default=None,
+        help="Existing or creatable base directory for transient disk replay files.",
+    )
     optimization.add_argument("--batch-size", type=int, default=256)
     optimization.add_argument("--policy-lr", type=float, default=5e-5)
     optimization.add_argument("--critic-lr", type=float, default=1e-4)
@@ -430,6 +441,10 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
             parser.error(f"--{name.replace('_', '-')} must be a positive even number")
     if args.buffer_size < args.batch_size:
         parser.error("--buffer-size must be at least --batch-size")
+    if args.replay_storage == "disk" and not args.replay_storage_dir:
+        parser.error("--replay-storage disk requires --replay-storage-dir")
+    if args.replay_storage == "memory" and args.replay_storage_dir:
+        parser.error("--replay-storage-dir requires --replay-storage disk")
     if not math.isfinite(args.optimizer_epsilon) or args.optimizer_epsilon <= 0.0:
         parser.error("--optimizer-epsilon must be finite and positive")
     if args.mode == "distill" and not args.load_from_experiment:
@@ -1135,6 +1150,8 @@ def main() -> None:
         result_chunk_size=args.self_play_result_chunk_size,
         self_play_max_attempts=args.self_play_max_attempts,
         buffer_size=args.buffer_size,
+        replay_storage=args.replay_storage,
+        replay_storage_dir=args.replay_storage_dir,
         batch_size=args.batch_size,
         policy_lr=args.policy_lr,
         critic_lr=args.critic_lr,

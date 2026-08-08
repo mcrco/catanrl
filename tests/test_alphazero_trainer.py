@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import os
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -11,6 +12,7 @@ from catanatron.models.player import Color
 from torch import nn
 
 from catanrl.algorithms.alphazero.parallel_self_play import SelfPlayExperience
+from catanrl.algorithms.alphazero.replay_buffer import DiskReplayBuffer
 from catanrl.algorithms.alphazero.native_self_play import (
     _NativeSelfPlaySample,
     _compute_auxiliary_value_targets,
@@ -442,6 +444,47 @@ def test_replay_epochs_visit_every_sample_once_per_epoch() -> None:
         id(sample) for sample in experiences for _ in range(2)
     )
     assert trainer.update_weights(batches[2]) is not None
+
+
+def test_disk_replay_preserves_exact_targets_and_ring_order(tmp_path) -> None:
+    replay = DiskReplayBuffer(3, str(tmp_path), shared_states=True)
+    experiences = []
+    for index in range(4):
+        state = np.asarray([index, index + 0.5, -index], dtype=np.float32)
+        policy = np.asarray([0.0, 0.25, 0.75, 0.0], dtype=np.float32)
+        mask = np.asarray([False, True, True, False], dtype=np.bool_)
+        experiences.append(
+            SelfPlayExperience(
+                actor_state=state,
+                critic_state=state,
+                policy=policy,
+                action_mask=mask,
+                value=float(index - 2),
+                full_search=index % 2 == 0,
+                value_wdl=(None if index == 2 else np.asarray([0.1, 0.2, 0.7], dtype=np.float32)),
+            )
+        )
+
+    storage_path = replay.storage_path
+    replay.extend(experiences)
+
+    assert len(replay) == 3
+    assert [sample.value for sample in replay] == [-1.0, 0.0, 1.0]
+    for expected, actual in zip(experiences[1:], replay):
+        assert actual.actor_state.dtype == np.float32
+        assert actual.critic_state is actual.actor_state
+        assert actual.policy.dtype == np.float32
+        assert actual.action_mask.dtype == np.bool_
+        np.testing.assert_array_equal(actual.actor_state, expected.actor_state)
+        np.testing.assert_array_equal(actual.policy, expected.policy)
+        np.testing.assert_array_equal(actual.action_mask, expected.action_mask)
+        if expected.value_wdl is None:
+            assert actual.value_wdl is None
+        else:
+            np.testing.assert_array_equal(actual.value_wdl, expected.value_wdl)
+
+    replay.close()
+    assert not os.path.exists(storage_path)
 
 
 def test_promote_and_restore_keep_policy_critic_pairs_together() -> None:

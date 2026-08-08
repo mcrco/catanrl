@@ -42,6 +42,7 @@ from ...models.wrappers import PolicyNetworkWrapper, PolicyValueNetworkWrapper, 
 from .native_search import PolicyTarget
 from .native_self_play import generate_native_self_play_data
 from .parallel_self_play import SelfPlayExperience, generate_self_play_data
+from .replay_buffer import DiskReplayBuffer
 
 TrainingMode = Literal["distill", "iterate"]
 PolicyModel = PolicyNetworkWrapper | PolicyValueNetworkWrapper
@@ -100,6 +101,8 @@ class AlphaZeroConfig:
 
     # Student optimization.
     buffer_size: int = 50_000
+    replay_storage: Literal["memory", "disk"] = "memory"
+    replay_storage_dir: str | None = None
     batch_size: int = 256
     policy_lr: float = 5e-5
     critic_lr: float = 1e-4
@@ -339,7 +342,17 @@ class AlphaZeroTrainer:
             )
             self.teacher_aux_value_head.load_state_dict(self.student_aux_value_head.state_dict())
 
-        self.replay_buffer: Deque[SelfPlayExperience] = deque(maxlen=config.buffer_size)
+        if config.replay_storage == "disk":
+            if not config.replay_storage_dir:
+                raise ValueError("Disk replay requires replay_storage_dir")
+            self.replay_buffer: Deque[SelfPlayExperience] | DiskReplayBuffer = DiskReplayBuffer(
+                config.buffer_size,
+                config.replay_storage_dir,
+                shared_states=self.uses_shared_network,
+            )
+            print(f"Disk-backed replay: {self.replay_buffer.storage_path}", flush=True)
+        else:
+            self.replay_buffer = deque(maxlen=config.buffer_size)
         self._self_play_calls = 0
         # Optimizers must be constructed after the first device placement so
         # their parameter references cannot point at pre-conversion tensors.
@@ -610,13 +623,15 @@ class AlphaZeroTrainer:
                     f"(attempt {attempts + 1}/{self.config.self_play_max_attempts}).",
                     flush=True,
                 )
+        experience_count = len(experiences)
         self.replay_buffer.extend(experiences)
+        del experiences
         if self.config.offload_inactive_models:
             self._move_teacher(self.cpu_device)
         self._activate_student()
         return {
             **{key: float(value) for key, value in stats.items()},
-            "experiences": float(len(experiences)),
+            "experiences": float(experience_count),
             "replay_size": float(len(self.replay_buffer)),
             "search_value_weight": float(search_value_weight),
             "self_play_attempts": float(attempts),
@@ -634,6 +649,18 @@ class AlphaZeroTrainer:
         """Yield complete shuffled passes over a stable replay snapshot."""
         if epochs < 1:
             raise ValueError("epochs must be at least 1")
+        if isinstance(self.replay_buffer, DiskReplayBuffer):
+            replay_indices = list(range(len(self.replay_buffer)))
+            try:
+                for _ in range(epochs):
+                    random.shuffle(replay_indices)
+                    for offset in range(0, len(replay_indices), self.config.batch_size):
+                        yield self.replay_buffer.batch(
+                            replay_indices[offset : offset + self.config.batch_size]
+                        )
+            finally:
+                self.replay_buffer.release_pages()
+            return
         replay_snapshot = list(self.replay_buffer)
         for _ in range(epochs):
             random.shuffle(replay_snapshot)
@@ -970,7 +997,8 @@ class AlphaZeroTrainer:
             self._move_teacher(self.cpu_device)
 
     def close(self) -> None:
-        return
+        if isinstance(self.replay_buffer, DiskReplayBuffer):
+            self.replay_buffer.close()
 
     @staticmethod
     def _set_seed(seed: Optional[int]) -> None:
