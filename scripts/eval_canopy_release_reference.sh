@@ -18,6 +18,7 @@ max_actions=${CATANRL_CANOPY_REFERENCE_MAX_ACTIONS:-2000}
 expected_tag=catan-nexus-v3
 expected_commit=6185983a88ba6802e7fa9893cef5a76a15de2595
 expected_checkpoint_sha256=f8e4e6858930243a30243e38c1b2b96b1a8da23970f5cba69906c65b268c60cc
+expected_harness_patch_sha256=506fb91bff6bbedb764031e8d252dd4cf6ef92ce91d1d22c9bbe353bcc4e3f67
 
 if [[ ! -f "$canopy_repo_arg/Cargo.toml" ]]; then
   echo "Canopy repository not found at $canopy_repo_arg" >&2
@@ -45,6 +46,8 @@ checkpoint=$(realpath "$checkpoint_arg")
 release_tag=$(git -C "$canopy_repo" describe --tags --exact-match HEAD 2>/dev/null || true)
 release_commit=$(git -C "$canopy_repo" rev-parse HEAD)
 checkpoint_sha256=$(sha256sum "$checkpoint" | cut -d' ' -f1)
+harness_changed_files=$(git -C "$canopy_repo" diff HEAD --name-only)
+harness_patch_sha256=$(git -C "$canopy_repo" diff HEAD --binary -- src/mcts/mod.rs | sha256sum | cut -d' ' -f1)
 if [[ "$release_tag" != "$expected_tag" ]]; then
   echo "Canopy checkout must be exact tag $expected_tag, got: ${release_tag:-untagged}" >&2
   exit 2
@@ -55,6 +58,15 @@ if [[ "$release_commit" != "$expected_commit" ]]; then
 fi
 if [[ "$checkpoint_sha256" != "$expected_checkpoint_sha256" ]]; then
   echo "Canopy checkpoint checksum mismatch: $checkpoint_sha256" >&2
+  exit 2
+fi
+if [[ "$harness_changed_files" != "src/mcts/mod.rs" ]]; then
+  echo "Canopy harness must contain only the approved src/mcts/mod.rs patch" >&2
+  echo "Apply it with: git -C $canopy_repo apply $repo_root/patches/canopy-nexus-v3-reset-search-budget.patch" >&2
+  exit 2
+fi
+if [[ "$harness_patch_sha256" != "$expected_harness_patch_sha256" ]]; then
+  echo "Canopy harness patch checksum mismatch: $harness_patch_sha256" >&2
   exit 2
 fi
 
@@ -105,6 +117,7 @@ env -u VIRTUAL_ENV uv run python scripts/parse_canopy_tournament.py \
   --release-tag "$release_tag" \
   --release-commit "$release_commit" \
   --checkpoint-sha256 "$checkpoint_sha256" \
+  --harness-patch-sha256 "$harness_patch_sha256" \
   --opponent random \
   --simulations "$simulations" \
   --max-actions "$max_actions"

@@ -12,6 +12,9 @@ CANOPY_NEXUS_V3_RELEASE_COMMIT = "6185983a88ba6802e7fa9893cef5a76a15de2595"
 CANOPY_NEXUS_V3_CHECKPOINT_SHA256 = (
     "f8e4e6858930243a30243e38c1b2b96b1a8da23970f5cba69906c65b268c60cc"
 )
+CANOPY_NEXUS_V3_HARNESS_PATCH_SHA256 = (
+    "506fb91bff6bbedb764031e8d252dd4cf6ef92ce91d1d22c9bbe353bcc4e3f67"
+)
 
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _RESULT = re.compile(
@@ -48,6 +51,7 @@ def validate_official_nexus_v3_reference(config: object) -> None:
         "release_tag": CANOPY_NEXUS_V3_RELEASE_TAG,
         "release_commit": CANOPY_NEXUS_V3_RELEASE_COMMIT,
         "checkpoint_sha256": CANOPY_NEXUS_V3_CHECKPOINT_SHA256,
+        "harness_patch_sha256": CANOPY_NEXUS_V3_HARNESS_PATCH_SHA256,
     }
     for key, expected_value in expected.items():
         actual_value = config.get(key)

@@ -21,6 +21,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--release-tag", required=True)
     parser.add_argument("--release-commit", required=True)
     parser.add_argument("--checkpoint-sha256", required=True)
+    parser.add_argument("--harness-patch-sha256", required=True)
     parser.add_argument("--opponent", default="random")
     parser.add_argument("--simulations", type=int, required=True)
     parser.add_argument("--max-actions", type=int, default=2000)
@@ -43,6 +44,7 @@ def main() -> None:
             "release_tag": args.release_tag,
             "release_commit": args.release_commit,
             "checkpoint_sha256": args.checkpoint_sha256,
+            "harness_patch_sha256": args.harness_patch_sha256,
             "opponent": args.opponent,
             "simulations": args.simulations,
             "c_puct": 2.5,

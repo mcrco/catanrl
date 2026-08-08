@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import hashlib
+from pathlib import Path
+
 import pytest
 
 from catanrl.eval.canopy_reference import (
     CANOPY_NEXUS_V3_CHECKPOINT_SHA256,
+    CANOPY_NEXUS_V3_HARNESS_PATCH_SHA256,
     CANOPY_NEXUS_V3_RELEASE_COMMIT,
     CANOPY_NEXUS_V3_RELEASE_TAG,
     parse_canopy_tournament_summary,
@@ -37,6 +41,7 @@ def test_official_canopy_reference_requires_release_provenance():
         "release_tag": CANOPY_NEXUS_V3_RELEASE_TAG,
         "release_commit": CANOPY_NEXUS_V3_RELEASE_COMMIT,
         "checkpoint_sha256": CANOPY_NEXUS_V3_CHECKPOINT_SHA256,
+        "harness_patch_sha256": CANOPY_NEXUS_V3_HARNESS_PATCH_SHA256,
     }
 
     validate_official_nexus_v3_reference(config)
@@ -46,6 +51,12 @@ def test_official_canopy_reference_requires_release_provenance():
         invalid[key] = "wrong"
         with pytest.raises(ValueError, match=key):
             validate_official_nexus_v3_reference(invalid)
+
+
+def test_approved_canopy_harness_patch_matches_recorded_checksum():
+    patch = Path("patches/canopy-nexus-v3-reset-search-budget.patch").read_bytes()
+
+    assert hashlib.sha256(patch).hexdigest() == CANOPY_NEXUS_V3_HARNESS_PATCH_SHA256
 
 
 @pytest.mark.parametrize(
