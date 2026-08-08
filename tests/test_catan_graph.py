@@ -15,7 +15,10 @@ from catanrl.algorithms.alphazero.parallel_self_play import SelfPlayExperience
 from catanrl.algorithms.alphazero.trainer import AlphaZeroConfig, AlphaZeroTrainer
 from catanrl.experiment_store import backbone_config_from_dict, backbone_config_to_dict
 from catanrl.experiments.architecture_config import load_architecture_preset
-from catanrl.features.catanatron_utils import compute_observation_feature_vector_dim
+from catanrl.features.catanatron_utils import (
+    compute_observation_feature_vector_dim,
+    get_full_numeric_feature_names,
+)
 from catanrl.models.backbone_builder import build_backbone_config
 from catanrl.models.backbones import (
     BackboneConfig,
@@ -38,7 +41,7 @@ from catanrl.utils.catanatron_action_space import get_action_array, get_action_s
 from catanrl.utils.catanatron_map import build_catan_map
 
 
-def _graph_config(*, hidden_dim: int = 16) -> BackboneConfig:
+def _graph_config(*, hidden_dim: int = 16, normalize_inputs: bool = False) -> BackboneConfig:
     numeric_dim = 74
     return build_backbone_config(
         backbone_type="catan_graph",
@@ -54,16 +57,21 @@ def _graph_config(*, hidden_dim: int = 16) -> BackboneConfig:
         graph_global_hidden_dim=8,
         graph_num_layers=2,
         graph_head_hidden_dim=16,
+        graph_normalize_inputs=normalize_inputs,
     )
 
 
-def test_catan_graph_config_round_trips_through_experiment_metadata() -> None:
-    config = _graph_config()
+@pytest.mark.parametrize("normalize_inputs", [False, True])
+def test_catan_graph_config_round_trips_through_experiment_metadata(
+    normalize_inputs: bool,
+) -> None:
+    config = _graph_config(normalize_inputs=normalize_inputs)
     restored = backbone_config_from_dict(backbone_config_to_dict(config))
 
     assert restored == config
     assert isinstance(restored.args, CatanGraphBackboneConfig)
     assert restored.args.board_layout == "width_height"
+    assert restored.args.normalize_inputs is normalize_inputs
 
 
 def test_catan_graph_preserves_existing_observation_and_action_contracts() -> None:
@@ -150,6 +158,63 @@ def test_catan_graph_injects_edge_roads_into_endpoint_node_features() -> None:
     assert road_features[first] == pytest.approx(1.0 / 3.0)
     assert road_features[second] == pytest.approx(1.0 / 3.0)
     assert torch.count_nonzero(road_features) == 2
+
+
+def test_catan_graph_normalization_bounds_numeric_and_spatial_inputs() -> None:
+    model = build_flat_policy_value_network(
+        _graph_config(normalize_inputs=True),
+        get_action_space_size(2, "BASE"),
+        value_head_type="wdl",
+    )
+    assert isinstance(model.backbone, CatanGraphBackbone)
+    backbone = model.backbone
+    state = torch.zeros(1, backbone.config.input_dim)
+    turn_index = get_full_numeric_feature_names(2, "BASE").index("TURN_NUMBER")
+    state[0, turn_index] = 10_000.0
+    board = state[:, backbone.numeric_dim :].reshape(
+        1,
+        backbone.board_width,
+        backbone.board_height,
+        backbone.board_channels,
+    )
+    node_x, node_y = backbone.node_positions[0].tolist()
+    board[0, node_x, node_y, 0] = 2.0
+    board[0, node_x, node_y, 4] = 5.0 / 36.0
+    captured_global: list[torch.Tensor] = []
+    captured_nodes: list[torch.Tensor] = []
+
+    global_handle = backbone.global_projection.register_forward_pre_hook(
+        lambda _module, inputs: captured_global.append(inputs[0].detach().clone())
+    )
+    node_handle = backbone.node_projection.register_forward_pre_hook(
+        lambda _module, inputs: captured_nodes.append(inputs[0].detach().clone())
+    )
+    try:
+        output = backbone(state)
+    finally:
+        global_handle.remove()
+        node_handle.remove()
+
+    assert output.shape == (1, backbone.output_dim)
+    assert captured_global[0][0, turn_index] == 1.0
+    assert captured_nodes[0][0, 0, 0] == 1.0
+    assert captured_nodes[0][0, 0, 4] == pytest.approx(5.0 / 13.0)
+
+
+def test_catan_graph_normalization_preserves_checkpoint_tensor_contract() -> None:
+    raw = build_flat_policy_value_network(
+        _graph_config(normalize_inputs=False),
+        get_action_space_size(2, "BASE"),
+        value_head_type="wdl",
+    )
+    normalized = build_flat_policy_value_network(
+        _graph_config(normalize_inputs=True),
+        get_action_space_size(2, "BASE"),
+        value_head_type="wdl",
+    )
+
+    assert raw.state_dict().keys() == normalized.state_dict().keys()
+    normalized.load_state_dict(raw.state_dict())
 
 
 def test_catan_graph_rejects_generic_hierarchical_policy_head() -> None:
@@ -310,6 +375,7 @@ def test_nexus_v3_preset_builds_and_reloads_identically() -> None:
         graph_global_hidden_dim=preset.graph_global_hidden_dim,
         graph_num_layers=preset.graph_num_layers,
         graph_head_hidden_dim=preset.graph_head_hidden_dim,
+        graph_normalize_inputs=preset.graph_normalize_inputs,
     )
     rebuilt = build_flat_policy_value_network(
         backbone_config_from_dict(backbone_config_to_dict(model.backbone_config)),
@@ -330,3 +396,20 @@ def test_nexus_v3_preset_builds_and_reloads_identically() -> None:
         actual = rebuilt(state)
     torch.testing.assert_close(actual[0], expected[0])
     torch.testing.assert_close(actual[1], expected[1])
+
+
+def test_normalized_nexus_v3_preset_is_opt_in_and_preserves_game_contract() -> None:
+    baseline = load_architecture_preset(
+        "configs/models/catan-graph-nexus-v3-flat-2p-full-shared.yaml"
+    )
+    normalized = load_architecture_preset(
+        "configs/models/catan-graph-nexus-v3-normalized-flat-2p-full-shared.yaml"
+    )
+
+    assert baseline.graph_normalize_inputs is False
+    assert normalized.graph_normalize_inputs is True
+    assert normalized.policy_mode == baseline.policy_mode == "full"
+    assert normalized.critic_mode == baseline.critic_mode == "full"
+    assert normalized.map_type == baseline.map_type == "BASE"
+    assert normalized.vps_to_win == baseline.vps_to_win == 15
+    assert normalized.discard_limit == baseline.discard_limit == 9

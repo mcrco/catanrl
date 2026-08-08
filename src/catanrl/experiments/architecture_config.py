@@ -44,6 +44,7 @@ class ArchitecturePreset:
     graph_global_hidden_dim: int = 96
     graph_num_layers: int = 4
     graph_head_hidden_dim: int = 256
+    graph_normalize_inputs: bool = False
 
     @property
     def actor_observation_level(self) -> str:
@@ -90,6 +91,12 @@ def _parse_optional_int(value: object, *, field: str) -> int | None:
         return None
     if not isinstance(value, int) or value <= 0:
         raise ValueError(f"'{field}' must be a positive integer when set.")
+    return value
+
+
+def _parse_bool(value: object, *, field: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"'{field}' must be a boolean.")
     return value
 
 
@@ -210,6 +217,10 @@ def load_architecture_preset(path: str | Path) -> ArchitecturePreset:
             field="model.graph_head_hidden_dim",
         )
         or 256,
+        graph_normalize_inputs=_parse_bool(
+            model.get("graph_normalize_inputs", False),
+            field="model.graph_normalize_inputs",
+        ),
     )
 
 
@@ -234,6 +245,7 @@ def architecture_train_config_fields(arch: ArchitecturePreset) -> dict[str, Any]
         "graph_global_hidden_dim": arch.graph_global_hidden_dim,
         "graph_num_layers": arch.graph_num_layers,
         "graph_head_hidden_dim": arch.graph_head_hidden_dim,
+        "graph_normalize_inputs": arch.graph_normalize_inputs,
         "map_type": arch.map_type,
         "vps_to_win": arch.vps_to_win,
         "discard_limit": arch.discard_limit,

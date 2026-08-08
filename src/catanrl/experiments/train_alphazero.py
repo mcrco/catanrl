@@ -525,6 +525,7 @@ def _build_model_pair(
             graph_global_hidden_dim=arch.graph_global_hidden_dim,
             graph_num_layers=arch.graph_num_layers,
             graph_head_hidden_dim=arch.graph_head_hidden_dim,
+            graph_normalize_inputs=arch.graph_normalize_inputs,
         )
         return policy, None
 
@@ -543,6 +544,7 @@ def _build_model_pair(
         graph_global_hidden_dim=arch.graph_global_hidden_dim,
         graph_num_layers=arch.graph_num_layers,
         graph_head_hidden_dim=arch.graph_head_hidden_dim,
+        graph_normalize_inputs=arch.graph_normalize_inputs,
     )
     critic = build_critic_model(
         backbone_type=arch.backbone_type,
@@ -558,6 +560,7 @@ def _build_model_pair(
         graph_global_hidden_dim=arch.graph_global_hidden_dim,
         graph_num_layers=arch.graph_num_layers,
         graph_head_hidden_dim=arch.graph_head_hidden_dim,
+        graph_normalize_inputs=arch.graph_normalize_inputs,
     )
     return policy, critic
 

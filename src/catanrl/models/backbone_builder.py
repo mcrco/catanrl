@@ -29,6 +29,7 @@ def build_backbone_config(
     graph_global_hidden_dim: int = 96,
     graph_num_layers: int = 4,
     graph_head_hidden_dim: int = 256,
+    graph_normalize_inputs: bool = False,
 ) -> BackboneConfig:
     """Build either an MLP or cross-dimensional backbone config."""
     if backbone_type not in ("mlp", "xdim", "xdim_res", "xdim_compact", "catan_graph"):
@@ -77,6 +78,7 @@ def build_backbone_config(
                 num_layers=graph_num_layers,
                 head_hidden_dim=graph_head_hidden_dim,
                 board_layout=xdim_board_layout,
+                normalize_inputs=graph_normalize_inputs,
             ),
         )
 

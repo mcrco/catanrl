@@ -532,6 +532,7 @@ def _apply_graph_backbone_args(args: argparse.Namespace, backbone: BackboneConfi
     _set_arg(args, "graph_global_hidden_dim", bb_args.global_hidden_dim)
     _set_arg(args, "graph_num_layers", bb_args.num_layers)
     _set_arg(args, "graph_head_hidden_dim", bb_args.head_hidden_dim)
+    _set_arg(args, "graph_normalize_inputs", bb_args.normalize_inputs)
 
 
 def apply_experiment_architecture_to_args(args: argparse.Namespace, exp: Experiment) -> None:
@@ -986,6 +987,7 @@ def architecture_preset_from_experiment(exp: Experiment) -> "ArchitecturePreset"
     graph_global_hidden_dim = 96
     graph_num_layers = 4
     graph_head_hidden_dim = 256
+    graph_normalize_inputs = False
 
     if isinstance(policy.backbone.args, CrossDimensionalBackboneConfig):
         bb = policy.backbone.args
@@ -998,6 +1000,7 @@ def architecture_preset_from_experiment(exp: Experiment) -> "ArchitecturePreset"
         graph_global_hidden_dim = bb.global_hidden_dim
         graph_num_layers = bb.num_layers
         graph_head_hidden_dim = bb.head_hidden_dim
+        graph_normalize_inputs = bb.normalize_inputs
 
     if critic is not None and isinstance(critic.backbone.args, CrossDimensionalBackboneConfig):
         xdim_critic_fusion_hidden_dim = critic.backbone.args.fusion_hidden_dim
@@ -1019,6 +1022,8 @@ def architecture_preset_from_experiment(exp: Experiment) -> "ArchitecturePreset"
         graph_num_layers = int(tc["graph_num_layers"])
     if tc.get("graph_head_hidden_dim") is not None:
         graph_head_hidden_dim = int(tc["graph_head_hidden_dim"])
+    if tc.get("graph_normalize_inputs") is not None:
+        graph_normalize_inputs = bool(tc["graph_normalize_inputs"])
 
     return ArchitecturePreset(
         model_type=model_type,
@@ -1041,6 +1046,7 @@ def architecture_preset_from_experiment(exp: Experiment) -> "ArchitecturePreset"
         graph_global_hidden_dim=graph_global_hidden_dim,
         graph_num_layers=graph_num_layers,
         graph_head_hidden_dim=graph_head_hidden_dim,
+        graph_normalize_inputs=graph_normalize_inputs,
     )
 
 

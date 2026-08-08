@@ -54,6 +54,7 @@ class CatanGraphBackboneConfig:
     num_layers: int = 4
     head_hidden_dim: int = 256
     board_layout: str = "width_height"
+    normalize_inputs: bool = False
 
 
 @dataclass
@@ -362,6 +363,79 @@ class _CatanHeteroGraphLayer(nn.Module):
         return nodes + torch.relu(node_update), tiles + torch.relu(tile_update)
 
 
+def _catan_graph_numeric_denominators(
+    num_players: int,
+    map_type: Literal["BASE", "MINI", "TOURNAMENT"],
+    numeric_dim: int,
+) -> torch.Tensor:
+    """Return bounded, semantic scales without changing the observation vector."""
+    from catanrl.features.catanatron_utils import get_observation_numeric_feature_names
+
+    levels = ("private", "public", "full") if num_players == 2 else ("private", "full")
+    candidates = [
+        get_observation_numeric_feature_names(num_players, map_type, level) for level in levels
+    ]
+    matching_names = [names for names in candidates if len(names) == numeric_dim]
+    if len(matching_names) != 1:
+        raise ValueError(
+            "Cannot identify Catan graph numeric feature ordering for "
+            f"num_players={num_players}, map_type={map_type}, numeric_dim={numeric_dim}"
+        )
+
+    denominators: list[float] = []
+    for name in matching_names[0]:
+        denominator = 1.0
+        if name == "BANK_DEV_CARDS":
+            denominator = 25.0
+        elif name.startswith("BANK_"):
+            denominator = 19.0
+        elif name == "TURN_NUMBER":
+            denominator = 500.0
+        elif "_TURNS_SINCE_" in name:
+            denominator = 200.0
+        elif name.endswith(("_ACTUAL_VPS", "_PUBLIC_VPS")):
+            denominator = 15.0
+        elif name.endswith("_LONGEST_ROAD_LENGTH"):
+            denominator = 15.0
+        elif name.endswith("_ROADS_LEFT"):
+            denominator = 15.0
+        elif name.endswith("_SETTLEMENTS_LEFT"):
+            denominator = 5.0
+        elif name.endswith("_CITIES_LEFT"):
+            denominator = 4.0
+        elif name.endswith("_NUM_RESOURCES_IN_HAND"):
+            denominator = 19.0
+        elif name.endswith("_NUM_DEVS_IN_HAND"):
+            denominator = 25.0
+        elif name.endswith("_VICTORY_POINT_IN_HAND"):
+            denominator = 5.0
+        elif name.endswith("_KNIGHT_PLAYED"):
+            denominator = 14.0
+        elif name.endswith(
+            (
+                "_BRICK_IN_HAND",
+                "_ORE_IN_HAND",
+                "_SHEEP_IN_HAND",
+                "_WHEAT_IN_HAND",
+                "_WOOD_IN_HAND",
+            )
+        ):
+            denominator = 19.0
+        elif name.endswith(
+            (
+                "_MONOPOLY_IN_HAND",
+                "_MONOPOLY_PLAYED",
+                "_ROAD_BUILDING_IN_HAND",
+                "_ROAD_BUILDING_PLAYED",
+                "_YEAR_OF_PLENTY_IN_HAND",
+                "_YEAR_OF_PLENTY_PLAYED",
+            )
+        ):
+            denominator = 2.0
+        denominators.append(denominator)
+    return torch.tensor(denominators, dtype=torch.float32)
+
+
 class CatanGraphBackbone(nn.Module):
     """Topology-aware shared trunk over the unchanged Catanatron observation.
 
@@ -380,6 +454,7 @@ class CatanGraphBackbone(nn.Module):
     tile_to_node: torch.Tensor
     node_to_tile: torch.Tensor
     tile_decoder: torch.Tensor
+    numeric_denominators: torch.Tensor
 
     def __init__(self, config: CatanGraphBackboneConfig):
         super().__init__()
@@ -483,6 +558,19 @@ class CatanGraphBackbone(nn.Module):
         self.register_buffer("tile_to_node", tile_to_node, persistent=False)
         self.register_buffer("node_to_tile", node_to_tile, persistent=False)
         self.register_buffer("tile_decoder", tile_decoder, persistent=False)
+        self.register_buffer(
+            "numeric_denominators",
+            (
+                _catan_graph_numeric_denominators(
+                    config.num_players,
+                    config.map_type,
+                    config.numeric_dim,
+                )
+                if config.normalize_inputs
+                else torch.ones(config.numeric_dim, dtype=torch.float32)
+            ),
+            persistent=False,
+        )
 
         self.global_projection = nn.Linear(config.numeric_dim, config.global_hidden_dim)
         self.node_projection = nn.Linear(config.board_channels, config.hidden_dim)
@@ -514,7 +602,10 @@ class CatanGraphBackbone(nn.Module):
                 f"Expected Catan graph input [batch, {self.config.input_dim}], got {tuple(x.shape)}"
             )
         batch_size = x.shape[0]
-        global_features = torch.relu(self.global_projection(x[:, : self.numeric_dim]))
+        numeric = x[:, : self.numeric_dim]
+        if self.config.normalize_inputs:
+            numeric = torch.clamp(numeric / self.numeric_denominators, min=-1.0, max=1.0)
+        global_features = torch.relu(self.global_projection(numeric))
         board = x[:, self.numeric_dim :].reshape(
             batch_size,
             self.board_width,
@@ -538,16 +629,26 @@ class CatanGraphBackbone(nn.Module):
             :,
         ]
         edge_roads = edge_raw.index_select(-1, self.road_channel_indices)
-        incident_roads = torch.einsum(
-            "ne,bep->bnp",
-            self.node_edge_incidence,
-            edge_roads,
-        ) / 3.0
+        incident_roads = (
+            torch.einsum(
+                "ne,bep->bnp",
+                self.node_edge_incidence,
+                edge_roads,
+            )
+            / 3.0
+        )
         node_raw = node_raw.clone()
         node_raw[..., self.road_channel_indices] = incident_roads
         resource_offset = 2 * self.config.num_players
         tile_source = node_raw[:, :, resource_offset : resource_offset + 6]
         tile_raw = torch.einsum("tn,bnc->btc", self.tile_decoder, tile_source)
+        if self.config.normalize_inputs:
+            # Catanatron stores dice probabilities (pips/36). Nexus-v3 uses
+            # pips/5 for tiles and normalized production at nodes.
+            tile_raw = tile_raw.clone()
+            tile_raw[..., :5] *= 36.0 / 5.0
+            node_raw[..., 0:resource_offset:2] /= 2.0
+            node_raw[..., resource_offset : resource_offset + 5] *= 36.0 / 13.0
 
         nodes = torch.relu(self.node_projection(node_raw))
         tiles = torch.relu(self.tile_projection(tile_raw))
