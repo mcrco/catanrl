@@ -11,6 +11,10 @@ from catanatron.models.player import Color
 from torch import nn
 
 from catanrl.algorithms.alphazero.parallel_self_play import SelfPlayExperience
+from catanrl.algorithms.alphazero.native_self_play import (
+    _NativeSelfPlaySample,
+    _compute_auxiliary_value_targets,
+)
 from catanrl.algorithms.alphazero.trainer import AlphaZeroConfig, AlphaZeroTrainer
 from catanrl.eval.search_training import decide_promotion
 from catanrl.experiments.train_alphazero import (
@@ -70,6 +74,8 @@ def _shared_trainer(
     categorical_value: bool = False,
     soft_policy_temperature: float = 0.0,
     soft_policy_weight: float = 0.0,
+    aux_value_horizons: tuple[int, ...] = (),
+    aux_value_weight: float = 0.0,
 ) -> AlphaZeroTrainer:
     torch.manual_seed(0)
     student = PolicyValueNetworkWrapper(
@@ -89,6 +95,9 @@ def _shared_trainer(
         value_loss_weight=1.0,
         soft_policy_temperature=soft_policy_temperature,
         soft_policy_weight=soft_policy_weight,
+        aux_value_horizons=aux_value_horizons,
+        aux_value_weight=aux_value_weight,
+        self_play_backend="cppanatron" if aux_value_horizons else "python",
         device="cpu",
         seed=7,
     )
@@ -102,6 +111,7 @@ def _experience(
     legal_actions: tuple[int, ...] = (0, 1, 2, 3),
     full_search: bool = True,
     value_wdl: np.ndarray | None = None,
+    aux_value_targets: np.ndarray | None = None,
 ) -> SelfPlayExperience:
     policy = np.zeros(4, dtype=np.float32)
     policy[action] = 1.0
@@ -115,6 +125,7 @@ def _experience(
         value=value,
         full_search=full_search,
         value_wdl=value_wdl,
+        aux_value_targets=aux_value_targets,
     )
 
 
@@ -283,6 +294,90 @@ def test_auxiliary_soft_policy_head_is_fresh_masked_and_persisted() -> None:
     )
 
 
+def test_auxiliary_value_head_trains_shared_backbone_and_persists() -> None:
+    trainer = _shared_trainer(
+        categorical_value=True,
+        aux_value_horizons=(10, 50, 150),
+        aux_value_weight=0.5,
+    )
+    assert trainer.student_aux_value_head is not None
+    assert trainer.teacher_aux_value_head is not None
+    trainer.replay_buffer.extend(
+        [
+            _experience(
+                0,
+                1.0,
+                aux_value_targets=np.asarray([0.8, 0.4, 0.1], dtype=np.float32),
+            ),
+            _experience(
+                1,
+                -1.0,
+                aux_value_targets=np.asarray([-0.7, -0.3, 0.0], dtype=np.float32),
+            ),
+        ]
+    )
+    aux_before = _parameters(trainer.student_aux_value_head)
+    backbone_before = _parameters(trainer.student_policy_model.backbone)
+
+    metrics = trainer.update_weights()
+
+    assert metrics is not None
+    assert metrics["aux_value_loss"] > 0.0
+    assert metrics["aux_value_loss_h10"] > 0.0
+    assert any(
+        not torch.equal(before, after)
+        for before, after in zip(aux_before, trainer.student_aux_value_head.parameters())
+    )
+    assert any(
+        not torch.equal(before, after)
+        for before, after in zip(
+            backbone_before, trainer.student_policy_model.backbone.parameters()
+        )
+    )
+    state = trainer.state_dict()
+    assert state["student_aux_value_head"] is not None
+    restored = _shared_trainer(
+        categorical_value=True,
+        aux_value_horizons=(10, 50, 150),
+        aux_value_weight=0.5,
+    )
+    restored.load_state_dict(state)
+    assert restored.student_aux_value_head is not None
+    assert _same_parameters(trainer.student_aux_value_head, restored.student_aux_value_head)
+    trainer.promote_student()
+    assert _same_parameters(trainer.student_aux_value_head, trainer.teacher_aux_value_head)
+
+
+def test_auxiliary_value_targets_match_canopy_backward_ema() -> None:
+    def sample(player: int, q: float) -> _NativeSelfPlaySample:
+        return _NativeSelfPlaySample(
+            actor_state=np.zeros(1, dtype=np.float32),
+            critic_state=np.zeros(1, dtype=np.float32),
+            policy=np.ones(1, dtype=np.float32),
+            action_mask=np.ones(1, dtype=np.bool_),
+            player=player,
+            search_value=q,
+            search_wdl=np.asarray(
+                [(1.0 + q) / 2.0, 0.0, (1.0 - q) / 2.0],
+                dtype=np.float32,
+            ),
+            full_search=True,
+        )
+
+    samples = [sample(0, 0.8), sample(1, 0.4), sample(0, -0.2)]
+    alpha = 1.0 - np.exp(-1.0)
+    ema_2 = alpha * -0.2
+    ema_1 = alpha * -0.4 + (1.0 - alpha) * ema_2
+    ema_0 = alpha * 0.8 + (1.0 - alpha) * ema_1
+
+    targets = _compute_auxiliary_value_targets(samples, (1, 10))
+
+    assert targets.shape == (3, 2)
+    np.testing.assert_allclose(targets[:, 0], [ema_0, -ema_1, ema_2], rtol=1e-6)
+    assert np.isfinite(targets).all()
+    assert np.all(np.abs(targets) <= 1.0)
+
+
 def test_distillation_loss_masks_illegal_action_logits() -> None:
     trainer = _trainer(value_loss_weight=0.0)
     policy_head = trainer.student_policy_model.policy_head
@@ -427,6 +522,7 @@ def test_collect_self_play_can_dispatch_to_native_backend(
     assert called["worker_stall_timeout_s"] == 600.0
     assert called["inference_response_timeout_s"] == 120.0
     assert called["result_chunk_size"] == 64
+    assert called["aux_value_horizons"] == ()
     assert stats["experiences"] == 1.0
     assert stats["self_play_attempts"] == 1.0
     assert len(trainer.replay_buffer) == 1
@@ -771,6 +867,43 @@ def test_cli_completed_q_policy_target_requires_native_search() -> None:
                 "model.yaml",
                 "--policy-target",
                 "completed-q",
+            ]
+        )
+
+
+def test_cli_auxiliary_values_require_native_self_play_and_positive_weight() -> None:
+    args = parse_args(
+        [
+            "--mode",
+            "iterate",
+            "--config",
+            "model.yaml",
+            "--self-play-backend",
+            "cppanatron",
+            "--ismcts-determinizations",
+            "1",
+            "--aux-value-horizons",
+            "10",
+            "50",
+            "150",
+            "--aux-value-weight",
+            "0.5",
+        ]
+    )
+    assert args.aux_value_horizons == (10, 50, 150)
+    assert args.aux_value_weight == 0.5
+
+    with pytest.raises(SystemExit):
+        parse_args(
+            [
+                "--mode",
+                "iterate",
+                "--config",
+                "model.yaml",
+                "--aux-value-horizons",
+                "10",
+                "--aux-value-weight",
+                "0.5",
             ]
         )
 

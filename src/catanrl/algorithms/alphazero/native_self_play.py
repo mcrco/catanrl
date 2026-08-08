@@ -51,9 +51,7 @@ def _canopy_action_count_increment(
         ActionType.ROLL,
         ActionType.BUY_DEVELOPMENT_CARD,
     } or (
-        action_type == ActionType.MOVE_ROBBER
-        and isinstance(value, tuple)
-        and value[1] is not None
+        action_type == ActionType.MOVE_ROBBER and isinstance(value, tuple) and value[1] is not None
     )
     return 2 if has_chance_resolution else 1
 
@@ -93,6 +91,43 @@ def _blend_terminal_search_value(
     terminal = float(np.clip(terminal_value, -1.0, 1.0))
     search = float(np.clip(search_value, -1.0, 1.0))
     return (1.0 - search_weight) * terminal + search_weight * search
+
+
+def _compute_auxiliary_value_targets(
+    samples: Sequence[_NativeSelfPlaySample],
+    horizons: Sequence[int],
+) -> np.ndarray:
+    """Match Canopy's backwards EMA of root-Q in a fixed player perspective."""
+    normalized_horizons = tuple(int(horizon) for horizon in horizons)
+    if len(set(normalized_horizons)) != len(normalized_horizons) or any(
+        horizon <= 0 for horizon in normalized_horizons
+    ):
+        raise ValueError("Auxiliary value horizons must be distinct and positive")
+    targets = np.zeros((len(samples), len(normalized_horizons)), dtype=np.float32)
+    if not normalized_horizons:
+        return targets
+    for sample in samples:
+        if sample.player not in (0, 1):
+            raise ValueError("Auxiliary value targets currently require exactly two players")
+        search_wdl = np.asarray(sample.search_wdl, dtype=np.float32)
+        if (
+            search_wdl.shape != (3,)
+            or not np.isfinite(search_wdl).all()
+            or bool((search_wdl < 0.0).any())
+            or not np.isclose(search_wdl.sum(), 1.0)
+        ):
+            raise ValueError("Auxiliary value targets require a normalized three-way search WDL")
+    for horizon_index, horizon in enumerate(normalized_horizons):
+        alpha = 1.0 - np.exp(-1.0 / float(horizon))
+        ema_player_zero = 0.0
+        for sample_index in range(len(samples) - 1, -1, -1):
+            sample = samples[sample_index]
+            player_sign = 1.0 if sample.player == 0 else -1.0
+            search_q = float(sample.search_wdl[0] - sample.search_wdl[2])
+            q_player_zero = search_q * player_sign
+            ema_player_zero = alpha * q_player_zero + (1.0 - alpha) * ema_player_zero
+            targets[sample_index, horizon_index] = ema_player_zero * player_sign
+    return targets
 
 
 def _blend_terminal_search_wdl(
@@ -155,9 +190,7 @@ def _trajectory_search_controls(
         return 1e-3, True
     if mode != "visits":
         raise ValueError(f"Unknown trajectory action selection: {mode!r}")
-    action_temperature = (
-        temperature if move_number < temperature_drop_move else final_temperature
-    )
+    action_temperature = temperature if move_number < temperature_drop_move else final_temperature
     return action_temperature, move_number < noise_turns
 
 
@@ -342,9 +375,7 @@ def _play_native_self_play_game(
                 )
                 actor_state = full_state[actor_indices].copy()
                 critic_state = (
-                    actor_state
-                    if shared_observation
-                    else full_state[critic_indices].copy()
+                    actor_state if shared_observation else full_state[critic_indices].copy()
                 )
                 samples.append(
                     _NativeSelfPlaySample(
@@ -397,6 +428,7 @@ def _native_training_worker_main(
                     float,
                     bool,
                     np.ndarray,
+                    np.ndarray | None,
                 ]
             ] = []
             stats: Counter[str] = Counter()
@@ -409,7 +441,12 @@ def _native_training_worker_main(
             if winner is not None:
                 stats[f"wins_{COLOR_ORDER[winner].value}"] += 1
             search_value_weight = float(args_dict.get("search_value_weight", 0.0))
-            for sample in samples:
+            aux_value_horizons = tuple(args_dict.get("aux_value_horizons", ()))
+            aux_value_targets = _compute_auxiliary_value_targets(
+                samples,
+                aux_value_horizons,
+            )
+            for sample_index, sample in enumerate(samples):
                 terminal_value = (
                     0.0 if winner is None else (1.0 if sample.player == winner else -1.0)
                 )
@@ -428,6 +465,7 @@ def _native_training_worker_main(
                         value,
                         sample.full_search,
                         value_wdl,
+                        (aux_value_targets[sample_index] if aux_value_horizons else None),
                     )
                 )
             stats["full_search_decisions"] += sum(int(sample.full_search) for sample in samples)
@@ -500,6 +538,7 @@ def generate_native_self_play_data(
     worker_stall_timeout_s: float = 600.0,
     inference_response_timeout_s: float = 120.0,
     result_chunk_size: int = 64,
+    aux_value_horizons: Sequence[int] = (),
 ) -> tuple[list[SelfPlayExperience], dict[str, int]]:
     """Generate the trainer's standard replay records with native C++ MCTS."""
     if prunning:
@@ -530,6 +569,13 @@ def generate_native_self_play_data(
         raise ValueError("inference_response_timeout_s must be positive")
     if result_chunk_size < 1:
         raise ValueError("result_chunk_size must be at least 1")
+    normalized_aux_value_horizons = tuple(int(horizon) for horizon in aux_value_horizons)
+    if len(set(normalized_aux_value_horizons)) != len(normalized_aux_value_horizons) or any(
+        horizon <= 0 for horizon in normalized_aux_value_horizons
+    ):
+        raise ValueError("aux_value_horizons must contain distinct positive integers")
+    if normalized_aux_value_horizons and num_players != 2:
+        raise ValueError("Auxiliary value targets currently require exactly two players")
     if trajectory_action_selection == "canopy":
         if policy_target != "completed-q" or search_selection != "completed-q":
             raise ValueError("Canopy trajectory selection requires completed-Q search and targets")
@@ -575,6 +621,7 @@ def generate_native_self_play_data(
         "explore_actions": explore_actions,
         "inference_response_timeout_s": inference_response_timeout_s,
         "result_chunk_size": result_chunk_size,
+        "aux_value_horizons": normalized_aux_value_horizons,
     }
     experiences: list[SelfPlayExperience] = []
     stats: Counter[str] = Counter()
@@ -588,6 +635,7 @@ def generate_native_self_play_data(
             value,
             full_search,
             value_wdl,
+            aux_value_targets,
         ) in message["experiences"]:
             experiences.append(
                 SelfPlayExperience(
@@ -598,6 +646,11 @@ def generate_native_self_play_data(
                     value=float(value),
                     full_search=bool(full_search),
                     value_wdl=np.asarray(value_wdl, dtype=np.float32),
+                    aux_value_targets=(
+                        None
+                        if aux_value_targets is None
+                        else np.asarray(aux_value_targets, dtype=np.float32)
+                    ),
                 )
             )
         for key, count in message["stats"].items():

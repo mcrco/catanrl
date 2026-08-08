@@ -23,6 +23,7 @@ from catanrl.models.backbones import (
     CatanGraphBackboneConfig,
 )
 from catanrl.models.heads import (
+    CatanGraphAuxiliaryValueHead,
     CatanGraphPolicyHead,
     CatanGraphSoftPolicyHead,
     CatanGraphWDLValueHead,
@@ -215,6 +216,9 @@ def test_alphazero_updates_graph_shared_soft_policy() -> None:
             value_loss_weight=1.0,
             soft_policy_temperature=4.0,
             soft_policy_weight=8.0,
+            aux_value_horizons=(10, 50, 150),
+            aux_value_weight=0.5,
+            self_play_backend="cppanatron",
             offload_inactive_models=False,
             device="cpu",
         ),
@@ -224,6 +228,7 @@ def test_alphazero_updates_graph_shared_soft_policy() -> None:
         None,
     )
     assert isinstance(trainer.student_soft_policy_head, CatanGraphSoftPolicyHead)
+    assert isinstance(trainer.student_aux_value_head, CatanGraphAuxiliaryValueHead)
 
     observation_dim = compute_observation_feature_vector_dim(2, "BASE", "full")
     action_dim = get_action_space_size(2, "BASE")
@@ -240,12 +245,14 @@ def test_alphazero_updates_graph_shared_soft_policy() -> None:
                 action_mask=np.ones(action_dim, dtype=np.bool_),
                 value=value,
                 full_search=True,
+                aux_value_targets=np.asarray([value, value * 0.5, 0.0], dtype=np.float32),
             )
         )
 
     metrics = trainer.update_weights(experiences)
     assert metrics is not None
     assert metrics["soft_policy_loss"] > 0.0
+    assert metrics["aux_value_loss"] > 0.0
 
 
 def test_nexus_v3_preset_builds_and_reloads_identically() -> None:

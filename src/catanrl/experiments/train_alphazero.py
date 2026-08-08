@@ -304,6 +304,23 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         help="Loss weight for the auxiliary soft policy head.",
     )
     optimization.add_argument(
+        "--aux-value-horizons",
+        type=int,
+        nargs="+",
+        default=(),
+        metavar="ACTIONS",
+        help=(
+            "Enable Canopy-style short-term search-value heads at these EMA horizons "
+            "(for example: 10 50 150)."
+        ),
+    )
+    optimization.add_argument(
+        "--aux-value-weight",
+        type=float,
+        default=0.0,
+        help="Loss weight for short-term search-value prediction (0 disables).",
+    )
+    optimization.add_argument(
         "--value-loss-weight",
         type=float,
         default=None,
@@ -416,6 +433,22 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         or (args.soft_policy_weight > 0.0 and args.soft_policy_temperature <= 0.0)
     ):
         parser.error("An enabled soft policy head requires a positive finite temperature")
+    aux_value_horizons = tuple(int(horizon) for horizon in args.aux_value_horizons)
+    if len(set(aux_value_horizons)) != len(aux_value_horizons) or any(
+        horizon <= 0 for horizon in aux_value_horizons
+    ):
+        parser.error("--aux-value-horizons must contain distinct positive integers")
+    if not math.isfinite(args.aux_value_weight) or args.aux_value_weight < 0.0:
+        parser.error("--aux-value-weight must be finite and non-negative")
+    if bool(aux_value_horizons) != (args.aux_value_weight > 0.0):
+        parser.error(
+            "Auxiliary value training requires both --aux-value-horizons and a "
+            "positive --aux-value-weight"
+        )
+    if aux_value_horizons:
+        if args.self_play_backend != "cppanatron":
+            parser.error("--aux-value-horizons currently requires cppanatron self-play")
+    args.aux_value_horizons = aux_value_horizons
     if not math.isfinite(args.value_scale) or args.value_scale < 0.0:
         parser.error("--value-scale must be finite and non-negative")
     if not 0.0 < args.full_search_probability <= 1.0:
@@ -1057,6 +1090,8 @@ def main() -> None:
         value_loss_weight=args.value_loss_weight,
         soft_policy_temperature=args.soft_policy_temperature,
         soft_policy_weight=args.soft_policy_weight,
+        aux_value_horizons=args.aux_value_horizons,
+        aux_value_weight=args.aux_value_weight,
         max_grad_norm=args.max_grad_norm,
         offload_inactive_models=args.offload_inactive_models,
         device=device,

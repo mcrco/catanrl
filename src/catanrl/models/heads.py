@@ -103,6 +103,40 @@ class CatanGraphWDLValueHead(WDLValueHead):
         return self.value_head(x[:, : self.pooled_dim])
 
 
+class AuxiliaryValueHead(nn.Module):
+    """Short-horizon value predictions used only as a training objective."""
+
+    VALUE_OUTPUT_GAIN = 1.0
+
+    def __init__(self, input_dim: int, hidden_dim: int, num_heads: int) -> None:
+        super().__init__()
+        if num_heads < 1:
+            raise ValueError("num_heads must be positive")
+        self.value_head = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, num_heads),
+            nn.Tanh(),
+        )
+        for module in self.value_head:
+            if isinstance(module, nn.Linear):
+                orthogonal_init(module, gain=self.VALUE_OUTPUT_GAIN)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.value_head(x)
+
+
+class CatanGraphAuxiliaryValueHead(AuxiliaryValueHead):
+    """Canopy-style EMA value heads over the graph backbone's pooled state."""
+
+    def __init__(self, backbone: CatanGraphBackbone, num_heads: int) -> None:
+        self.pooled_dim = backbone.pooled_dim
+        super().__init__(self.pooled_dim, backbone.head_hidden_dim, num_heads)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.value_head(x[:, : self.pooled_dim])
+
+
 class FlatPolicyHead(nn.Module):
     """Simple linear head for policy network that outputs flat action logits."""
 

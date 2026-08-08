@@ -228,6 +228,7 @@ class SelfPlayExperience:
     value: float
     full_search: bool = True
     value_wdl: np.ndarray | None = None
+    aux_value_targets: np.ndarray | None = None
 
 
 def _put_training_result_chunks(
@@ -372,9 +373,7 @@ def _training_worker_main(
         discard_limit = int(args_dict["discard_limit"])
 
         for episode_seed in episode_seeds:
-            experiences: list[
-                tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]
-            ] = []
+            experiences: list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]] = []
             stats: Counter[str] = Counter()
             random.seed(episode_seed)
             np.random.seed(episode_seed % (2**32))

@@ -217,9 +217,7 @@ def test_native_search_returns_full_wdl_from_categorical_backend():
 
     np.testing.assert_allclose(result.wdl.sum(), 1.0)
     assert result.wdl[1] == pytest.approx(0.2)
-    assert result.diagnostics.search_value == pytest.approx(
-        float(result.wdl[0] - result.wdl[2])
-    )
+    assert result.diagnostics.search_value == pytest.approx(float(result.wdl[0] - result.wdl[2]))
 
 
 def test_native_mcts_reuses_a_deterministic_played_subtree():
@@ -745,6 +743,7 @@ def test_native_parallel_self_play_streams_and_deduplicates_shared_observations(
         device="cpu",
         show_tqdm=False,
         turns_limit=1,
+        aux_value_horizons=(10, 50, 150),
     )
 
     assert stats["games"] == 2
@@ -753,3 +752,5 @@ def test_native_parallel_self_play_streams_and_deduplicates_shared_observations(
     assert all(exp.full_search for exp in experiences)
     assert all(exp.policy.shape == (action_space_size,) for exp in experiences)
     assert all(np.all(exp.policy[~exp.action_mask] == 0.0) for exp in experiences)
+    assert all(exp.aux_value_targets is not None for exp in experiences)
+    assert all(exp.aux_value_targets.shape == (3,) for exp in experiences)
