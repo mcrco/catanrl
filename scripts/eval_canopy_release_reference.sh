@@ -8,7 +8,9 @@ fi
 
 canopy_repo_arg=$1
 checkpoint_arg=$2
-num_games=${3:-200}
+# Match the native final confirmation's power for a five-point independent
+# noninferiority margin. Callers can still pass a smaller exploratory count.
+num_games=${3:-800}
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 output_dir=${4:-"$repo_root/experiments/canopy-release-reference"}
 simulations=${CATANRL_CANOPY_REFERENCE_SIMULATIONS:-1600}
