@@ -5,7 +5,6 @@ from typing import cast
 import numpy as np
 import pytest
 import torch
-from catanatron.models.enums import ActionType
 from nn_mcts_helpers import MockInferenceBackend
 from torch import nn
 
@@ -16,7 +15,6 @@ from catanrl.algorithms.alphazero.native_search import (
     step_game_and_reconcile_search,
 )
 from catanrl.algorithms.alphazero.native_self_play import (
-    _canopy_action_count_increment,
     _choose_trajectory_action,
     _play_native_self_play_game,
     _trajectory_search_controls,
@@ -32,7 +30,6 @@ from catanrl.envs.cppanatron import (
 from catanrl.features.catanatron_utils import get_observation_indices_from_full
 from catanrl.models.heads import FlatPolicyHead
 from catanrl.models.wrappers import PolicyNetworkWrapper, ValueNetworkWrapper
-from catanrl.utils.catanatron_action_space import get_action_array
 from catanrl.utils.seeding import derive_map_and_game_seeds
 
 
@@ -546,29 +543,6 @@ def test_canopy_trajectory_keeps_root_noise_and_uses_visit_argmax_search():
     assert add_noise is True
     assert legacy_temperature == 0.1
     assert legacy_noise is False
-
-
-def test_canopy_action_count_includes_cppanatron_fused_chance_outcomes():
-    actions = get_action_array(2, "MINI")
-    by_type = {}
-    for index, (action_type, value) in enumerate(actions):
-        by_type.setdefault(action_type, []).append((index, value))
-
-    roll = by_type[ActionType.ROLL][0][0]
-    buy_dev = by_type[ActionType.BUY_DEVELOPMENT_CARD][0][0]
-    robber_without_victim = next(
-        index for index, value in by_type[ActionType.MOVE_ROBBER] if value[1] is None
-    )
-    robber_with_victim = next(
-        index for index, value in by_type[ActionType.MOVE_ROBBER] if value[1] is not None
-    )
-    end_turn = by_type[ActionType.END_TURN][0][0]
-
-    assert _canopy_action_count_increment(roll, 2, "MINI") == 2
-    assert _canopy_action_count_increment(buy_dev, 2, "MINI") == 2
-    assert _canopy_action_count_increment(robber_with_victim, 2, "MINI") == 2
-    assert _canopy_action_count_increment(robber_without_victim, 2, "MINI") == 1
-    assert _canopy_action_count_increment(end_turn, 2, "MINI") == 1
 
 
 def test_native_self_play_game_emits_standard_legal_training_fields():

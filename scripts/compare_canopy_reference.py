@@ -9,7 +9,10 @@ import math
 from pathlib import Path
 from typing import Any, Mapping
 
-from catanrl.eval.canopy_parity import compare_independent_win_rates
+from catanrl.eval.canopy_parity import (
+    compare_independent_win_rates,
+    validate_matching_action_cap,
+)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -63,6 +66,7 @@ def main() -> None:
         raise ValueError(f"Candidate does not contain requested budget {args.budget}")
     for key in ("vps_to_win", "discard_limit"):
         _require_equal(key, candidate_config.get(key), reference_config.get(key))
+    validate_matching_action_cap(candidate_config, reference_config)
     for key in ("c_puct", "c_visit", "c_scale"):
         _require_equal(key, _number(candidate_config, key), _number(reference_config, key))
     _require_equal(

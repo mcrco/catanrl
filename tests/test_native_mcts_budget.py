@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
+from catanatron.models.enums import ActionType
 
 from catanrl.algorithms.alphazero.native_search import NativeSearchDiagnostics
 from catanrl.eval.native_mcts_budget import (
@@ -10,9 +13,11 @@ from catanrl.eval.native_mcts_budget import (
     SearchDiagnosticsAccumulator,
     _game_opponent_action,
     _game_worker_main,
+    _play_budget_game,
     _search,
     run_native_budget_games,
 )
+from catanrl.utils.catanatron_action_space import get_action_array
 
 
 def _diagnostics(*, depth: int, agreement: float) -> NativeSearchDiagnostics:
@@ -292,3 +297,62 @@ def test_native_budget_worker_streams_each_game(monkeypatch):
         [{"win": True, "seat": "second", "episode_seed": 12}],
     ]
     assert result_queue.messages[-1]["result"]["game_records"] == []
+
+
+def test_native_budget_game_enforces_canopy_action_cap(monkeypatch):
+    roll = get_action_array(2, "MINI").index((ActionType.ROLL, None))
+
+    class _Game:
+        winner = None
+        num_turns = 0
+        current_player = 0
+
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def valid_action_mask(self):
+            mask = np.zeros(len(get_action_array(2, "MINI")), dtype=np.bool_)
+            mask[roll] = True
+            return mask
+
+        def step(self, _action):
+            return None
+
+        def player_state(self, _player):
+            return SimpleNamespace(actual_victory_points=0)
+
+        def close(self):
+            return None
+
+    def _step_game_and_reconcile_search(*, game, action, search, **_kwargs):
+        game.step(action)
+        return search
+
+    monkeypatch.setattr("catanrl.eval.native_mcts_budget.NativeGame", _Game)
+    monkeypatch.setattr(
+        "catanrl.eval.native_mcts_budget.step_game_and_reconcile_search",
+        _step_game_and_reconcile_search,
+    )
+
+    record, diagnostics, calibration = _play_budget_game(
+        episode_seed=101,
+        mcts_seat=0,
+        budget=1,
+        args_dict={
+            "map_type": "MINI",
+            "discard_limit": 7,
+            "vps_to_win": 10,
+            "turns_limit": 1000,
+            "max_actions": 1,
+            "game_opponent": "random",
+        },
+        actor_indices=np.array([0]),
+        critic_indices=np.array([0]),
+        inference_backend=object(),  # type: ignore[arg-type]
+    )
+
+    assert record["draw"] is True
+    assert record["actions"] == 2
+    assert record["native_decisions"] == 1
+    assert diagnostics.count == 0
+    assert calibration.count == 0

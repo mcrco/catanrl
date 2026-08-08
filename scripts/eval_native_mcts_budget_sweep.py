@@ -100,6 +100,12 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--seed", type=int, default=123)
     parser.add_argument("--turns-limit", type=int, default=1000)
+    parser.add_argument(
+        "--max-actions",
+        type=int,
+        default=0,
+        help="Canopy-compatible action cap; zero disables the cap",
+    )
     parser.add_argument("--device", default=None)
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--skip-probes", action="store_true")
@@ -128,6 +134,8 @@ def _parse_args() -> argparse.Namespace:
         parser.error("--root-dirichlet-fraction must be finite and in [0, 1]")
     if args.skip_probes and args.skip_games:
         parser.error("Cannot combine --skip-probes and --skip-games")
+    if args.max_actions < 0:
+        parser.error("--max-actions cannot be negative")
     return args
 
 
@@ -212,6 +220,7 @@ def main() -> None:
         "tree_reuse": args.tree_reuse,
         "seed": args.seed,
         "turns_limit": args.turns_limit,
+        "max_actions": args.max_actions,
         "device": str(device),
         "map_type": experiment.map_type,
         "vps_to_win": vps_to_win,
@@ -274,6 +283,7 @@ def main() -> None:
                 discard_limit=discard_limit,
                 device=device,
                 turns_limit=args.turns_limit,
+                max_actions=args.max_actions,
             )
             probe_summaries = probes.summaries(args.budgets)
             payload["probe_summaries"] = {
@@ -325,6 +335,7 @@ def main() -> None:
                     discard_limit=discard_limit,
                     device=device,
                     turns_limit=args.turns_limit,
+                    max_actions=args.max_actions,
                     game_opponent=args.game_opponent,
                     value_scale=args.value_scale,
                     tree_reuse=args.tree_reuse,

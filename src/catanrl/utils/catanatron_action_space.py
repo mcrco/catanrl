@@ -11,9 +11,25 @@ from catanatron.models.enums import RESOURCES, ActionType
 from catanatron.models.map import build_map
 from catanatron.models.player import Color
 
-from catanrl.utils.catanatron_game import PLAYER_COLOR_ORDER, get_player_colors
+from catanrl.utils.catanatron_game import PLAYER_COLOR_ORDER, get_player_colors as get_player_colors
 
 MapType = Literal["BASE", "TOURNAMENT", "MINI"]
+
+
+def canopy_action_count_increment(
+    action: int,
+    num_players: int,
+    map_type: MapType,
+) -> int:
+    """Count fused cppanatron random outcomes like Canopy's explicit chance nodes."""
+    action_type, value = get_action_array(num_players, map_type)[action]
+    has_chance_resolution = action_type in {
+        ActionType.ROLL,
+        ActionType.BUY_DEVELOPMENT_CARD,
+    } or (
+        action_type == ActionType.MOVE_ROBBER and isinstance(value, tuple) and value[1] is not None
+    )
+    return 2 if has_chance_resolution else 1
 
 
 def _relative_opponent_slot(actor: Color, victim: Color, game_colors: Tuple[Color, ...]) -> int:
@@ -55,7 +71,9 @@ def get_action_array(
     player indices like we do in feature extractors instead of absolute victim colors.
     """
     if not 1 <= num_players <= len(PLAYER_COLOR_ORDER):
-        raise ValueError(f"num_players must be in [1, {len(PLAYER_COLOR_ORDER)}], got {num_players}")
+        raise ValueError(
+            f"num_players must be in [1, {len(PLAYER_COLOR_ORDER)}], got {num_players}"
+        )
     catan_map = build_map(map_type)
     num_nodes = len(catan_map.land_nodes)
     robber_slots: list[object] = [None, *range(1, num_players)]
@@ -76,10 +94,7 @@ def get_action_array(
                 for i, first_card in enumerate(RESOURCES)
                 for j in range(i, len(RESOURCES))
             ],
-            *[
-                (ActionType.PLAY_YEAR_OF_PLENTY, (first_card,))
-                for first_card in RESOURCES
-            ],
+            *[(ActionType.PLAY_YEAR_OF_PLENTY, (first_card,)) for first_card in RESOURCES],
             (ActionType.PLAY_ROAD_BUILDING, None),
             *[(ActionType.PLAY_MONOPOLY, r) for r in RESOURCES],
             *[
@@ -174,7 +189,9 @@ def build_action_type_metadata(
     map_type: MapType,
 ) -> tuple[Dict[str, list[int]], np.ndarray, list[str]]:
     action_array = get_action_array(num_players, map_type)
-    action_type_to_indices: Dict[str, list[int]] = {action_type.name: [] for action_type in ACTION_TYPES}
+    action_type_to_indices: Dict[str, list[int]] = {
+        action_type.name: [] for action_type in ACTION_TYPES
+    }
     action_to_type_idx = np.zeros(len(action_array), dtype=np.int32)
     for action_idx, (action_type, _) in enumerate(action_array):
         action_type_to_indices[action_type.name].append(action_idx)

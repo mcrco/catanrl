@@ -10,12 +10,36 @@ from catanatron.models.actions import Action
 from catanatron.models.enums import ActionType
 
 from catanrl.utils.catanatron_action_space import (
+    canopy_action_count_increment,
     from_action_space,
     get_action_array,
     get_action_space_size,
     get_player_colors,
     to_action_space,
 )
+
+
+def test_canopy_action_count_includes_fused_chance_outcomes():
+    actions = get_action_array(2, "MINI")
+    by_type = {}
+    for index, (action_type, value) in enumerate(actions):
+        by_type.setdefault(action_type, []).append((index, value))
+
+    roll = by_type[ActionType.ROLL][0][0]
+    buy_dev = by_type[ActionType.BUY_DEVELOPMENT_CARD][0][0]
+    robber_without_victim = next(
+        index for index, value in by_type[ActionType.MOVE_ROBBER] if value[1] is None
+    )
+    robber_with_victim = next(
+        index for index, value in by_type[ActionType.MOVE_ROBBER] if value[1] is not None
+    )
+    end_turn = by_type[ActionType.END_TURN][0][0]
+
+    assert canopy_action_count_increment(roll, 2, "MINI") == 2
+    assert canopy_action_count_increment(buy_dev, 2, "MINI") == 2
+    assert canopy_action_count_increment(robber_with_victim, 2, "MINI") == 2
+    assert canopy_action_count_increment(robber_without_victim, 2, "MINI") == 1
+    assert canopy_action_count_increment(end_turn, 2, "MINI") == 1
 
 
 @pytest.mark.parametrize("num_players", [2, 3, 4])
@@ -70,7 +94,9 @@ def test_move_robber_1v1_keeps_distinct_steal_vs_no_steal_actions():
     idx_steal = to_action_space(steal_action, len(game_colors), "BASE", game_colors)
     idx_no_steal = to_action_space(no_steal_action, len(game_colors), "BASE", game_colors)
     assert idx_steal != idx_no_steal
-    assert from_action_space(idx_steal, actor, len(game_colors), "BASE", game_colors) == steal_action
+    assert (
+        from_action_space(idx_steal, actor, len(game_colors), "BASE", game_colors) == steal_action
+    )
     assert (
         from_action_space(idx_no_steal, actor, len(game_colors), "BASE", game_colors)
         == no_steal_action

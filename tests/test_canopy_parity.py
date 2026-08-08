@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import pytest
 
-from catanrl.eval.canopy_parity import compare_independent_win_rates
+from catanrl.eval.canopy_parity import (
+    compare_independent_win_rates,
+    validate_matching_action_cap,
+)
 
 
 def test_canopy_noninferiority_passes_for_equal_well_measured_rates():
@@ -40,3 +43,28 @@ def test_canopy_noninferiority_rejects_clearly_weaker_candidate():
 def test_canopy_noninferiority_rejects_invalid_counts(candidate, reference, message):
     with pytest.raises(ValueError, match=message):
         compare_independent_win_rates(candidate, reference)
+
+
+def test_canopy_reference_contract_requires_matching_action_caps():
+    assert (
+        validate_matching_action_cap(
+            {"max_actions": 2000},
+            {"max_actions": 2000},
+        )
+        == 2000
+    )
+
+    with pytest.raises(ValueError, match="Incomparable max_actions"):
+        validate_matching_action_cap(
+            {"max_actions": 1000},
+            {"max_actions": 2000},
+        )
+
+
+@pytest.mark.parametrize("value", [None, True, 0, -1, 2000.0])
+def test_canopy_reference_contract_rejects_invalid_action_caps(value):
+    with pytest.raises(ValueError, match="positive integer"):
+        validate_matching_action_cap(
+            {"max_actions": value},
+            {"max_actions": 2000},
+        )

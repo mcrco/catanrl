@@ -26,6 +26,7 @@ from catanrl.features.catanatron_utils import (
     get_observation_indices_from_full,
 )
 from catanrl.players.nn_mcts_player import _RemoteNNMCTSInferenceBackend
+from catanrl.utils.catanatron_action_space import canopy_action_count_increment
 from catanrl.utils.seeding import derive_map_and_game_seeds, derive_seed
 
 MapType = Literal["BASE", "MINI", "TOURNAMENT"]
@@ -366,10 +367,16 @@ def _play_budget_game(
         vps_to_win=int(args_dict["vps_to_win"]),
     )
     decision_index = 0
+    action_count = 0
+    max_actions = int(args_dict.get("max_actions", 0))
     opponent_rng = np.random.default_rng(derive_seed(episode_seed, "native_budget_random_opponent"))
     search: NativeMCTSSearch | None = None
     try:
-        while game.winner is None and game.num_turns < int(args_dict["turns_limit"]):
+        while (
+            game.winner is None
+            and game.num_turns < int(args_dict["turns_limit"])
+            and (max_actions <= 0 or action_count < max_actions)
+        ):
             valid_indices = np.flatnonzero(game.valid_action_mask())
             if valid_indices.size == 0:
                 raise RuntimeError("Native budget game has no legal action")
@@ -424,6 +431,7 @@ def _play_budget_game(
                 search=search,
             )
             decision_index += 1
+            action_count += canopy_action_count_increment(action, 2, args_dict["map_type"])
 
         winner = game.winner
         for prediction, player in calibration_rows:
@@ -443,7 +451,8 @@ def _play_budget_game(
                     game.player_state(player).actual_victory_points for player in range(2)
                 ),
                 "turns": game.num_turns,
-                "actions": decision_index,
+                "actions": action_count,
+                "native_decisions": decision_index,
                 "opponent": args_dict["game_opponent"],
             },
             diagnostics,
@@ -544,9 +553,15 @@ def _probe_worker_main(
                 vps_to_win=int(args_dict["vps_to_win"]),
             )
             decision_index = 0
+            action_count = 0
+            max_actions = int(args_dict.get("max_actions", 0))
             probe_index = 0
             try:
-                while game.winner is None and game.num_turns < int(args_dict["turns_limit"]):
+                while (
+                    game.winner is None
+                    and game.num_turns < int(args_dict["turns_limit"])
+                    and (max_actions <= 0 or action_count < max_actions)
+                ):
                     valid_indices = np.flatnonzero(game.valid_action_mask())
                     if valid_indices.size == 0:
                         raise RuntimeError("Native probe trajectory has no legal action")
@@ -586,6 +601,11 @@ def _probe_worker_main(
                         probe_index += 1
                     game.step(action)
                     decision_index += 1
+                    action_count += canopy_action_count_increment(
+                        action,
+                        2,
+                        args_dict["map_type"],
+                    )
             finally:
                 game.close()
         result_queue.put(
@@ -617,6 +637,7 @@ def _common_args(
     vps_to_win: int,
     discard_limit: int,
     turns_limit: int,
+    max_actions: int = 0,
     probe_stride: int = 1,
     value_scale: float = 1.0,
     tree_reuse: bool = False,
@@ -636,6 +657,7 @@ def _common_args(
         "vps_to_win": vps_to_win,
         "discard_limit": discard_limit,
         "turns_limit": turns_limit,
+        "max_actions": max_actions,
         "probe_stride": probe_stride,
         "value_scale": value_scale,
         "tree_reuse": tree_reuse,
@@ -668,6 +690,7 @@ def run_native_budget_games(
     discard_limit: int,
     device: str | torch.device,
     turns_limit: int = TURNS_LIMIT,
+    max_actions: int = 0,
     show_tqdm: bool = True,
     value_scale: float = 1.0,
     tree_reuse: bool = False,
@@ -683,6 +706,8 @@ def run_native_budget_games(
         raise ValueError("budget must be at least 1")
     if games_per_seat < 1:
         raise ValueError("games_per_seat must be at least 1")
+    if max_actions < 0:
+        raise ValueError("max_actions cannot be negative")
     if game_opponent not in ("random", "raw", "value"):
         raise ValueError("game_opponent must be 'random', 'raw', or 'value'")
     if search_selection not in ("puct", "completed-q"):
@@ -709,6 +734,7 @@ def run_native_budget_games(
         vps_to_win=vps_to_win,
         discard_limit=discard_limit,
         turns_limit=turns_limit,
+        max_actions=max_actions,
         value_scale=value_scale,
         tree_reuse=tree_reuse,
         canonical_pruning=canonical_pruning,
@@ -768,6 +794,7 @@ def run_native_budget_position_probes(
     discard_limit: int,
     device: str | torch.device,
     turns_limit: int = TURNS_LIMIT,
+    max_actions: int = 0,
     show_tqdm: bool = True,
     value_scale: float = 1.0,
     canonical_pruning: bool = False,
@@ -783,6 +810,8 @@ def run_native_budget_position_probes(
         raise ValueError("num_games must be at least 1")
     if probe_stride < 1:
         raise ValueError("probe_stride must be at least 1")
+    if max_actions < 0:
+        raise ValueError("max_actions cannot be negative")
     if search_selection not in ("puct", "completed-q"):
         raise ValueError("search_selection must be 'puct' or 'completed-q'")
     if not np.isfinite(root_dirichlet_alpha) or root_dirichlet_alpha <= 0.0:
@@ -806,6 +835,7 @@ def run_native_budget_position_probes(
         vps_to_win=vps_to_win,
         discard_limit=discard_limit,
         turns_limit=turns_limit,
+        max_actions=max_actions,
         probe_stride=probe_stride,
         value_scale=value_scale,
         canonical_pruning=canonical_pruning,

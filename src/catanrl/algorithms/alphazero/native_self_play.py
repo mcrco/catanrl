@@ -11,7 +11,6 @@ from typing import Literal
 
 import numpy as np
 import torch
-from catanatron.models.enums import ActionType
 
 from catanrl.envs.cppanatron import NativeGame, NativeMCTSSearch
 from catanrl.envs.cppanatron.puffer_env import TURNS_LIMIT
@@ -25,7 +24,7 @@ from catanrl.players.nn_mcts_player import (
     _NNMCTSInferenceBackend,
     _RemoteNNMCTSInferenceBackend,
 )
-from catanrl.utils.catanatron_action_space import get_action_array
+from catanrl.utils.catanatron_action_space import canopy_action_count_increment
 from catanrl.utils.seeding import derive_map_and_game_seeds, derive_seed
 
 from .native_search import PolicyTarget, run_native_search_policy, step_game_and_reconcile_search
@@ -38,22 +37,6 @@ from .parallel_self_play import (
 
 MapType = Literal["BASE", "MINI", "TOURNAMENT"]
 TrajectoryActionSelection = Literal["visits", "canopy"]
-
-
-def _canopy_action_count_increment(
-    action: int,
-    num_players: int,
-    map_type: MapType,
-) -> int:
-    """Count fused cppanatron random outcomes like Canopy's explicit chance nodes."""
-    action_type, value = get_action_array(num_players, map_type)[action]
-    has_chance_resolution = action_type in {
-        ActionType.ROLL,
-        ActionType.BUY_DEVELOPMENT_CARD,
-    } or (
-        action_type == ActionType.MOVE_ROBBER and isinstance(value, tuple) and value[1] is not None
-    )
-    return 2 if has_chance_resolution else 1
 
 
 @dataclass(frozen=True)
@@ -395,7 +378,7 @@ def _play_native_self_play_game(
                 action=action,
                 search=search,
             )
-            action_count += _canopy_action_count_increment(action, num_players, map_type)
+            action_count += canopy_action_count_increment(action, num_players, map_type)
         return samples, game.winner
     finally:
         if search is not None:

@@ -113,6 +113,7 @@ env -u VIRTUAL_ENV PYTHONUNBUFFERED=1 uv run python scripts/eval_native_mcts_bud
   --canonical-pruning \
   --seed "$seed" \
   --turns-limit 1000 \
+  --max-actions 2000 \
   --device cuda \
   --output-dir "$output_root/native-s${search_simulations}-vs-f" \
   "${search_wandb_args[@]}"
@@ -138,6 +139,7 @@ env -u VIRTUAL_ENV PYTHONUNBUFFERED=1 uv run python scripts/eval_native_mcts_bud
   --canonical-pruning \
   --seed "$seed" \
   --turns-limit 1000 \
+  --max-actions 2000 \
   --device cuda \
   --output-dir "$output_root/native-s${search_simulations}-vs-random" \
   "${search_reference_wandb_args[@]}"

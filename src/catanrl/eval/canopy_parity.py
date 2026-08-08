@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import asdict, dataclass
-from typing import Mapping
+from typing import Any, Mapping
 
 from catanrl.eval.reporting import wilson_interval
 
@@ -82,3 +82,25 @@ def compare_independent_win_rates(
         noninferiority_margin=noninferiority_margin,
         noninferior=difference_low >= -noninferiority_margin,
     )
+
+
+def validate_matching_action_cap(
+    candidate_config: Mapping[str, Any],
+    reference_config: Mapping[str, Any],
+) -> int:
+    """Require the same positive Canopy action cap in both evaluation configs."""
+    values: dict[str, int] = {}
+    for label, config in (
+        ("candidate", candidate_config),
+        ("reference", reference_config),
+    ):
+        value = config.get("max_actions")
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError(f"{label} max_actions must be a positive integer, got {value!r}")
+        values[label] = value
+    if values["candidate"] != values["reference"]:
+        raise ValueError(
+            "Incomparable max_actions: "
+            f"candidate={values['candidate']!r}, reference={values['reference']!r}"
+        )
+    return values["candidate"]
