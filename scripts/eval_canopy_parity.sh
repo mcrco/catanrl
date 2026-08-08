@@ -129,6 +129,8 @@ env -u VIRTUAL_ENV PYTHONUNBUFFERED=1 uv run python scripts/eval_native_mcts_bud
   --search-selection completed-q \
   --c-visit 50 \
   --c-scale 1.0 \
+  --root-dirichlet-alpha 0.05 \
+  --root-dirichlet-fraction 0.25 \
   --value-scale 1.0 \
   --tree-reuse \
   --canonical-pruning \

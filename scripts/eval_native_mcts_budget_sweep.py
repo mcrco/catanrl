@@ -69,6 +69,18 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--c-visit", type=float, default=50.0)
     parser.add_argument("--c-scale", type=float, default=1.0)
     parser.add_argument(
+        "--root-dirichlet-alpha",
+        type=float,
+        default=0.3,
+        help="Root Dirichlet concentration; only used when its fraction is nonzero",
+    )
+    parser.add_argument(
+        "--root-dirichlet-fraction",
+        type=float,
+        default=0.0,
+        help="Root-prior noise fraction; zero keeps normal deterministic evaluation",
+    )
+    parser.add_argument(
         "--value-scale",
         type=float,
         default=1.0,
@@ -107,6 +119,13 @@ def _parse_args() -> argparse.Namespace:
         parser.error("--c-visit must be finite and non-negative")
     if not math.isfinite(args.c_scale) or args.c_scale < 0.0:
         parser.error("--c-scale must be finite and non-negative")
+    if not math.isfinite(args.root_dirichlet_alpha) or args.root_dirichlet_alpha <= 0.0:
+        parser.error("--root-dirichlet-alpha must be finite and positive")
+    if (
+        not math.isfinite(args.root_dirichlet_fraction)
+        or not 0.0 <= args.root_dirichlet_fraction <= 1.0
+    ):
+        parser.error("--root-dirichlet-fraction must be finite and in [0, 1]")
     if args.skip_probes and args.skip_games:
         parser.error("Cannot combine --skip-probes and --skip-games")
     return args
@@ -186,6 +205,8 @@ def main() -> None:
         "search_selection": args.search_selection,
         "c_visit": args.c_visit,
         "c_scale": args.c_scale,
+        "root_dirichlet_alpha": args.root_dirichlet_alpha,
+        "root_dirichlet_fraction": args.root_dirichlet_fraction,
         "value_scale": args.value_scale,
         "canonical_pruning": args.canonical_pruning,
         "tree_reuse": args.tree_reuse,
@@ -244,6 +265,8 @@ def main() -> None:
                 search_selection=args.search_selection,
                 c_visit=args.c_visit,
                 c_scale=args.c_scale,
+                root_dirichlet_alpha=args.root_dirichlet_alpha,
+                root_dirichlet_fraction=args.root_dirichlet_fraction,
                 value_scale=args.value_scale,
                 canonical_pruning=args.canonical_pruning,
                 seed=args.seed,
@@ -295,6 +318,8 @@ def main() -> None:
                     search_selection=args.search_selection,
                     c_visit=args.c_visit,
                     c_scale=args.c_scale,
+                    root_dirichlet_alpha=args.root_dirichlet_alpha,
+                    root_dirichlet_fraction=args.root_dirichlet_fraction,
                     seed=args.seed,
                     vps_to_win=vps_to_win,
                     discard_limit=discard_limit,

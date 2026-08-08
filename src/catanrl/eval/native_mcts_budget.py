@@ -321,9 +321,9 @@ def _search(
         num_simulations=budget,
         c_puct=float(args_dict["c_puct"]),
         search_seed=derive_seed(episode_seed, "native_budget_search", decision_index),
-        add_noise=False,
-        dirichlet_alpha=0.3,
-        dirichlet_frac=0.0,
+        add_noise=float(args_dict.get("root_dirichlet_fraction", 0.0)) > 0.0,
+        dirichlet_alpha=float(args_dict.get("root_dirichlet_alpha", 0.3)),
+        dirichlet_frac=float(args_dict.get("root_dirichlet_fraction", 0.0)),
         action_temperature=0.0,
         target_temperature=1.0,
         rng=np.random.default_rng(
@@ -625,6 +625,8 @@ def _common_args(
     search_selection: str = "puct",
     c_visit: float = 50.0,
     c_scale: float = 1.0,
+    root_dirichlet_alpha: float = 0.3,
+    root_dirichlet_fraction: float = 0.0,
 ) -> dict[str, Any]:
     return {
         "map_type": map_type,
@@ -642,6 +644,8 @@ def _common_args(
         "search_selection": search_selection,
         "c_visit": c_visit,
         "c_scale": c_scale,
+        "root_dirichlet_alpha": root_dirichlet_alpha,
+        "root_dirichlet_fraction": root_dirichlet_fraction,
     }
 
 
@@ -672,6 +676,8 @@ def run_native_budget_games(
     search_selection: str = "puct",
     c_visit: float = 50.0,
     c_scale: float = 1.0,
+    root_dirichlet_alpha: float = 0.3,
+    root_dirichlet_fraction: float = 0.0,
 ) -> NativeBudgetGameResult:
     if budget < 1:
         raise ValueError("budget must be at least 1")
@@ -681,6 +687,14 @@ def run_native_budget_games(
         raise ValueError("game_opponent must be 'random', 'raw', or 'value'")
     if search_selection not in ("puct", "completed-q"):
         raise ValueError("search_selection must be 'puct' or 'completed-q'")
+    if not np.isfinite(root_dirichlet_alpha) or root_dirichlet_alpha <= 0.0:
+        raise ValueError("root_dirichlet_alpha must be finite and positive")
+    if (
+        not np.isfinite(root_dirichlet_fraction)
+        or root_dirichlet_fraction < 0.0
+        or root_dirichlet_fraction > 1.0
+    ):
+        raise ValueError("root_dirichlet_fraction must be finite and in [0, 1]")
     scenarios = [
         (seat, derive_seed(seed, "native_budget_episode", game_index))
         for seat in range(2)
@@ -702,6 +716,8 @@ def run_native_budget_games(
         search_selection=search_selection,
         c_visit=c_visit,
         c_scale=c_scale,
+        root_dirichlet_alpha=root_dirichlet_alpha,
+        root_dirichlet_fraction=root_dirichlet_fraction,
     )
     aggregate = NativeBudgetGameResult()
 
@@ -758,6 +774,8 @@ def run_native_budget_position_probes(
     search_selection: str = "puct",
     c_visit: float = 50.0,
     c_scale: float = 1.0,
+    root_dirichlet_alpha: float = 0.3,
+    root_dirichlet_fraction: float = 0.0,
 ) -> NativeBudgetProbeResult:
     if not budgets or any(int(budget) < 1 for budget in budgets):
         raise ValueError("budgets must contain positive simulation counts")
@@ -767,6 +785,14 @@ def run_native_budget_position_probes(
         raise ValueError("probe_stride must be at least 1")
     if search_selection not in ("puct", "completed-q"):
         raise ValueError("search_selection must be 'puct' or 'completed-q'")
+    if not np.isfinite(root_dirichlet_alpha) or root_dirichlet_alpha <= 0.0:
+        raise ValueError("root_dirichlet_alpha must be finite and positive")
+    if (
+        not np.isfinite(root_dirichlet_fraction)
+        or root_dirichlet_fraction < 0.0
+        or root_dirichlet_fraction > 1.0
+    ):
+        raise ValueError("root_dirichlet_fraction must be finite and in [0, 1]")
     indexed_seeds = [
         (game_index, derive_seed(seed, "native_probe_episode", game_index))
         for game_index in range(num_games)
@@ -786,6 +812,8 @@ def run_native_budget_position_probes(
         search_selection=search_selection,
         c_visit=c_visit,
         c_scale=c_scale,
+        root_dirichlet_alpha=root_dirichlet_alpha,
+        root_dirichlet_fraction=root_dirichlet_fraction,
     )
     aggregate = NativeBudgetProbeResult()
 

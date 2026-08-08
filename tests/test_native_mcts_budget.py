@@ -10,6 +10,8 @@ from catanrl.eval.native_mcts_budget import (
     SearchDiagnosticsAccumulator,
     _game_opponent_action,
     _game_worker_main,
+    _search,
+    run_native_budget_games,
 )
 
 
@@ -160,6 +162,70 @@ def test_native_random_opponent_requires_rng():
             pytest.fail,  # type: ignore[arg-type]
             pytest.fail,  # type: ignore[arg-type]
             pytest.fail,  # type: ignore[arg-type]
+        )
+
+
+def test_native_budget_search_can_match_canopy_root_noise(monkeypatch):
+    captured = {}
+    sentinel = object()
+
+    def _run_native_search_policy(**kwargs):
+        captured.update(kwargs)
+        return sentinel
+
+    monkeypatch.setattr(
+        "catanrl.eval.native_mcts_budget.run_native_search_policy",
+        _run_native_search_policy,
+    )
+
+    result = _search(
+        game=object(),  # type: ignore[arg-type]
+        budget=1600,
+        decision_index=7,
+        episode_seed=47,
+        args_dict={
+            "map_type": "BASE",
+            "c_puct": 2.5,
+            "value_scale": 1.0,
+            "canonical_pruning": True,
+            "search_selection": "completed-q",
+            "c_visit": 50.0,
+            "c_scale": 1.0,
+            "root_dirichlet_alpha": 0.05,
+            "root_dirichlet_fraction": 0.25,
+        },
+        actor_indices=np.array([0]),
+        critic_indices=np.array([0]),
+        inference_backend=object(),  # type: ignore[arg-type]
+    )
+
+    assert result is sentinel
+    assert captured["add_noise"] is True
+    assert captured["dirichlet_alpha"] == pytest.approx(0.05)
+    assert captured["dirichlet_frac"] == pytest.approx(0.25)
+
+
+@pytest.mark.parametrize("fraction", [-0.01, 1.01, float("nan")])
+def test_native_budget_games_rejects_invalid_root_noise_fraction(fraction):
+    with pytest.raises(ValueError, match="root_dirichlet_fraction"):
+        run_native_budget_games(
+            policy_model=None,
+            critic_model=None,
+            model_type="flat",
+            map_type="BASE",
+            actor_observation_level="private",
+            critic_observation_level="full",
+            budget=1,
+            games_per_seat=1,
+            num_workers=1,
+            inference_batch_size=1,
+            inference_wait_ms=1.0,
+            c_puct=2.5,
+            seed=1,
+            vps_to_win=15,
+            discard_limit=9,
+            device="cpu",
+            root_dirichlet_fraction=fraction,
         )
 
 
