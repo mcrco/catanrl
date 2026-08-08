@@ -22,7 +22,6 @@ esac
 
 dagger_experiment="${prefix}-dagger10"
 alphazero_experiment="${prefix}-alphazero-${value_init}"
-eval_root="experiments/eval-${alphazero_experiment}-best-s12043"
 
 if [[ -e "experiments/${dagger_experiment}/metadata.json" ]]; then
   echo "experiment already exists: ${dagger_experiment}" >&2
@@ -46,8 +45,26 @@ scripts/train_canopy_alphazero.sh \
   2>&1 | tee "experiments/${alphazero_experiment}/run.log"
 
 if [[ "${CATANRL_PARITY_RUN_EVAL:-1}" == "1" ]]; then
+  screen_root="experiments/eval-${alphazero_experiment}-checkpoint-screen"
+  selected_checkpoint_path="${screen_root}/selected-checkpoint.txt"
+  mkdir -p "$screen_root"
+  env -u VIRTUAL_ENV PYTHONUNBUFFERED=1 uv run python scripts/screen_search_checkpoints.py \
+    --experiment "$alphazero_experiment" \
+    --budget "${CATANRL_PARITY_SCREEN_BUDGET:-64}" \
+    --games-per-seat "${CATANRL_PARITY_SCREEN_GAMES_PER_SEAT:-24}" \
+    --top-k "${CATANRL_PARITY_SCREEN_TOP_K:-3}" \
+    --num-workers "${CATANRL_PARITY_EVAL_WORKERS:-16}" \
+    --max-actions 2000 \
+    --output "${screen_root}/results.json" \
+    --selected-output "$selected_checkpoint_path" \
+    2>&1 | tee "${screen_root}/run.log"
+  selected_checkpoint=$(<"$selected_checkpoint_path")
+  if [[ -z "$selected_checkpoint" ]]; then
+    echo "checkpoint screen did not select a checkpoint" >&2
+    exit 1
+  fi
+  eval_root="experiments/eval-${alphazero_experiment}-${selected_checkpoint}-s12043"
   mkdir -p "$eval_root"
-  scripts/eval_canopy_parity.sh "$alphazero_experiment" best 12043 \
+  scripts/eval_canopy_parity.sh "$alphazero_experiment" "$selected_checkpoint" 12043 \
     2>&1 | tee "$eval_root/run.log"
 fi
-

@@ -34,12 +34,21 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--inference-wait-ms", type=float, default=2.0)
     parser.add_argument("--seed", type=int, default=41051)
     parser.add_argument("--turns-limit", type=int, default=1000)
+    parser.add_argument("--max-actions", type=int, default=2000)
     parser.add_argument("--device", default=None)
     parser.add_argument("--output", type=Path, default=None)
+    parser.add_argument(
+        "--selected-output",
+        type=Path,
+        default=None,
+        help="Optional text file receiving the top checkpoint selector.",
+    )
     args = parser.parse_args()
     for name in ("budget", "games_per_seat", "top_k", "num_workers"):
         if getattr(args, name) < 1:
             parser.error(f"--{name.replace('_', '-')} must be at least 1")
+    if args.max_actions < 0:
+        parser.error("--max-actions cannot be negative")
     return args
 
 
@@ -92,6 +101,7 @@ def main() -> None:
             "c_visit": 50.0,
             "c_scale": 1.0,
             "root_noise": False,
+            "max_actions": args.max_actions,
         },
         "sweeps": {},
         "ranking": [],
@@ -142,6 +152,7 @@ def main() -> None:
             value_scale=1.0,
             tree_reuse=True,
             canonical_pruning=True,
+            max_actions=args.max_actions,
         )
         payload["sweeps"][str(selector)] = {
             "summary": games.summary(),
@@ -155,6 +166,9 @@ def main() -> None:
     ranking = rank_checkpoint_summaries(payload["sweeps"], top_k=args.top_k)
     payload["ranking"] = ranking
     top_selector = str(ranking[0]["selector"])
+    if args.selected_output is not None:
+        args.selected_output.parent.mkdir(parents=True, exist_ok=True)
+        args.selected_output.write_text(top_selector + "\n")
     top_games = payload["sweeps"][top_selector]["game_records"]
     payload["paired_vs_top"] = {
         selector: exact_mcnemar(top_games, result["game_records"])
