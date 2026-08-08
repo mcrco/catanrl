@@ -41,6 +41,20 @@ parity_full_simulations=${CATANRL_PARITY_FULL_SIMULATIONS:-1600}
 parity_fast_simulations=${CATANRL_PARITY_FAST_SIMULATIONS:-64}
 parity_stall_timeout=${CATANRL_PARITY_STALL_TIMEOUT_SECONDS:-600}
 parity_inference_timeout=${CATANRL_PARITY_INFERENCE_TIMEOUT_SECONDS:-120}
+case "${CATANRL_PARITY_AUX_VALUES:-0}" in
+  0)
+    aux_value_args=()
+    aux_value_tag=no-aux-values
+    ;;
+  1)
+    aux_value_args=(--aux-value-horizons 10 50 150 --aux-value-weight 0.5)
+    aux_value_tag=aux-values
+    ;;
+  *)
+    echo "CATANRL_PARITY_AUX_VALUES must be 0 or 1" >&2
+    exit 2
+    ;;
+esac
 wandb_args=()
 case "${CATANRL_PARITY_WANDB:-0}" in
   0) ;;
@@ -53,7 +67,7 @@ case "${CATANRL_PARITY_WANDB:-0}" in
       --wandb-tags native-cppanatron catan-graph nexus-v3 road-aware \
         corrected-board-layout shared-backbone full-full win-reward fresh-dagger-pretrain \
         canopy-playout-cap canopy-completed-q canopy-soft-policy \
-        canopy-aux-values canopy-adamw continuous-teacher tree-reuse "$value_init_tag"
+        canopy-adamw continuous-teacher tree-reuse "$aux_value_tag" "$value_init_tag"
     )
     ;;
   *)
@@ -118,8 +132,7 @@ env -u VIRTUAL_ENV PYTHONUNBUFFERED=1 uv run python -m catanrl.experiments.train
   --value-loss-weight 1.0 \
   --soft-policy-temperature 4.0 \
   --soft-policy-weight 8.0 \
-  --aux-value-horizons 10 50 150 \
-  --aux-value-weight 0.5 \
+  "${aux_value_args[@]}" \
   --max-grad-norm 1.0 \
   --eval-every-iterations 5 \
   --eval-games 200 \
