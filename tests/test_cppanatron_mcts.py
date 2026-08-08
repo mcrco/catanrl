@@ -5,6 +5,7 @@ from typing import cast
 import numpy as np
 import pytest
 import torch
+from catanatron.models.enums import ActionType
 from nn_mcts_helpers import MockInferenceBackend
 from torch import nn
 
@@ -15,6 +16,7 @@ from catanrl.algorithms.alphazero.native_search import (
     step_game_and_reconcile_search,
 )
 from catanrl.algorithms.alphazero.native_self_play import (
+    _canopy_action_count_increment,
     _choose_trajectory_action,
     _play_native_self_play_game,
     _trajectory_search_controls,
@@ -30,6 +32,7 @@ from catanrl.envs.cppanatron import (
 from catanrl.features.catanatron_utils import get_observation_indices_from_full
 from catanrl.models.heads import FlatPolicyHead
 from catanrl.models.wrappers import PolicyNetworkWrapper, ValueNetworkWrapper
+from catanrl.utils.catanatron_action_space import get_action_array
 from catanrl.utils.seeding import derive_map_and_game_seeds
 
 
@@ -547,6 +550,29 @@ def test_canopy_trajectory_keeps_root_noise_and_uses_visit_argmax_search():
     assert legacy_noise is False
 
 
+def test_canopy_action_count_includes_cppanatron_fused_chance_outcomes():
+    actions = get_action_array(2, "MINI")
+    by_type = {}
+    for index, (action_type, value) in enumerate(actions):
+        by_type.setdefault(action_type, []).append((index, value))
+
+    roll = by_type[ActionType.ROLL][0][0]
+    buy_dev = by_type[ActionType.BUY_DEVELOPMENT_CARD][0][0]
+    robber_without_victim = next(
+        index for index, value in by_type[ActionType.MOVE_ROBBER] if value[1] is None
+    )
+    robber_with_victim = next(
+        index for index, value in by_type[ActionType.MOVE_ROBBER] if value[1] is not None
+    )
+    end_turn = by_type[ActionType.END_TURN][0][0]
+
+    assert _canopy_action_count_increment(roll, 2, "MINI") == 2
+    assert _canopy_action_count_increment(buy_dev, 2, "MINI") == 2
+    assert _canopy_action_count_increment(robber_with_victim, 2, "MINI") == 2
+    assert _canopy_action_count_increment(robber_without_victim, 2, "MINI") == 1
+    assert _canopy_action_count_increment(end_turn, 2, "MINI") == 1
+
+
 def test_native_self_play_game_emits_standard_legal_training_fields():
     action_space_size = 187
     backend = MockInferenceBackend(action_space_size)
@@ -596,8 +622,8 @@ def test_native_self_play_game_emits_standard_legal_training_fields():
 
 def test_terminal_search_value_blend_stays_on_win_loss_scale():
     from catanrl.algorithms.alphazero.native_self_play import (
-        _blend_terminal_search_wdl,
         _blend_terminal_search_value,
+        _blend_terminal_search_wdl,
     )
 
     assert _blend_terminal_search_value(1.0, -0.5, 0.0) == 1.0
@@ -642,6 +668,38 @@ def test_native_playout_cap_keeps_fast_decisions_for_value_training():
     assert winner is None
     assert samples
     assert all(not sample.full_search for sample in samples)
+
+
+def test_native_self_play_action_cap_returns_a_draw_without_changing_rewards():
+    backend = MockInferenceBackend(187)
+    args = {
+        "map_type": "MINI",
+        "num_players": 2,
+        "num_simulations": 1,
+        "c_puct": 1.5,
+        "actor_observation_level": "private",
+        "critic_observation_level": "full",
+        "temperature": 1.0,
+        "final_temperature": 0.1,
+        "target_temperature": 1.0,
+        "temperature_drop_move": 30,
+        "noise_turns": 20,
+        "dirichlet_alpha": 0.3,
+        "dirichlet_frac": 0.25,
+        "vps_to_win": 10,
+        "discard_limit": 7,
+        "turns_limit": 1000,
+        "max_actions": 1,
+    }
+
+    samples, winner = _play_native_self_play_game(
+        episode_seed=101,
+        args_dict=args,
+        inference_backend=backend,
+    )
+
+    assert winner is None
+    assert len(samples) <= 1
 
 
 def test_native_parallel_self_play_streams_and_deduplicates_shared_observations():

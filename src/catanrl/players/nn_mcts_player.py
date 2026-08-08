@@ -6,8 +6,10 @@ import queue
 import random
 import threading
 import time
+import traceback
 from collections import defaultdict
 from concurrent.futures import Future
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field, replace
 from typing import Callable, Literal, Sequence, Tuple
 
@@ -199,10 +201,14 @@ class _RemoteNNMCTSInferenceBackend(_NNMCTSInferenceBackend):
         worker_id: int,
         request_queue: mp.Queue,
         response_queue: mp.Queue,
+        response_timeout_s: float | None = None,
     ) -> None:
         self.worker_id = worker_id
         self.request_queue = request_queue
         self.response_queue = response_queue
+        self.response_timeout_s = (
+            None if response_timeout_s is None else max(0.001, float(response_timeout_s))
+        )
         self._closed = False
         self._next_request_id = 0
         self._request_lock = threading.Lock()
@@ -228,21 +234,42 @@ class _RemoteNNMCTSInferenceBackend(_NNMCTSInferenceBackend):
             future: Future[_LeafEvaluation] = Future()
             self._pending[request_id] = future
 
-        self.request_queue.put(
-            _RemoteLeafEvaluationRequest(
-                request_id=request_id,
-                worker_id=self.worker_id,
-                actor_features=actor_features.astype(np.float32, copy=False),
-                critic_features=critic_features.astype(np.float32, copy=False),
-            )
+        request = _RemoteLeafEvaluationRequest(
+            request_id=request_id,
+            worker_id=self.worker_id,
+            actor_features=actor_features.astype(np.float32, copy=False),
+            critic_features=critic_features.astype(np.float32, copy=False),
         )
-        return future.result()
+        timeout_s = self.response_timeout_s
+        try:
+            self.request_queue.put(request, timeout=timeout_s)
+        except queue.Full as exc:
+            with self._request_lock:
+                self._pending.pop(request_id, None)
+            assert timeout_s is not None
+            raise RuntimeError(
+                f"Timed out submitting NN MCTS inference request {request_id} "
+                f"after {timeout_s:.1f}s."
+            ) from exc
+        try:
+            return future.result(timeout=timeout_s)
+        except FutureTimeoutError as exc:
+            with self._request_lock:
+                self._pending.pop(request_id, None)
+            assert timeout_s is not None
+            raise RuntimeError(
+                f"Timed out waiting for NN MCTS inference request {request_id} "
+                f"after {timeout_s:.1f}s."
+            ) from exc
 
     def close(self) -> None:
         if self._closed:
             return
         self._closed = True
-        self.response_queue.put(None)
+        try:
+            self.response_queue.put_nowait(None)
+        except queue.Full:
+            pass
         self._listener.join(timeout=5.0)
 
     def _listen(self) -> None:
@@ -374,42 +401,56 @@ class _CentralNNMCTSInferenceServer(threading.Thread):
         self.total_evaluations = 0
         self.total_batches = 0
         self._stop_event = threading.Event()
+        self._fatal_error: str | None = None
 
     def run(self) -> None:
-        while not self._stop_event.is_set():
-            try:
-                first = self.request_queue.get(timeout=0.1)
-            except queue.Empty:
-                continue
-
-            if first is None:
-                break
-
-            batch = [first]
-            deadline = time.perf_counter() + (self.max_wait_ms / 1000.0)
-            while len(batch) < self.max_batch_size:
-                remaining = deadline - time.perf_counter()
-                if remaining <= 0:
-                    break
+        try:
+            while not self._stop_event.is_set():
                 try:
-                    item = self.request_queue.get(timeout=remaining)
+                    first = self.request_queue.get(timeout=0.1)
                 except queue.Empty:
-                    break
-                if item is None:
-                    self.request_queue.put(None)
-                    break
-                batch.append(item)
+                    continue
 
-            self._evaluate_batch(batch)
+                if first is None:
+                    break
+
+                batch = [first]
+                deadline = time.perf_counter() + (self.max_wait_ms / 1000.0)
+                while len(batch) < self.max_batch_size:
+                    remaining = deadline - time.perf_counter()
+                    if remaining <= 0:
+                        break
+                    try:
+                        item = self.request_queue.get(timeout=remaining)
+                    except queue.Empty:
+                        break
+                    if item is None:
+                        try:
+                            self.request_queue.put_nowait(None)
+                        except queue.Full:
+                            pass
+                        break
+                    batch.append(item)
+
+                self._evaluate_batch(batch)
+        except BaseException:
+            self._fatal_error = traceback.format_exc()
 
     def stop(self) -> None:
         self._stop_event.set()
-        self.request_queue.put(None)
+        try:
+            self.request_queue.put_nowait(None)
+        except queue.Full:
+            pass
         self.join(timeout=5.0)
 
     def stats(self) -> tuple[int, int]:
         """Return completed neural evaluations and forward batches."""
         return self.total_evaluations, self.total_batches
+
+    def fatal_error(self) -> str | None:
+        """Return a traceback if the central inference thread exited unexpectedly."""
+        return self._fatal_error
 
     def _evaluate_batch(self, batch: list[_RemoteLeafEvaluationRequest]) -> None:
         try:

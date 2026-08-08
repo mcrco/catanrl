@@ -28,11 +28,16 @@ case "$value_init" in
     ;;
 esac
 
-parity_workers=${CATANRL_PARITY_WORKERS:-32}
+# This host has 16 logical CPUs. Oversubscribing it with 32 native game
+# processes made the coordinator less observable and contributed no useful GPU
+# batching headroom.
+parity_workers=${CATANRL_PARITY_WORKERS:-16}
 parity_games=${CATANRL_PARITY_GAMES_PER_ITERATION:-256}
 parity_iterations=${CATANRL_PARITY_ITERATIONS:-60}
 parity_full_simulations=${CATANRL_PARITY_FULL_SIMULATIONS:-1600}
 parity_fast_simulations=${CATANRL_PARITY_FAST_SIMULATIONS:-64}
+parity_stall_timeout=${CATANRL_PARITY_STALL_TIMEOUT_SECONDS:-600}
+parity_inference_timeout=${CATANRL_PARITY_INFERENCE_TIMEOUT_SECONDS:-120}
 wandb_args=()
 case "${CATANRL_PARITY_WANDB:-0}" in
   0) ;;
@@ -86,6 +91,11 @@ env -u VIRTUAL_ENV PYTHONUNBUFFERED=1 uv run python -m catanrl.experiments.train
   --num-workers "$parity_workers" \
   --inference-batch-size 64 \
   --inference-wait-ms 2.0 \
+  --max-actions 2000 \
+  --self-play-stall-timeout-seconds "$parity_stall_timeout" \
+  --inference-response-timeout-seconds "$parity_inference_timeout" \
+  --self-play-result-chunk-size 64 \
+  --self-play-max-attempts 3 \
   --temperature 1.0 \
   --final-temperature 0.1 \
   --target-temperature 1.0 \

@@ -1,11 +1,16 @@
 import multiprocessing as mp
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import pytest
 import torch
 
+from catanrl.algorithms.alphazero.parallel_self_play import (
+    _put_training_result_chunks,
+    run_inference_server_workers,
+)
 from catanrl.models.heads import FlatPolicyHead, WDLValueHead
 from catanrl.models.wrappers import PolicyValueNetworkWrapper
 from catanrl.players.nn_mcts_player import (
@@ -33,6 +38,23 @@ class _CriticModel(torch.nn.Module):
 
     def forward(self, x):
         return x.sum(dim=1, keepdim=True) / 10.0
+
+
+def _silent_game_worker(
+    _worker_id,
+    _request_queue,
+    _response_queue,
+    _result_queue,
+):
+    time.sleep(30.0)
+
+
+class _RecordingQueue:
+    def __init__(self):
+        self.messages = []
+
+    def put(self, message):
+        self.messages.append(message)
 
 
 def test_local_inference_backend_runs_separate_policy_and_critic_models():
@@ -130,6 +152,73 @@ def test_remote_inference_backend_correlates_parallel_leaf_requests():
     for i, result in enumerate(results):
         np.testing.assert_allclose(result.policy_logits, actor_inputs[i] + 10.0)
         np.testing.assert_allclose(result.value, critic_inputs[i].sum())
+
+
+def test_remote_inference_backend_times_out_instead_of_waiting_forever():
+    ctx = mp.get_context("spawn")
+    request_queue = ctx.Queue()
+    response_queue = ctx.Queue()
+    backend = _RemoteNNMCTSInferenceBackend(
+        worker_id=0,
+        request_queue=request_queue,
+        response_queue=response_queue,
+        response_timeout_s=0.05,
+    )
+
+    try:
+        with pytest.raises(RuntimeError, match="Timed out waiting"):
+            backend.evaluate_leaf(
+                np.ones(3, dtype=np.float32),
+                np.ones(2, dtype=np.float32),
+            )
+    finally:
+        backend.close()
+
+
+def test_self_play_coordinator_reports_stalled_workers():
+    error = run_inference_server_workers(
+        policy_model=_PolicyModel(),
+        critic_model=_CriticModel(),
+        model_type="flat",
+        device="cpu",
+        num_workers=1,
+        inference_batch_size=4,
+        inference_wait_ms=1.0,
+        worker_target=_silent_game_worker,
+        worker_args=[()],
+        handle_result=lambda _message: None,
+        total=1,
+        show_tqdm=False,
+        stall_timeout_s=0.1,
+    )
+
+    assert error is not None
+    assert "no worker-result or neural-inference progress" in error
+    assert "0:pid=" in error
+
+
+def test_training_results_are_streamed_in_bounded_chunks():
+    result_queue = _RecordingQueue()
+
+    _put_training_result_chunks(
+        result_queue=result_queue,  # type: ignore[arg-type]
+        worker_id=3,
+        experiences=list(range(5)),  # type: ignore[arg-type]
+        stats={"games": 1, "wins_RED": 1},
+        chunk_size=2,
+    )
+
+    assert [message["experiences"] for message in result_queue.messages] == [
+        [0, 1],
+        [2, 3],
+        [4],
+    ]
+    assert [message["games"] for message in result_queue.messages] == [1, 0, 0]
+    assert [message["stats"] for message in result_queue.messages] == [
+        {"games": 1, "wins_RED": 1},
+        {},
+        {},
+    ]
 
 
 def test_central_inference_server_batches_mixed_worker_requests():

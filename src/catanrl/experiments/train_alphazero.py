@@ -250,6 +250,39 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     search.add_argument("--dirichlet-frac", type=float, default=0.25)
     search.add_argument("--inference-batch-size", type=int, default=64)
     search.add_argument("--inference-wait-ms", type=float, default=2.0)
+    search.add_argument(
+        "--max-actions",
+        type=int,
+        default=0,
+        help=(
+            "Declare native self-play games that reach this many actions a draw; "
+            "0 disables the cap. Actions include forced and chance actions."
+        ),
+    )
+    search.add_argument(
+        "--self-play-stall-timeout-seconds",
+        type=float,
+        default=600.0,
+        help="Abort self-play after this long without a game result or neural evaluation.",
+    )
+    search.add_argument(
+        "--inference-response-timeout-seconds",
+        type=float,
+        default=120.0,
+        help="Maximum wait by a game worker for one central neural evaluation.",
+    )
+    search.add_argument(
+        "--self-play-result-chunk-size",
+        type=int,
+        default=64,
+        help="Maximum training positions serialized in one worker result message.",
+    )
+    search.add_argument(
+        "--self-play-max-attempts",
+        type=int,
+        default=3,
+        help="Maximum attempts for one deterministic self-play batch after worker failures.",
+    )
 
     optimization = parser.add_argument_group("student optimization")
     optimization.add_argument("--buffer-size", type=int, default=50_000)
@@ -342,12 +375,21 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         "batch-size": args.batch_size,
         "buffer-size": args.buffer_size,
         "eval-every-iterations": args.eval_every_iterations,
+        "self-play-max-attempts": args.self_play_max_attempts,
     }
     for name, value in positive.items():
         if value < 1:
             parser.error(f"--{name} must be at least 1")
     if args.optimizer_epochs < 0:
         parser.error("--optimizer-epochs cannot be negative")
+    if args.max_actions < 0:
+        parser.error("--max-actions cannot be negative")
+    if args.self_play_stall_timeout_seconds <= 0.0:
+        parser.error("--self-play-stall-timeout-seconds must be positive")
+    if args.inference_response_timeout_seconds <= 0.0:
+        parser.error("--inference-response-timeout-seconds must be positive")
+    if args.self_play_result_chunk_size < 1:
+        parser.error("--self-play-result-chunk-size must be at least 1")
     for name in ("eval_games", "h2h_games"):
         value = int(getattr(args, name))
         if value < 2 or value % 2:
@@ -1001,6 +1043,11 @@ def main() -> None:
         num_game_workers=args.num_workers,
         inference_batch_size=args.inference_batch_size,
         inference_wait_ms=args.inference_wait_ms,
+        max_actions=args.max_actions,
+        worker_stall_timeout_s=args.self_play_stall_timeout_seconds,
+        inference_response_timeout_s=args.inference_response_timeout_seconds,
+        result_chunk_size=args.self_play_result_chunk_size,
+        self_play_max_attempts=args.self_play_max_attempts,
         buffer_size=args.buffer_size,
         batch_size=args.batch_size,
         policy_lr=args.policy_lr,

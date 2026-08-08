@@ -11,6 +11,7 @@ from typing import Literal
 
 import numpy as np
 import torch
+from catanatron.models.enums import ActionType
 
 from catanrl.envs.cppanatron import NativeGame, NativeMCTSSearch
 from catanrl.envs.cppanatron.puffer_env import TURNS_LIMIT
@@ -24,17 +25,37 @@ from catanrl.players.nn_mcts_player import (
     _NNMCTSInferenceBackend,
     _RemoteNNMCTSInferenceBackend,
 )
+from catanrl.utils.catanatron_action_space import get_action_array
 from catanrl.utils.seeding import derive_map_and_game_seeds, derive_seed
 
 from .native_search import PolicyTarget, run_native_search_policy, step_game_and_reconcile_search
 from .parallel_self_play import (
     SelfPlayExperience,
     _assign_episode_seeds,
+    _put_training_result_chunks,
     run_inference_server_workers,
 )
 
 MapType = Literal["BASE", "MINI", "TOURNAMENT"]
 TrajectoryActionSelection = Literal["visits", "canopy"]
+
+
+def _canopy_action_count_increment(
+    action: int,
+    num_players: int,
+    map_type: MapType,
+) -> int:
+    """Count fused cppanatron random outcomes like Canopy's explicit chance nodes."""
+    action_type, value = get_action_array(num_players, map_type)[action]
+    has_chance_resolution = action_type in {
+        ActionType.ROLL,
+        ActionType.BUY_DEVELOPMENT_CARD,
+    } or (
+        action_type == ActionType.MOVE_ROBBER
+        and isinstance(value, tuple)
+        and value[1] is not None
+    )
+    return 2 if has_chance_resolution else 1
 
 
 @dataclass(frozen=True)
@@ -230,11 +251,16 @@ def _play_native_self_play_game(
         vps_to_win=int(args_dict["vps_to_win"]),
     )
     samples: list[_NativeSelfPlaySample] = []
-    move_number = 0
+    action_count = 0
     search: NativeMCTSSearch | None = None
     turns_limit = int(args_dict.get("turns_limit", TURNS_LIMIT))
+    max_actions = int(args_dict.get("max_actions", 0))
     try:
-        while game.winner is None and game.num_turns < turns_limit:
+        while (
+            game.winner is None
+            and game.num_turns < turns_limit
+            and (max_actions <= 0 or action_count < max_actions)
+        ):
             current_player = game.current_player
             action_mask = game.valid_action_mask()
             valid_actions = np.flatnonzero(action_mask)
@@ -248,7 +274,7 @@ def _play_native_self_play_game(
                 )
                 temperature, add_noise = _trajectory_search_controls(
                     mode=trajectory_action_selection,
-                    move_number=move_number,
+                    move_number=action_count,
                     temperature=float(args_dict["temperature"]),
                     final_temperature=float(args_dict["final_temperature"]),
                     temperature_drop_move=int(args_dict["temperature_drop_move"]),
@@ -259,7 +285,7 @@ def _play_native_self_play_game(
                         game,
                         map_type,
                         c_puct=float(args_dict["c_puct"]),
-                        seed=derive_seed(episode_seed, "native_mcts", move_number),
+                        seed=derive_seed(episode_seed, "native_mcts", action_count),
                         canonical_pruning=bool(args_dict.get("canonical_pruning", False)),
                         search_selection=args_dict.get("search_selection", "puct"),
                         c_visit=float(args_dict.get("c_visit", 50.0)),
@@ -285,7 +311,7 @@ def _play_native_self_play_game(
                     search_seed=derive_seed(
                         episode_seed,
                         "native_mcts",
-                        move_number,
+                        action_count,
                     ),
                     add_noise=add_noise,
                     dirichlet_alpha=float(args_dict["dirichlet_alpha"]),
@@ -310,7 +336,7 @@ def _play_native_self_play_game(
                     search_action=action,
                     improved_policy=policy,
                     valid_actions=valid_actions,
-                    move_number=move_number,
+                    move_number=action_count,
                     explore_actions=int(args_dict.get("explore_actions", 24)),
                     rng=rng,
                 )
@@ -338,7 +364,7 @@ def _play_native_self_play_game(
                 action=action,
                 search=search,
             )
-            move_number += 1
+            action_count += _canopy_action_count_increment(action, num_players, map_type)
         return samples, game.winner
     finally:
         if search is not None:
@@ -358,6 +384,7 @@ def _native_training_worker_main(
         worker_id=worker_id,
         request_queue=request_queue,
         response_queue=response_queue,
+        response_timeout_s=float(args_dict["inference_response_timeout_s"]),
     )
     try:
         for episode_seed in episode_seeds:
@@ -405,14 +432,12 @@ def _native_training_worker_main(
                 )
             stats["full_search_decisions"] += sum(int(sample.full_search) for sample in samples)
             stats["fast_search_decisions"] += sum(int(not sample.full_search) for sample in samples)
-            result_queue.put(
-                {
-                    "worker_id": worker_id,
-                    "done": False,
-                    "games": 1,
-                    "experiences": experiences,
-                    "stats": dict(stats),
-                }
+            _put_training_result_chunks(
+                result_queue=result_queue,
+                worker_id=worker_id,
+                experiences=experiences,
+                stats=dict(stats),
+                chunk_size=int(args_dict["result_chunk_size"]),
             )
         result_queue.put(
             {
@@ -459,6 +484,7 @@ def generate_native_self_play_data(
     device: str | torch.device,
     show_tqdm: bool = True,
     turns_limit: int = TURNS_LIMIT,
+    max_actions: int = 0,
     value_scale: float = 1.0,
     tree_reuse: bool = False,
     canonical_pruning: bool = False,
@@ -471,6 +497,9 @@ def generate_native_self_play_data(
     search_selection: str = "puct",
     trajectory_action_selection: TrajectoryActionSelection = "visits",
     explore_actions: int = 24,
+    worker_stall_timeout_s: float = 600.0,
+    inference_response_timeout_s: float = 120.0,
+    result_chunk_size: int = 64,
 ) -> tuple[list[SelfPlayExperience], dict[str, int]]:
     """Generate the trainer's standard replay records with native C++ MCTS."""
     if prunning:
@@ -493,6 +522,14 @@ def generate_native_self_play_data(
         raise ValueError("trajectory_action_selection must be 'visits' or 'canopy'")
     if explore_actions < 0:
         raise ValueError("explore_actions cannot be negative")
+    if max_actions < 0:
+        raise ValueError("max_actions cannot be negative")
+    if worker_stall_timeout_s <= 0.0:
+        raise ValueError("worker_stall_timeout_s must be positive")
+    if inference_response_timeout_s <= 0.0:
+        raise ValueError("inference_response_timeout_s must be positive")
+    if result_chunk_size < 1:
+        raise ValueError("result_chunk_size must be at least 1")
     if trajectory_action_selection == "canopy":
         if policy_target != "completed-q" or search_selection != "completed-q":
             raise ValueError("Canopy trajectory selection requires completed-Q search and targets")
@@ -523,6 +560,7 @@ def generate_native_self_play_data(
         "vps_to_win": vps_to_win,
         "discard_limit": discard_limit,
         "turns_limit": turns_limit,
+        "max_actions": max_actions,
         "value_scale": value_scale,
         "tree_reuse": tree_reuse,
         "canonical_pruning": canonical_pruning,
@@ -535,6 +573,8 @@ def generate_native_self_play_data(
         "search_selection": search_selection,
         "trajectory_action_selection": trajectory_action_selection,
         "explore_actions": explore_actions,
+        "inference_response_timeout_s": inference_response_timeout_s,
+        "result_chunk_size": result_chunk_size,
     }
     experiences: list[SelfPlayExperience] = []
     stats: Counter[str] = Counter()
@@ -576,6 +616,7 @@ def generate_native_self_play_data(
         handle_result=handle_result,
         total=num_games,
         show_tqdm=show_tqdm,
+        stall_timeout_s=worker_stall_timeout_s,
     )
     if first_error is not None:
         raise RuntimeError(f"Native self-play worker failed:\n{first_error}")

@@ -423,7 +423,37 @@ def test_collect_self_play_can_dispatch_to_native_backend(
     assert called["search_selection"] == "puct"
     assert called["trajectory_action_selection"] == "visits"
     assert called["explore_actions"] == 24
+    assert called["max_actions"] == 0
+    assert called["worker_stall_timeout_s"] == 600.0
+    assert called["inference_response_timeout_s"] == 120.0
+    assert called["result_chunk_size"] == 64
     assert stats["experiences"] == 1.0
+    assert stats["self_play_attempts"] == 1.0
+    assert len(trainer.replay_buffer) == 1
+
+
+def test_collect_self_play_retries_the_same_batch_without_partial_replay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trainer = _trainer()
+    trainer.config.self_play_max_attempts = 3
+    seeds = []
+
+    def flaky_generate_self_play_data(**kwargs):
+        seeds.append(kwargs["seed"])
+        if len(seeds) < 3:
+            raise RuntimeError("simulated worker stall")
+        return [_experience(2, 1.0)], {"games": 1}
+
+    monkeypatch.setattr(
+        "catanrl.algorithms.alphazero.trainer.generate_self_play_data",
+        flaky_generate_self_play_data,
+    )
+
+    stats = trainer.collect_self_play(1)
+
+    assert seeds == [seeds[0], seeds[0], seeds[0]]
+    assert stats["self_play_attempts"] == 3.0
     assert len(trainer.replay_buffer) == 1
 
 
@@ -523,6 +553,33 @@ def test_cli_replay_epochs_override_is_opt_in() -> None:
 
     assert fixed_steps.optimizer_epochs == 0
     assert replay_epochs.optimizer_epochs == 2
+
+
+def test_cli_accepts_bounded_native_self_play_controls() -> None:
+    args = parse_args(
+        [
+            "--mode",
+            "iterate",
+            "--config",
+            "model.yaml",
+            "--max-actions",
+            "2000",
+            "--self-play-stall-timeout-seconds",
+            "300",
+            "--inference-response-timeout-seconds",
+            "60",
+            "--self-play-result-chunk-size",
+            "32",
+            "--self-play-max-attempts",
+            "4",
+        ]
+    )
+
+    assert args.max_actions == 2000
+    assert args.self_play_stall_timeout_seconds == 300.0
+    assert args.inference_response_timeout_seconds == 60.0
+    assert args.self_play_result_chunk_size == 32
+    assert args.self_play_max_attempts == 4
 
 
 def test_warm_start_can_keep_policy_but_reset_shared_value_head(tmp_path) -> None:

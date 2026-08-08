@@ -88,6 +88,11 @@ class AlphaZeroConfig:
     num_game_workers: int = 1
     inference_batch_size: int = 64
     inference_wait_ms: float = 2.0
+    max_actions: int = 0
+    worker_stall_timeout_s: float = 600.0
+    inference_response_timeout_s: float = 120.0
+    result_chunk_size: int = 64
+    self_play_max_attempts: int = 3
 
     # Student optimization.
     buffer_size: int = 50_000
@@ -224,6 +229,16 @@ class AlphaZeroTrainer:
             raise ValueError("trajectory_action_selection must be 'visits' or 'canopy'.")
         if config.explore_actions < 0:
             raise ValueError("explore_actions cannot be negative.")
+        if config.max_actions < 0:
+            raise ValueError("max_actions cannot be negative.")
+        if config.worker_stall_timeout_s <= 0.0:
+            raise ValueError("worker_stall_timeout_s must be positive.")
+        if config.inference_response_timeout_s <= 0.0:
+            raise ValueError("inference_response_timeout_s must be positive.")
+        if config.result_chunk_size < 1:
+            raise ValueError("result_chunk_size must be at least 1.")
+        if config.self_play_max_attempts < 1:
+            raise ValueError("self_play_max_attempts must be at least 1.")
         if config.trajectory_action_selection == "canopy":
             if config.self_play_backend != "cppanatron":
                 raise ValueError("Canopy trajectory selection requires cppanatron self-play.")
@@ -476,6 +491,9 @@ class AlphaZeroTrainer:
             discard_limit=self.config.discard_limit,
             seed=base_seed,
             device=self.device,
+            worker_stall_timeout_s=self.config.worker_stall_timeout_s,
+            inference_response_timeout_s=self.config.inference_response_timeout_s,
+            result_chunk_size=self.config.result_chunk_size,
         )
         if self.config.self_play_backend == "cppanatron":
             self_play_kwargs.update(
@@ -491,8 +509,21 @@ class AlphaZeroTrainer:
                 c_scale=self.config.c_scale,
                 trajectory_action_selection=self.config.trajectory_action_selection,
                 explore_actions=self.config.explore_actions,
+                max_actions=self.config.max_actions,
             )
-        experiences, stats = self_play_generator(**self_play_kwargs)
+        attempts = 0
+        while True:
+            attempts += 1
+            try:
+                experiences, stats = self_play_generator(**self_play_kwargs)
+                break
+            except RuntimeError:
+                if attempts >= self.config.self_play_max_attempts:
+                    raise
+                print(
+                    "Self-play collection failed; restarting the deterministic "
+                    f"batch (attempt {attempts + 1}/{self.config.self_play_max_attempts})."
+                )
         self.replay_buffer.extend(experiences)
         if self.config.offload_inactive_models:
             self._move_teacher(self.cpu_device)
@@ -502,6 +533,7 @@ class AlphaZeroTrainer:
             "experiences": float(len(experiences)),
             "replay_size": float(len(self.replay_buffer)),
             "search_value_weight": float(search_value_weight),
+            "self_play_attempts": float(attempts),
         }
 
     # Retain the old method name for code using the trainer programmatically.

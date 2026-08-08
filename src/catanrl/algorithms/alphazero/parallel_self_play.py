@@ -59,6 +59,8 @@ def run_inference_server_workers(
     handle_result: Callable[[dict], None],
     total: int,
     show_tqdm: bool = True,
+    stall_timeout_s: float = 600.0,
+    result_queue_size: int | None = None,
 ) -> str | None:
     """Spawn ``num_workers`` game-worker processes feeding one central batched
     inference server, collect their results, and return the first error string
@@ -81,7 +83,13 @@ def run_inference_server_workers(
     # central inference backend responds into this queue (ordered in terms of
     # requests received per worker).
     response_queues: list[mp.Queue] = [mp_ctx.Queue(maxsize=512) for _ in range(num_workers)]
-    result_queue: mp.Queue = mp_ctx.Queue()
+    result_queue: mp.Queue = mp_ctx.Queue(
+        maxsize=(
+            max(16, num_workers * 2)
+            if result_queue_size is None
+            else max(1, int(result_queue_size))
+        )
+    )
     inference_server = _CentralNNMCTSInferenceServer(
         policy_model=policy_model,
         critic_model=critic_model,
@@ -111,6 +119,15 @@ def run_inference_server_workers(
     first_error: str | None = None
     inference_started = time.perf_counter()
     last_status = inference_started
+    last_activity = inference_started
+    last_evaluations = 0
+
+    def worker_state_summary() -> str:
+        return ", ".join(
+            f"{worker_id}:pid={process.pid},alive={process.is_alive()},exit={process.exitcode}"
+            for worker_id, process in enumerate(processes)
+            if worker_id in pending_workers
+        )
 
     inference_server.start()
     try:
@@ -122,7 +139,9 @@ def run_inference_server_workers(
                 # collect responses from workers
                 message = result_queue.get(timeout=0.5)
             except queue.Empty:
-                # 500ms has passed without any reponse, check for errors in workers.
+                # 500ms has passed without any response; check every component
+                # before continuing so a dead inference thread cannot strand all
+                # game workers on unresolved futures.
                 for worker_id in list(pending_workers):
                     exitcode = processes[worker_id].exitcode
                     if exitcode is not None:
@@ -135,8 +154,26 @@ def run_inference_server_workers(
                 if first_error is not None:
                     break
                 now = time.perf_counter()
+                evaluations, batches = inference_server.stats()
+                if evaluations > last_evaluations:
+                    last_activity = now
+                    last_evaluations = evaluations
+                if not inference_server.is_alive():
+                    detail = inference_server.fatal_error() or "no Python traceback available"
+                    first_error = (
+                        "Central NN MCTS inference thread exited while workers were pending. "
+                        f"Workers: {worker_state_summary()}\n{detail}"
+                    )
+                    break
+                if stall_timeout_s > 0.0 and now - last_activity >= stall_timeout_s:
+                    first_error = (
+                        "Self-play made no worker-result or neural-inference progress for "
+                        f"{now - last_activity:.1f}s (limit={stall_timeout_s:.1f}s; "
+                        f"evaluations={evaluations}, batches={batches}). "
+                        f"Workers: {worker_state_summary()}"
+                    )
+                    break
                 if show_tqdm and now - last_status >= 30.0:
-                    evaluations, batches = inference_server.stats()
                     elapsed = max(now - inference_started, 1e-9)
                     average_batch = evaluations / batches if batches else 0.0
                     progress.set_postfix_str(
@@ -147,6 +184,7 @@ def run_inference_server_workers(
                 continue
 
             # process message received from worker.
+            last_activity = time.perf_counter()
             worker_id = int(message["worker_id"])
             if worker_id not in pending_workers:
                 continue
@@ -190,6 +228,32 @@ class SelfPlayExperience:
     value: float
     full_search: bool = True
     value_wdl: np.ndarray | None = None
+
+
+def _put_training_result_chunks(
+    *,
+    result_queue: mp.Queue,
+    worker_id: int,
+    experiences: Sequence[tuple],
+    stats: dict[str, int],
+    chunk_size: int,
+) -> None:
+    """Bound the size of result-pipe messages while preserving game accounting."""
+    if chunk_size < 1:
+        raise ValueError("result chunk size must be at least 1")
+    chunks = [
+        experiences[start : start + chunk_size] for start in range(0, len(experiences), chunk_size)
+    ] or [[]]
+    for index, chunk in enumerate(chunks):
+        result_queue.put(
+            {
+                "worker_id": worker_id,
+                "done": False,
+                "games": 1 if index == 0 else 0,
+                "experiences": list(chunk),
+                "stats": stats if index == 0 else {},
+            }
+        )
 
 
 class _TrainingSelfPlayPlayer(NNMCTSPlayer):
@@ -299,6 +363,7 @@ def _training_worker_main(
         worker_id=worker_id,
         request_queue=request_queue,
         response_queue=response_queue,
+        response_timeout_s=float(args_dict["inference_response_timeout_s"]),
     )
     try:
         players = _build_training_seats(args_dict, inference_backend)
@@ -342,14 +407,12 @@ def _training_worker_main(
                 for actor_state, policy, critic_state, action_mask in player.samples:
                     experiences.append((actor_state, critic_state, policy, action_mask, value))
 
-            result_queue.put(
-                {
-                    "worker_id": worker_id,
-                    "done": False,
-                    "games": 1,
-                    "experiences": experiences,
-                    "stats": dict(stats),
-                }
+            _put_training_result_chunks(
+                result_queue=result_queue,
+                worker_id=worker_id,
+                experiences=experiences,
+                stats=dict(stats),
+                chunk_size=int(args_dict["result_chunk_size"]),
             )
         result_queue.put(
             {
@@ -403,6 +466,9 @@ def generate_self_play_data(
     seed: int,
     device: str | torch.device,
     show_tqdm: bool = True,
+    worker_stall_timeout_s: float = 600.0,
+    inference_response_timeout_s: float = 120.0,
+    result_chunk_size: int = 64,
 ) -> tuple[list[SelfPlayExperience], dict[str, int]]:
     """Generate AlphaZero self-play training data across worker processes.
 
@@ -411,6 +477,12 @@ def generate_self_play_data(
     """
     if num_games <= 0:
         return [], {}
+    if worker_stall_timeout_s <= 0.0:
+        raise ValueError("worker_stall_timeout_s must be positive")
+    if inference_response_timeout_s <= 0.0:
+        raise ValueError("inference_response_timeout_s must be positive")
+    if result_chunk_size < 1:
+        raise ValueError("result_chunk_size must be at least 1")
 
     assignments = [a for a in _assign_episode_seeds(num_games, num_game_workers, seed) if a]
     num_workers = len(assignments)
@@ -434,6 +506,8 @@ def generate_self_play_data(
         "noise_turns": noise_turns,
         "vps_to_win": vps_to_win,
         "discard_limit": discard_limit,
+        "inference_response_timeout_s": inference_response_timeout_s,
+        "result_chunk_size": result_chunk_size,
     }
     worker_args = [(assignment, args_dict) for assignment in assignments]
 
@@ -467,6 +541,7 @@ def generate_self_play_data(
         handle_result=handle_result,
         total=num_games,
         show_tqdm=show_tqdm,
+        stall_timeout_s=worker_stall_timeout_s,
     )
     if first_error is not None:
         raise RuntimeError(f"Self-play worker failed:\n{first_error}")
