@@ -537,8 +537,7 @@ class AlphaZeroTrainer:
         else:
             search_value_weight = self.config.search_value_weight_max * min(
                 1.0,
-                (self_play_iteration + 1)
-                / self.config.search_value_weight_ramp_iterations,
+                (self_play_iteration + 1) / self.config.search_value_weight_ramp_iterations,
             )
 
         self_play_generator = (
@@ -601,12 +600,15 @@ class AlphaZeroTrainer:
             try:
                 experiences, stats = self_play_generator(**self_play_kwargs)
                 break
-            except RuntimeError:
+            except RuntimeError as error:
                 if attempts >= self.config.self_play_max_attempts:
                     raise
                 print(
-                    "Self-play collection failed; restarting the deterministic "
-                    f"batch (attempt {attempts + 1}/{self.config.self_play_max_attempts})."
+                    f"Self-play collection attempt {attempts}/"
+                    f"{self.config.self_play_max_attempts} failed:\n{error}\n"
+                    "Restarting the deterministic batch "
+                    f"(attempt {attempts + 1}/{self.config.self_play_max_attempts}).",
+                    flush=True,
                 )
         self.replay_buffer.extend(experiences)
         if self.config.offload_inactive_models:

@@ -533,6 +533,7 @@ def test_collect_self_play_can_dispatch_to_native_backend(
 
 def test_collect_self_play_retries_the_same_batch_without_partial_replay(
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     trainer = _trainer()
     trainer.config.self_play_max_attempts = 3
@@ -550,10 +551,14 @@ def test_collect_self_play_retries_the_same_batch_without_partial_replay(
     )
 
     stats = trainer.collect_self_play(1)
+    output = capsys.readouterr().out
 
     assert seeds == [seeds[0], seeds[0], seeds[0]]
     assert stats["self_play_attempts"] == 3.0
     assert len(trainer.replay_buffer) == 1
+    assert output.count("simulated worker stall") == 2
+    assert "attempt 1/3 failed" in output
+    assert "attempt 2/3 failed" in output
 
 
 def test_native_search_value_weight_ramps_by_self_play_iteration(
