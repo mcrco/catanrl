@@ -21,6 +21,7 @@ search_games_per_seat=${CATANRL_PARITY_SEARCH_EVAL_GAMES_PER_SEAT:-100}
 # noninferiority margin at 95% confidence near a 50% win rate.
 search_reference_games_per_seat=${CATANRL_PARITY_SEARCH_REFERENCE_EVAL_GAMES_PER_SEAT:-400}
 search_workers=${CATANRL_PARITY_EVAL_WORKERS:-16}
+search_games_per_worker=${CATANRL_PARITY_EVAL_GAMES_PER_WORKER:-2}
 search_simulations=${CATANRL_PARITY_FULL_SIMULATIONS:-1600}
 raw_wandb_args=()
 reference_wandb_args=()
@@ -102,6 +103,7 @@ env -u VIRTUAL_ENV PYTHONUNBUFFERED=1 uv run python scripts/eval_native_mcts_bud
   --games-per-seat "$search_games_per_seat" \
   --game-opponent value \
   --num-workers "$search_workers" \
+  --games-per-worker "$search_games_per_worker" \
   --inference-batch-size 64 \
   --inference-wait-ms 2.0 \
   --c-puct 2.5 \
@@ -126,6 +128,7 @@ env -u VIRTUAL_ENV PYTHONUNBUFFERED=1 uv run python scripts/eval_native_mcts_bud
   --games-per-seat "$search_reference_games_per_seat" \
   --game-opponent random \
   --num-workers "$search_workers" \
+  --games-per-worker "$search_games_per_worker" \
   --inference-batch-size 64 \
   --inference-wait-ms 2.0 \
   --c-puct 2.5 \

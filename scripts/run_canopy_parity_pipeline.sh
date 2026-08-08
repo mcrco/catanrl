@@ -54,6 +54,7 @@ if [[ "${CATANRL_PARITY_RUN_EVAL:-1}" == "1" ]]; then
     --games-per-seat "${CATANRL_PARITY_SCREEN_GAMES_PER_SEAT:-24}" \
     --top-k "${CATANRL_PARITY_SCREEN_TOP_K:-3}" \
     --num-workers "${CATANRL_PARITY_EVAL_WORKERS:-16}" \
+    --games-per-worker "${CATANRL_PARITY_EVAL_GAMES_PER_WORKER:-2}" \
     --max-actions 2000 \
     --output "${screen_root}/results.json" \
     --selected-output "$selected_checkpoint_path" \

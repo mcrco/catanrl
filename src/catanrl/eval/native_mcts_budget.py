@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import multiprocessing as mp
 import traceback
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
@@ -480,17 +481,16 @@ def _game_worker_main(
     )
     try:
         actor_indices, critic_indices = _indices(args_dict)
-        for mcts_seat, episode_seed in scenarios:
+        for record, diagnostics, calibration in _iter_budget_game_results(
+            scenarios=scenarios,
+            budget=budget,
+            args_dict=args_dict,
+            actor_indices=actor_indices,
+            critic_indices=critic_indices,
+            inference_backend=inference_backend,
+            game_concurrency=int(args_dict.get("games_per_worker", 1)),
+        ):
             result = NativeBudgetGameResult()
-            record, diagnostics, calibration = _play_budget_game(
-                episode_seed=episode_seed,
-                mcts_seat=mcts_seat,
-                budget=budget,
-                args_dict=args_dict,
-                actor_indices=actor_indices,
-                critic_indices=critic_indices,
-                inference_backend=inference_backend,
-            )
             result.game_records.append(record)
             result.diagnostics.merge(diagnostics.payload())
             result.calibration.merge(calibration.payload())
@@ -522,6 +522,71 @@ def _game_worker_main(
         result_queue.put({"worker_id": worker_id, "error": traceback.format_exc()})
     finally:
         inference_backend.close()
+
+
+def _iter_budget_game_results(
+    *,
+    scenarios: Sequence[tuple[int, int]],
+    budget: int,
+    args_dict: dict[str, Any],
+    actor_indices: np.ndarray,
+    critic_indices: np.ndarray,
+    inference_backend: _RemoteNNMCTSInferenceBackend,
+    game_concurrency: int,
+) -> Iterator[
+    tuple[
+        dict[str, Any],
+        SearchDiagnosticsAccumulator,
+        CriticCalibrationAccumulator,
+    ]
+]:
+    """Yield games while multiplexing independent searches in one process."""
+    if game_concurrency < 1:
+        raise ValueError("game_concurrency must be at least 1")
+
+    def play(
+        scenario: tuple[int, int],
+    ) -> tuple[
+        dict[str, Any],
+        SearchDiagnosticsAccumulator,
+        CriticCalibrationAccumulator,
+    ]:
+        mcts_seat, episode_seed = scenario
+        return _play_budget_game(
+            episode_seed=episode_seed,
+            mcts_seat=mcts_seat,
+            budget=budget,
+            args_dict=args_dict,
+            actor_indices=actor_indices,
+            critic_indices=critic_indices,
+            inference_backend=inference_backend,
+        )
+
+    if game_concurrency == 1 or len(scenarios) <= 1:
+        for scenario in scenarios:
+            yield play(scenario)
+        return
+
+    executor = ThreadPoolExecutor(
+        max_workers=min(game_concurrency, len(scenarios)),
+        thread_name_prefix="native-budget-game",
+    )
+    futures: list[
+        Future[
+            tuple[
+                dict[str, Any],
+                SearchDiagnosticsAccumulator,
+                CriticCalibrationAccumulator,
+            ]
+        ]
+    ] = [executor.submit(play, scenario) for scenario in scenarios]
+    try:
+        for future in as_completed(futures):
+            yield future.result()
+    finally:
+        # The coordinator terminates a failed worker; report errors immediately
+        # instead of waiting for another long search game to finish.
+        executor.shutdown(wait=False, cancel_futures=True)
 
 
 def _probe_worker_main(
@@ -682,6 +747,7 @@ def run_native_budget_games(
     budget: int,
     games_per_seat: int,
     num_workers: int,
+    games_per_worker: int = 1,
     inference_batch_size: int,
     inference_wait_ms: float,
     c_puct: float,
@@ -706,6 +772,8 @@ def run_native_budget_games(
         raise ValueError("budget must be at least 1")
     if games_per_seat < 1:
         raise ValueError("games_per_seat must be at least 1")
+    if games_per_worker < 1:
+        raise ValueError("games_per_worker must be at least 1")
     if max_actions < 0:
         raise ValueError("max_actions cannot be negative")
     if game_opponent not in ("random", "raw", "value"):
@@ -745,6 +813,7 @@ def run_native_budget_games(
         root_dirichlet_alpha=root_dirichlet_alpha,
         root_dirichlet_fraction=root_dirichlet_fraction,
     )
+    args_dict["games_per_worker"] = games_per_worker
     aggregate = NativeBudgetGameResult()
 
     def handle_result(message: dict[str, Any]) -> None:

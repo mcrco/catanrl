@@ -30,6 +30,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--games-per-seat", type=int, default=24)
     parser.add_argument("--top-k", type=int, default=3)
     parser.add_argument("--num-workers", type=int, default=16)
+    parser.add_argument("--games-per-worker", type=int, default=1)
     parser.add_argument("--inference-batch-size", type=int, default=64)
     parser.add_argument("--inference-wait-ms", type=float, default=2.0)
     parser.add_argument("--seed", type=int, default=41051)
@@ -44,7 +45,7 @@ def _parse_args() -> argparse.Namespace:
         help="Optional text file receiving the top checkpoint selector.",
     )
     args = parser.parse_args()
-    for name in ("budget", "games_per_seat", "top_k", "num_workers"):
+    for name in ("budget", "games_per_seat", "top_k", "num_workers", "games_per_worker"):
         if getattr(args, name) < 1:
             parser.error(f"--{name.replace('_', '-')} must be at least 1")
     if args.max_actions < 0:
@@ -102,6 +103,7 @@ def main() -> None:
             "c_scale": 1.0,
             "root_noise": False,
             "max_actions": args.max_actions,
+            "games_per_worker": args.games_per_worker,
         },
         "sweeps": {},
         "ranking": [],
@@ -137,6 +139,7 @@ def main() -> None:
             budget=args.budget,
             games_per_seat=args.games_per_seat,
             num_workers=args.num_workers,
+            games_per_worker=args.games_per_worker,
             inference_batch_size=args.inference_batch_size,
             inference_wait_ms=args.inference_wait_ms,
             c_puct=2.5,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from types import SimpleNamespace
 
 import numpy as np
@@ -13,6 +14,7 @@ from catanrl.eval.native_mcts_budget import (
     SearchDiagnosticsAccumulator,
     _game_opponent_action,
     _game_worker_main,
+    _iter_budget_game_results,
     _play_budget_game,
     _search,
     run_native_budget_games,
@@ -297,6 +299,50 @@ def test_native_budget_worker_streams_each_game(monkeypatch):
         [{"win": True, "seat": "second", "episode_seed": 12}],
     ]
     assert result_queue.messages[-1]["result"]["game_records"] == []
+
+
+def test_native_budget_worker_multiplexes_games(monkeypatch):
+    lock = threading.Lock()
+    release = threading.Event()
+    active = 0
+    maximum_active = 0
+    started = 0
+
+    def _play_budget_game(**kwargs):
+        nonlocal active, maximum_active, started
+        with lock:
+            active += 1
+            started += 1
+            maximum_active = max(maximum_active, active)
+            if started == 2:
+                release.set()
+        assert release.wait(timeout=2.0)
+        with lock:
+            active -= 1
+        return {"episode_seed": kwargs["episode_seed"]}, None, None
+
+    monkeypatch.setattr(
+        "catanrl.eval.native_mcts_budget._play_budget_game",
+        _play_budget_game,
+    )
+    results = list(
+        _iter_budget_game_results(
+            scenarios=((0, 11), (1, 13), (0, 17)),
+            budget=1600,
+            args_dict={},
+            actor_indices=np.array([0]),
+            critic_indices=np.array([0]),
+            inference_backend=object(),  # type: ignore[arg-type]
+            game_concurrency=2,
+        )
+    )
+
+    assert maximum_active == 2
+    assert sorted(record["episode_seed"] for record, _diagnostics, _calibration in results) == [
+        11,
+        13,
+        17,
+    ]
 
 
 def test_native_budget_game_enforces_canopy_action_cap(monkeypatch):

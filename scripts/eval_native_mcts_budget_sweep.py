@@ -57,6 +57,12 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--num-workers", type=int, default=16)
+    parser.add_argument(
+        "--games-per-worker",
+        type=int,
+        default=1,
+        help="Concurrent native games multiplexed inside each worker process",
+    )
     parser.add_argument("--inference-batch-size", type=int, default=64)
     parser.add_argument("--inference-wait-ms", type=float, default=2.0)
     parser.add_argument("--c-puct", type=float, default=1.5)
@@ -136,6 +142,8 @@ def _parse_args() -> argparse.Namespace:
         parser.error("Cannot combine --skip-probes and --skip-games")
     if args.max_actions < 0:
         parser.error("--max-actions cannot be negative")
+    if args.games_per_worker < 1:
+        parser.error("--games-per-worker must be at least 1")
     return args
 
 
@@ -207,6 +215,7 @@ def main() -> None:
         "games_per_seat": args.games_per_seat,
         "game_opponent": args.game_opponent,
         "num_workers": args.num_workers,
+        "games_per_worker": args.games_per_worker,
         "inference_batch_size": args.inference_batch_size,
         "inference_wait_ms": args.inference_wait_ms,
         "c_puct": args.c_puct,
@@ -322,6 +331,7 @@ def main() -> None:
                     budget=budget,
                     games_per_seat=args.games_per_seat,
                     num_workers=args.num_workers,
+                    games_per_worker=args.games_per_worker,
                     inference_batch_size=args.inference_batch_size,
                     inference_wait_ms=args.inference_wait_ms,
                     c_puct=args.c_puct,
