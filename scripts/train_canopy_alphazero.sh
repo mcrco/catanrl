@@ -32,7 +32,10 @@ esac
 # processes made the coordinator less observable and contributed no useful GPU
 # batching headroom.
 parity_workers=${CATANRL_PARITY_WORKERS:-16}
-parity_games=${CATANRL_PARITY_GAMES_PER_ITERATION:-256}
+# Canopy's Nexus-v3 preset collects 150k fresh decision samples per iteration.
+# Native Catan self-play currently yields about 250 trainable decisions per game,
+# so 600 games matches that data budget without changing game or reward semantics.
+parity_games=${CATANRL_PARITY_GAMES_PER_ITERATION:-600}
 parity_iterations=${CATANRL_PARITY_ITERATIONS:-60}
 parity_full_simulations=${CATANRL_PARITY_FULL_SIMULATIONS:-1600}
 parity_fast_simulations=${CATANRL_PARITY_FAST_SIMULATIONS:-64}
