@@ -3,26 +3,14 @@ import os
 
 import wandb
 
-from ..envs.puffer.common import create_opponents
-from .architecture_config import (
-    add_config_argument,
-    architecture_train_config_fields,
-    validate_player_count,
-)
-from .common_args import (
-    DEFAULT_MAX_GRAD_NORM,
-    add_device_argument,
-    add_experiment_name_argument,
-    add_reward_function_argument,
-    add_wandb_arguments,
-)
 from ..algorithms.imitation_learning.dagger import train as dagger_train
 from ..algorithms.imitation_learning.dataset import EvictionStrategy
+from ..envs.puffer.common import create_opponents
 from ..experiment_store import (
-    GameConfig,
     KIND_POLICY,
     KIND_POLICY_VALUE,
     KIND_VALUE,
+    GameConfig,
     add_load_from_experiment_arguments,
     add_resume_argument,
     default_checkpoints_dir,
@@ -35,6 +23,18 @@ from ..experiment_store import (
     wandb_grouping_kwargs,
 )
 from ..utils.catanatron_action_space import get_action_space_size
+from .architecture_config import (
+    add_config_argument,
+    architecture_train_config_fields,
+    validate_player_count,
+)
+from .common_args import (
+    DEFAULT_MAX_GRAD_NORM,
+    add_device_argument,
+    add_experiment_name_argument,
+    add_reward_function_argument,
+    add_wandb_arguments,
+)
 
 
 def _wandb_info(args: argparse.Namespace) -> dict:
@@ -241,9 +241,7 @@ def main():
         if args.wandb and not args.wandb_run_name:
             args.wandb_run_name = resume.wandb_run_name or experiment_name
     else:
-        experiment_name = make_experiment_name(
-            "dagger", args.wandb_run_name, args.experiment_name
-        )
+        experiment_name = make_experiment_name("dagger", args.wandb_run_name, args.experiment_name)
         if args.wandb and not args.wandb_run_name:
             args.wandb_run_name = experiment_name
 
@@ -324,6 +322,10 @@ def main():
         xdim_cnn_kernel_size=arch.xdim_cnn_kernel_size,
         xdim_policy_fusion_hidden_dim=arch.xdim_policy_fusion_hidden_dim,
         xdim_critic_fusion_hidden_dim=arch.xdim_critic_fusion_hidden_dim,
+        graph_hidden_dim=arch.graph_hidden_dim,
+        graph_global_hidden_dim=arch.graph_global_hidden_dim,
+        graph_num_layers=arch.graph_num_layers,
+        graph_head_hidden_dim=arch.graph_head_hidden_dim,
         load_policy_weights=warm_start.checkpoints.policy if warm_start else None,
         load_critic_weights=warm_start.checkpoints.critic if warm_start else None,
         n_iterations=args.iterations,

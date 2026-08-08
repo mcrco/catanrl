@@ -14,14 +14,14 @@ from typing import Any, Callable, Dict, List, Literal, Optional, Sequence, Tuple
 import numpy as np
 import torch
 import torch.nn.functional as F
+import wandb
 from sklearn.metrics import f1_score
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-import wandb
-
 from catanrl.algorithms.common import PolicyAgent, mask_action_logits
 from catanrl.models.backbone_builder import build_backbone_config
+
 from ...envs import decode_puffer_batch, extract_expert_actions_from_infos
 from ...envs.cppanatron.puffer_env import make_cppanatron_vectorized_envs
 from ...envs.puffer.single_agent_env import compute_single_agent_dims, make_puffer_vectorized_envs
@@ -32,6 +32,17 @@ from ...eval.dagger_eval import (
     is_better_policy_checkpoint,
 )
 from ...eval.training_eval import eval_policy_value_against_baselines
+from ...features.catanatron_utils import (
+    ActorObservationLevel,
+    CriticObservationLevel,
+    get_actor_indices_from_full,
+    get_observation_indices_from_full,
+)
+from ...models.inference_utils import (
+    forward_policy_value,
+    forward_shared_policy_value_training,
+    values_to_wdl_targets,
+)
 from ...models.models import (
     build_flat_policy_network,
     build_flat_policy_value_network,
@@ -39,18 +50,7 @@ from ...models.models import (
     build_hierarchical_policy_value_network,
     build_value_network,
 )
-from ...models.inference_utils import (
-    forward_policy_value,
-    forward_shared_policy_value_training,
-    values_to_wdl_targets,
-)
 from ...models.wrappers import PolicyNetworkWrapper, PolicyValueNetworkWrapper, ValueNetworkWrapper
-from ...features.catanatron_utils import (
-    ActorObservationLevel,
-    CriticObservationLevel,
-    get_actor_indices_from_full,
-    get_observation_indices_from_full,
-)
 from ...utils.catanatron_action_space import get_action_array, get_action_space_size
 from ...utils.seeding import derive_seed
 from .dataset import AggregatedDataset, EvictionStrategy
@@ -372,12 +372,14 @@ def _collect_dagger_rollouts_vectorized(
         raise RuntimeError("Expected critic observations when bootstrapping DAgger returns.")
 
     with torch.no_grad():
-        last_critic_tensor = torch.from_numpy(
-            last_critic_states[:, critic_observation_indices]
-        ).float().to(device)
-        bootstrap_values = _predict_critic_values(
-            critic_model, last_critic_tensor, policy_agent.model_type
-        ).cpu().numpy()
+        last_critic_tensor = (
+            torch.from_numpy(last_critic_states[:, critic_observation_indices]).float().to(device)
+        )
+        bootstrap_values = (
+            _predict_critic_values(critic_model, last_critic_tensor, policy_agent.model_type)
+            .cpu()
+            .numpy()
+        )
     bootstrap_values = bootstrap_values.astype(np.float32, copy=False)
     bootstrap_values = np.where(dones_tmj[-1], 0.0, bootstrap_values)
     if was_training:
@@ -495,10 +497,8 @@ def _train_on_dataset(
                     policy_optimizer.zero_grad()
                     if not isinstance(policy_agent.model, PolicyValueNetworkWrapper):
                         raise TypeError("Shared DAgger training requires a policy-value model.")
-                    policy_logits, value_pred, value_logits = (
-                        forward_shared_policy_value_training(
-                            policy_agent.model, actor_features, model_type
-                        )
+                    policy_logits, value_pred, value_logits = forward_shared_policy_value_training(
+                        policy_agent.model, actor_features, model_type
                     )
                     masked_policy_logits, _ = mask_action_logits(
                         policy_logits,
@@ -515,9 +515,11 @@ def _train_on_dataset(
 
                     if value_logits is not None:
                         value_targets = values_to_wdl_targets(returns)
-                        value_loss = -(
-                            value_targets * torch.log_softmax(value_logits, dim=-1)
-                        ).sum(dim=-1).mean()
+                        value_loss = (
+                            -(value_targets * torch.log_softmax(value_logits, dim=-1))
+                            .sum(dim=-1)
+                            .mean()
+                        )
                     else:
                         value_loss = F.mse_loss(value_pred, returns)
                     (policy_loss + value_loss).backward()
@@ -548,9 +550,7 @@ def _train_on_dataset(
                         policy_loss = torch.tensor(0.0, device=device)
 
                     critic_optimizer.zero_grad()
-                    value_pred = _predict_critic_values(
-                        critic_model, critic_features, model_type
-                    )
+                    value_pred = _predict_critic_values(critic_model, critic_features, model_type)
                     value_loss = F.mse_loss(value_pred, returns)
                     value_loss.backward()
                     torch.nn.utils.clip_grad_norm_(
@@ -604,6 +604,10 @@ def train(
     xdim_cnn_kernel_size: Tuple[int, int] = (3, 5),
     xdim_policy_fusion_hidden_dim: Optional[int] = None,
     xdim_critic_fusion_hidden_dim: Optional[int] = None,
+    graph_hidden_dim: int = 256,
+    graph_global_hidden_dim: int = 96,
+    graph_num_layers: int = 4,
+    graph_head_hidden_dim: int = 256,
     load_policy_weights: Optional[str] = None,
     load_critic_weights: Optional[str] = None,
     n_iterations: int = 10,
@@ -728,8 +732,7 @@ def train(
     update_every_iterations = 1
     if save_every_updates % update_every_iterations != 0:
         raise ValueError(
-            "save_every_updates must be a multiple of update frequency "
-            f"({update_every_iterations})"
+            f"save_every_updates must be a multiple of update frequency ({update_every_iterations})"
         )
     if save_every_updates % eval_every_iterations != 0:
         raise ValueError(
@@ -742,9 +745,10 @@ def train(
         "xdim",
         "xdim_res",
         "xdim_compact",
+        "catan_graph",
     ), f"Unknown backbone_type '{backbone_type}'"
     xdim_cnn_channels = list(xdim_cnn_channels)
-    if not xdim_cnn_channels:
+    if backbone_type != "catan_graph" and not xdim_cnn_channels:
         raise ValueError("xdim_cnn_channels cannot be empty")
 
     if network_mode == "shared" and actor_observation_level != critic_observation_level:
@@ -825,9 +829,8 @@ def train(
     print(f"Save cadence: every {save_every_updates} iteration(s)")
 
     frozen_imitation_eval: Optional[FrozenImitationEvalSet] = None
-    if (
-        imitation_eval_max_decision_points > 0
-        and expert_supports_frozen_imitation_eval(expert_config)
+    if imitation_eval_max_decision_points > 0 and expert_supports_frozen_imitation_eval(
+        expert_config
     ):
         print(
             f"Building frozen imitation eval set "
@@ -847,9 +850,7 @@ def train(
             f"Frozen imitation eval set: {len(frozen_imitation_eval.decision_points)} decision points."
         )
     elif imitation_eval_max_decision_points > 0:
-        print(
-            "Skipping frozen imitation eval: training expert is not ValueFunctionPlayer (F)."
-        )
+        print("Skipping frozen imitation eval: training expert is not ValueFunctionPlayer (F).")
 
     policy_backbone_config = build_backbone_config(
         backbone_type=backbone_type,
@@ -862,6 +863,12 @@ def train(
         xdim_cnn_channels=xdim_cnn_channels,
         xdim_cnn_kernel_size=xdim_cnn_kernel_size,
         xdim_fusion_hidden_dim=xdim_policy_fusion_hidden_dim,
+        num_players=num_players,
+        map_type=map_type,
+        graph_hidden_dim=graph_hidden_dim,
+        graph_global_hidden_dim=graph_global_hidden_dim,
+        graph_num_layers=graph_num_layers,
+        graph_head_hidden_dim=graph_head_hidden_dim,
     )
 
     if uses_shared_network:
@@ -906,6 +913,12 @@ def train(
             xdim_cnn_channels=xdim_cnn_channels,
             xdim_cnn_kernel_size=xdim_cnn_kernel_size,
             xdim_fusion_hidden_dim=xdim_critic_fusion_hidden_dim,
+            num_players=num_players,
+            map_type=map_type,
+            graph_hidden_dim=graph_hidden_dim,
+            graph_global_hidden_dim=graph_global_hidden_dim,
+            graph_num_layers=graph_num_layers,
+            graph_head_hidden_dim=graph_head_hidden_dim,
         )
         critic_model = build_value_network(backbone_config=critic_backbone_config).to(torch_device)
 
@@ -926,9 +939,7 @@ def train(
 
     policy_optimizer = torch.optim.Adam(policy_model.parameters(), lr=policy_lr)
     critic_optimizer = (
-        None
-        if uses_shared_network
-        else torch.optim.Adam(critic_model.parameters(), lr=critic_lr)
+        None if uses_shared_network else torch.optim.Adam(critic_model.parameters(), lr=critic_lr)
     )
     policy_agent = PolicyAgent(policy_model, model_type, torch_device)
     value_model = policy_model if uses_shared_network else critic_model
@@ -982,9 +993,7 @@ def train(
         beta = float(resume_state.get("beta", beta_init))
         best_eval_win_rate = float(resume_state.get("best_eval_win_rate", float("-inf")))
         best_eval_critic_ev = float(resume_state.get("best_eval_critic_ev", float("-inf")))
-        best_eval_value_regret = float(
-            resume_state.get("best_eval_value_regret", float("inf"))
-        )
+        best_eval_value_regret = float(resume_state.get("best_eval_value_regret", float("inf")))
         print(
             f"  Restored: global_step={global_step:,}, "
             f"completed_iterations={start_iteration}, beta={beta:.3f}"
@@ -1002,9 +1011,7 @@ def train(
             "best_eval_critic_ev": best_eval_critic_ev,
             "best_eval_value_regret": best_eval_value_regret,
             "policy_model": policy_model.state_dict(),
-            "critic_model": (
-                critic_model.state_dict() if critic_model is not None else None
-            ),
+            "critic_model": (critic_model.state_dict() if critic_model is not None else None),
             "policy_optimizer": policy_optimizer.state_dict(),
             "critic_optimizer": (
                 critic_optimizer.state_dict() if critic_optimizer is not None else None
@@ -1017,17 +1024,13 @@ def train(
         os.replace(tmp_path, training_state_path)
 
     played_action_type_steps: List[int] = []
-    played_action_type_history: Dict[str, List[float]] = {
-        name: [] for name in action_type_names
-    }
+    played_action_type_history: Dict[str, List[float]] = {name: [] for name in action_type_names}
 
     try:
         last_iteration = start_iteration + n_iterations
         with tqdm(total=total_steps, desc="DAgger", unit="step", unit_scale=True) as pbar:
             for iteration in range(start_iteration + 1, last_iteration + 1):
-                pbar.set_postfix(
-                    {"iter": f"{iteration}/{last_iteration}", "beta": f"{beta:.2f}"}
-                )
+                pbar.set_postfix({"iter": f"{iteration}/{last_iteration}", "beta": f"{beta:.2f}"})
                 collect_seed = derive_seed(seed, "dagger_collect", iteration)
 
                 collect_stats, rollout_batch = _collect_dagger_rollouts_vectorized(
@@ -1089,9 +1092,7 @@ def train(
                     device=torch_device,
                 )
 
-                should_eval = (
-                    iteration % eval_every_iterations == 0 or iteration == last_iteration
-                )
+                should_eval = iteration % eval_every_iterations == 0 or iteration == last_iteration
                 eval_metrics: Dict[str, float] = {}
                 eval_win_rate: Optional[float] = None
                 eval_value_regret: Optional[float] = None
@@ -1148,9 +1149,7 @@ def train(
                     "beta": f"{beta:.2f}",
                     "acc": f"{train_stats['accuracy'] * 100:.1f}%",
                     "wr_val": (
-                        f"{eval_win_rate * 100:.1f}%"
-                        if eval_win_rate is not None
-                        else "skipped"
+                        f"{eval_win_rate * 100:.1f}%" if eval_win_rate is not None else "skipped"
                     ),
                 }
                 if eval_value_regret is not None:
@@ -1243,7 +1242,10 @@ def train(
                     action_type_names, dict(played_action_type_counts)
                 )
                 played_action_type_steps.append(global_step)
-                for action_type_name, normalized_count in normalized_played_action_type_counts.items():
+                for (
+                    action_type_name,
+                    normalized_count,
+                ) in normalized_played_action_type_counts.items():
                     played_action_type_history[action_type_name].append(normalized_count)
                     wandb_log[f"dagger/played_action_type/{action_type_name}"] = normalized_count
                 wandb_log["dagger/played_action_type_over_time"] = (
@@ -1270,13 +1272,9 @@ def train(
 
     print(f"\n[DAgger] Training complete. Best eval win rate vs value: {best_eval_win_rate:.3f}")
     if best_eval_value_regret < float("inf"):
-        print(
-            f"[DAgger] Best policy checkpoint: value_regret={best_eval_value_regret:.4f}"
-        )
+        print(f"[DAgger] Best policy checkpoint: value_regret={best_eval_value_regret:.4f}")
     if best_eval_critic_ev > float("-inf"):
-        print(
-            f"[DAgger] Best critic checkpoint: explained_variance={best_eval_critic_ev:.4f}"
-        )
+        print(f"[DAgger] Best critic checkpoint: explained_variance={best_eval_critic_ev:.4f}")
     return policy_model, critic_model
 
 

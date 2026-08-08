@@ -41,9 +41,11 @@ if TYPE_CHECKING:
 
 from .models.backbones import (
     BackboneConfig,
+    CatanGraphBackboneConfig,
     CrossDimensionalBackboneConfig,
     MLPBackboneConfig,
 )
+from .models.heads import WDLValueHead
 from .models.models import (
     build_flat_policy_network,
     build_flat_policy_value_network,
@@ -51,7 +53,6 @@ from .models.models import (
     build_hierarchical_policy_value_network,
     build_value_network,
 )
-from .models.heads import WDLValueHead
 from .models.wrappers import PolicyValueNetworkWrapper, policy_value_to_policy_only
 from .utils.catanatron_action_space import get_action_space_size
 
@@ -124,6 +125,11 @@ def backbone_config_from_dict(data: Dict[str, Any]) -> BackboneConfig:
             args["cnn_kernel_size"] = tuple(args["cnn_kernel_size"])
         return BackboneConfig(
             architecture=architecture, args=CrossDimensionalBackboneConfig(**args)
+        )
+    if architecture == "catan_graph":
+        return BackboneConfig(
+            architecture=architecture,
+            args=CatanGraphBackboneConfig(**args),
         )
     raise ValueError(f"Unknown backbone architecture '{architecture}'")
 
@@ -213,8 +219,7 @@ class ExperimentMetadata:
             algorithm=data.get("algorithm", "unknown"),
             game=GameConfig(**data["game"]),
             networks={
-                name: NetworkSpec.from_dict(spec)
-                for name, spec in data.get("networks", {}).items()
+                name: NetworkSpec.from_dict(spec) for name, spec in data.get("networks", {}).items()
             },
             created_at=data.get("created_at", ""),
             git_sha=data.get("git_sha"),
@@ -302,9 +307,7 @@ def build_network(spec: NetworkSpec, game: GameConfig) -> torch.nn.Module:
                 map_type,
                 value_head_type=spec.value_head_type,
             )
-        return build_hierarchical_policy_network(
-            spec.backbone, game.num_players, map_type
-        )
+        return build_hierarchical_policy_network(spec.backbone, game.num_players, map_type)
 
     # Default to flat heads.
     if num_actions is None:
@@ -379,8 +382,11 @@ class Experiment:
         eval_mode: bool = True,
     ) -> torch.nn.Module:
         return self.load_network(
-            "policy", which=which, device=device,
-            as_policy_only=as_policy_only, eval_mode=eval_mode,
+            "policy",
+            which=which,
+            device=device,
+            as_policy_only=as_policy_only,
+            eval_mode=eval_mode,
         )
 
     def build_critic(
@@ -391,8 +397,11 @@ class Experiment:
     ) -> torch.nn.Module:
         role = "critic" if "critic" in self.metadata.networks else "policy"
         return self.load_network(
-            role, which=which, device=device,
-            as_policy_only=False, eval_mode=eval_mode,
+            role,
+            which=which,
+            device=device,
+            as_policy_only=False,
+            eval_mode=eval_mode,
         )
 
     # -- convenience accessors --------------------------------------------
@@ -425,6 +434,7 @@ _BACKBONE_DISPLAY = {
     "cross_dimensional": "xdim",
     "residual_cross_dimensional": "xdim_res",
     "compact_cross_dimensional": "xdim_compact",
+    "catan_graph": "catan_graph",
 }
 
 
@@ -436,7 +446,12 @@ def backbone_display_type(backbone: BackboneConfig) -> str:
 def backbone_hidden_dims(backbone: BackboneConfig) -> List[int]:
     """Best-effort hidden-layer sizes for display/logging."""
     args = backbone.args
-    return list(getattr(args, "hidden_dims", None) or getattr(args, "numeric_hidden_dims", []))
+    hidden_dims = getattr(args, "hidden_dims", None) or getattr(args, "numeric_hidden_dims", None)
+    if hidden_dims is not None:
+        return list(hidden_dims)
+    if isinstance(args, CatanGraphBackboneConfig):
+        return [args.hidden_dim]
+    return []
 
 
 def load_experiment(name_or_path: str) -> Experiment:
@@ -509,6 +524,16 @@ def _apply_xdim_backbone_args(args: argparse.Namespace, backbone: BackboneConfig
     _set_arg(args, "xdim_policy_fusion_hidden_dim", bb_args.fusion_hidden_dim)
 
 
+def _apply_graph_backbone_args(args: argparse.Namespace, backbone: BackboneConfig) -> None:
+    if not isinstance(backbone.args, CatanGraphBackboneConfig):
+        return
+    bb_args = backbone.args
+    _set_arg(args, "graph_hidden_dim", bb_args.hidden_dim)
+    _set_arg(args, "graph_global_hidden_dim", bb_args.global_hidden_dim)
+    _set_arg(args, "graph_num_layers", bb_args.num_layers)
+    _set_arg(args, "graph_head_hidden_dim", bb_args.head_hidden_dim)
+
+
 def apply_experiment_architecture_to_args(args: argparse.Namespace, exp: Experiment) -> None:
     """Override architecture-related CLI args from experiment metadata.
 
@@ -531,6 +556,7 @@ def apply_experiment_architecture_to_args(args: argparse.Namespace, exp: Experim
     policy_dims = _hidden_dims_csv(policy.backbone)
     _set_arg(args, "policy_hidden_dims", policy_dims)
     _apply_xdim_backbone_args(args, policy.backbone)
+    _apply_graph_backbone_args(args, policy.backbone)
 
     if policy.observation_level is not None:
         _set_arg(args, "policy_mode", policy.observation_level)
@@ -653,9 +679,7 @@ def resolve_training_checkpoints(
 ) -> TrainingCheckpoints:
     """Resolve on-disk checkpoint paths from a saved experiment."""
     exp = load_experiment(name_or_path)
-    return resolve_training_checkpoints_from_experiment(
-        exp, which, require_critic=require_critic
-    )
+    return resolve_training_checkpoints_from_experiment(exp, which, require_critic=require_critic)
 
 
 def add_load_from_experiment_arguments(parser: argparse.ArgumentParser) -> None:
@@ -677,8 +701,7 @@ def add_load_from_experiment_arguments(parser: argparse.ArgumentParser) -> None:
         default="best",
         dest="load_from_which",
         help=(
-            "Checkpoint selector for --load-from-experiment: "
-            "'best', 'latest', or a training step."
+            "Checkpoint selector for --load-from-experiment: 'best', 'latest', or a training step."
         ),
     )
 
@@ -823,9 +846,7 @@ def prepare_resume(
     if not getattr(args, "resume", False):
         return ResumeContext(active=False)
     if warm_start is None:
-        raise ValueError(
-            "--resume requires --load-from-experiment (the run to continue in place)."
-        )
+        raise ValueError("--resume requires --load-from-experiment (the run to continue in place).")
     exp = warm_start.experiment
     exp_dir = exp.path
     state = load_training_state(exp_dir)
@@ -898,8 +919,7 @@ def prepare_training_warm_start(
         exp, which, require_critic=require_critic
     )
     print(
-        f"Warm-start checkpoints from '{checkpoints.experiment_name}' "
-        f"(which={checkpoints.which})"
+        f"Warm-start checkpoints from '{checkpoints.experiment_name}' (which={checkpoints.which})"
     )
     print(f"  policy: {checkpoints.policy}")
     if checkpoints.critic:
@@ -919,9 +939,7 @@ def architecture_preset_from_experiment(exp: Experiment) -> "ArchitecturePreset"
 
     policy_dims = tuple(backbone_hidden_dims(policy.backbone))
     if not policy_dims:
-        raise ValueError(
-            f"Experiment '{meta.name}' has no policy hidden dims in metadata."
-        )
+        raise ValueError(f"Experiment '{meta.name}' has no policy hidden dims in metadata.")
 
     if critic is not None:
         critic_dims = tuple(backbone_hidden_dims(critic.backbone))
@@ -931,14 +949,10 @@ def architecture_preset_from_experiment(exp: Experiment) -> "ArchitecturePreset"
         critic_dims = policy_dims
 
     policy_mode = (
-        policy.observation_level
-        or tc.get("policy_mode")
-        or tc.get("actor_observation_level")
+        policy.observation_level or tc.get("policy_mode") or tc.get("actor_observation_level")
     )
     if policy_mode not in ("private", "public", "full"):
-        raise ValueError(
-            f"Experiment '{meta.name}' has no policy observation level in metadata."
-        )
+        raise ValueError(f"Experiment '{meta.name}' has no policy observation level in metadata.")
 
     if critic is not None and critic.observation_level in ("private", "public", "full"):
         critic_mode = critic.observation_level
@@ -949,9 +963,7 @@ def architecture_preset_from_experiment(exp: Experiment) -> "ArchitecturePreset"
     elif policy.kind == KIND_POLICY_VALUE:
         critic_mode = policy_mode
     else:
-        raise ValueError(
-            f"Experiment '{meta.name}' has no critic observation level in metadata."
-        )
+        raise ValueError(f"Experiment '{meta.name}' has no critic observation level in metadata.")
 
     network_mode = tc.get("network_mode")
     if network_mode is None:
@@ -970,12 +982,22 @@ def architecture_preset_from_experiment(exp: Experiment) -> "ArchitecturePreset"
     xdim_cnn_kernel_size = (3, 5)
     xdim_policy_fusion_hidden_dim: int | None = None
     xdim_critic_fusion_hidden_dim: int | None = None
+    graph_hidden_dim = 256
+    graph_global_hidden_dim = 96
+    graph_num_layers = 4
+    graph_head_hidden_dim = 256
 
     if isinstance(policy.backbone.args, CrossDimensionalBackboneConfig):
         bb = policy.backbone.args
         xdim_cnn_channels = tuple(bb.cnn_channels)
         xdim_cnn_kernel_size = (bb.cnn_kernel_size[0], bb.cnn_kernel_size[1])
         xdim_policy_fusion_hidden_dim = bb.fusion_hidden_dim
+    elif isinstance(policy.backbone.args, CatanGraphBackboneConfig):
+        bb = policy.backbone.args
+        graph_hidden_dim = bb.hidden_dim
+        graph_global_hidden_dim = bb.global_hidden_dim
+        graph_num_layers = bb.num_layers
+        graph_head_hidden_dim = bb.head_hidden_dim
 
     if critic is not None and isinstance(critic.backbone.args, CrossDimensionalBackboneConfig):
         xdim_critic_fusion_hidden_dim = critic.backbone.args.fusion_hidden_dim
@@ -989,6 +1011,14 @@ def architecture_preset_from_experiment(exp: Experiment) -> "ArchitecturePreset"
         xdim_policy_fusion_hidden_dim = int(tc["xdim_policy_fusion_hidden_dim"])
     if tc.get("xdim_critic_fusion_hidden_dim") is not None:
         xdim_critic_fusion_hidden_dim = int(tc["xdim_critic_fusion_hidden_dim"])
+    if tc.get("graph_hidden_dim") is not None:
+        graph_hidden_dim = int(tc["graph_hidden_dim"])
+    if tc.get("graph_global_hidden_dim") is not None:
+        graph_global_hidden_dim = int(tc["graph_global_hidden_dim"])
+    if tc.get("graph_num_layers") is not None:
+        graph_num_layers = int(tc["graph_num_layers"])
+    if tc.get("graph_head_hidden_dim") is not None:
+        graph_head_hidden_dim = int(tc["graph_head_hidden_dim"])
 
     return ArchitecturePreset(
         model_type=model_type,
@@ -1007,6 +1037,10 @@ def architecture_preset_from_experiment(exp: Experiment) -> "ArchitecturePreset"
         discard_limit=game.discard_limit or tc.get("discard_limit") or 9,
         num_players=game.num_players,
         value_head_type=policy.value_head_type,
+        graph_hidden_dim=graph_hidden_dim,
+        graph_global_hidden_dim=graph_global_hidden_dim,
+        graph_num_layers=graph_num_layers,
+        graph_head_hidden_dim=graph_head_hidden_dim,
     )
 
 
@@ -1075,9 +1109,7 @@ def resolve_training_architecture_and_warm_start(
 # --------------------------------------------------------------------------- #
 def current_git_sha() -> Optional[str]:
     try:
-        sha = subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL
-        )
+        sha = subprocess.check_output(["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL)
         return sha.decode().strip()
     except Exception:
         return None
@@ -1108,9 +1140,7 @@ def network_spec_from_model(
         observation_level=observation_level,
         num_actions=num_actions if kind != KIND_VALUE else None,
         value_head_type=(
-            "wdl"
-            if isinstance(getattr(model, "value_head", None), WDLValueHead)
-            else "scalar"
+            "wdl" if isinstance(getattr(model, "value_head", None), WDLValueHead) else "scalar"
         ),
     )
 
@@ -1178,11 +1208,7 @@ def discover_checkpoints(ckpt_dir: str) -> Dict[str, Dict]:
         )
         if best is None:
             best = next((f for f in role_files if "best" in f.lower()), None)
-        stepped = [
-            (f, step)
-            for f in role_files
-            if (step := _step_of(f)) is not None
-        ]
+        stepped = [(f, step) for f in role_files if (step := _step_of(f)) is not None]
         latest = max(stepped, key=lambda x: x[1])[0] if stepped else best
         roles[role] = {
             "files": sorted(role_files),

@@ -1,10 +1,13 @@
+from typing import NamedTuple, Sequence, Tuple
+
 import torch
 import torch.nn as nn
-from typing import Sequence, Tuple
-
 from catanatron.gym.envs.action_space import ACTION_TYPES
 from catanatron.models.enums import ActionType
 
+from catanrl.utils.catanatron_action_space import get_action_array
+
+from .backbones import CatanGraphBackbone
 from .utils import orthogonal_init
 
 
@@ -56,6 +59,50 @@ class WDLValueHead(nn.Module):
         return self.values_from_logits(self.logits(x))
 
 
+class CatanGraphValueHead(ValueHead):
+    """Deep scalar value integration head over pooled graph features."""
+
+    def __init__(self, backbone: CatanGraphBackbone):
+        nn.Module.__init__(self)
+        hidden_dim = backbone.head_hidden_dim
+        self.pooled_dim = backbone.pooled_dim
+        self.value_head = nn.Sequential(
+            nn.Linear(self.pooled_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1),
+        )
+        for module in self.value_head:
+            if isinstance(module, nn.Linear):
+                orthogonal_init(module, gain=self.VALUE_OUTPUT_GAIN)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.value_head(x[:, : self.pooled_dim]).squeeze(-1)
+
+
+class CatanGraphWDLValueHead(WDLValueHead):
+    """Canopy-style two-hidden-layer WDL head over pooled graph features."""
+
+    def __init__(self, backbone: CatanGraphBackbone):
+        nn.Module.__init__(self)
+        hidden_dim = backbone.head_hidden_dim
+        self.pooled_dim = backbone.pooled_dim
+        self.value_head = nn.Sequential(
+            nn.Linear(self.pooled_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 3),
+        )
+        for module in self.value_head:
+            if isinstance(module, nn.Linear):
+                orthogonal_init(module, gain=self.VALUE_OUTPUT_GAIN)
+
+    def logits(self, x: torch.Tensor) -> torch.Tensor:
+        return self.value_head(x[:, : self.pooled_dim])
+
+
 class FlatPolicyHead(nn.Module):
     """Simple linear head for policy network that outputs flat action logits."""
 
@@ -73,6 +120,267 @@ class FlatPolicyHead(nn.Module):
 
     def forward(self, x):
         return self.policy_head(x)
+
+
+class CatanGraphPolicyHidden(NamedTuple):
+    settlement: torch.Tensor
+    road: torch.Tensor
+    city: torch.Tensor
+    robber: torch.Tensor
+    other: torch.Tensor
+
+
+class CatanGraphPolicyHead(nn.Module):
+    """Topology-aware flat head mapped onto CatanRL's unchanged action array."""
+
+    POLICY_OUTPUT_GAIN = 0.01
+
+    settlement_action_indices: torch.Tensor
+    settlement_node_indices: torch.Tensor
+    road_action_indices: torch.Tensor
+    road_edge_indices: torch.Tensor
+    city_action_indices: torch.Tensor
+    city_node_indices: torch.Tensor
+    robber_action_indices: torch.Tensor
+    robber_tile_indices: torch.Tensor
+    other_action_indices: torch.Tensor
+    edge_endpoints: torch.Tensor
+
+    def __init__(
+        self,
+        backbone: CatanGraphBackbone,
+        num_players: int,
+        map_type: str,
+    ) -> None:
+        super().__init__()
+        actions = get_action_array(num_players, map_type)  # type: ignore[arg-type]
+        node_to_local = {
+            node_id: local_index for local_index, node_id in enumerate(backbone.node_ids)
+        }
+        tile_to_local = {
+            coordinate: local_index
+            for local_index, coordinate in enumerate(backbone.tile_coordinates)
+        }
+
+        edge_to_local = {
+            tuple(sorted((backbone.node_ids[first], backbone.node_ids[second]))): index
+            for index, (first, second) in enumerate(backbone.edge_pairs)
+        }
+        settlement_actions: list[int] = []
+        settlement_nodes: list[int] = []
+        road_actions: list[int] = []
+        road_edges: list[int] = []
+        city_actions: list[int] = []
+        city_nodes: list[int] = []
+        robber_actions: list[int] = []
+        robber_tiles: list[int] = []
+        other_actions: list[int] = []
+        for action_index, (action_type, value) in enumerate(actions):
+            if action_type == ActionType.BUILD_SETTLEMENT:
+                settlement_actions.append(action_index)
+                settlement_nodes.append(node_to_local[int(value)])  # type: ignore[arg-type]
+            elif action_type == ActionType.BUILD_ROAD:
+                road_actions.append(action_index)
+                road_edges.append(edge_to_local[tuple(sorted(value))])  # type: ignore[arg-type]
+            elif action_type == ActionType.BUILD_CITY:
+                city_actions.append(action_index)
+                city_nodes.append(node_to_local[int(value)])  # type: ignore[arg-type]
+            elif action_type == ActionType.MOVE_ROBBER:
+                coordinate, _ = value  # type: ignore[misc]
+                robber_actions.append(action_index)
+                robber_tiles.append(tile_to_local[coordinate])
+            else:
+                other_actions.append(action_index)
+
+        classified = (
+            len(settlement_actions)
+            + len(road_actions)
+            + len(city_actions)
+            + len(robber_actions)
+            + len(other_actions)
+        )
+        if classified != len(actions):
+            raise RuntimeError("Catan graph policy mapping did not cover the flat action space")
+
+        self.input_dim = backbone.output_dim
+        self.action_space_size = len(actions)
+        self.pooled_dim = backbone.pooled_dim
+        self.hidden_dim = backbone.hidden_dim
+        self.num_nodes = backbone.num_nodes
+        self.num_tiles = backbone.num_tiles
+        self.num_edges = backbone.num_edges
+        hidden_dim = backbone.head_hidden_dim
+        self.head_hidden_dim = hidden_dim
+
+        self.settlement_hidden = nn.Sequential(
+            nn.Linear(backbone.hidden_dim, hidden_dim),
+            nn.ReLU(),
+        )
+        self.settlement_output = nn.Linear(hidden_dim, 1)
+        self.road_hidden = nn.Sequential(
+            nn.Linear(2 * backbone.hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+        )
+        self.road_output = nn.Linear(hidden_dim, 1)
+        self.city_hidden = nn.Sequential(
+            nn.Linear(backbone.hidden_dim, hidden_dim),
+            nn.ReLU(),
+        )
+        self.city_output = nn.Linear(hidden_dim, 1)
+        self.robber_hidden = nn.Sequential(
+            nn.Linear(backbone.hidden_dim, hidden_dim),
+            nn.ReLU(),
+        )
+        self.robber_output = nn.Linear(hidden_dim, 1)
+        self.other_hidden = nn.Sequential(
+            nn.Linear(backbone.pooled_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+        )
+        self.other_output = nn.Linear(hidden_dim, len(other_actions))
+
+        self.register_buffer(
+            "settlement_action_indices", torch.tensor(settlement_actions, dtype=torch.long)
+        )
+        self.register_buffer(
+            "settlement_node_indices", torch.tensor(settlement_nodes, dtype=torch.long)
+        )
+        self.register_buffer("road_action_indices", torch.tensor(road_actions, dtype=torch.long))
+        self.register_buffer("road_edge_indices", torch.tensor(road_edges, dtype=torch.long))
+        self.register_buffer("city_action_indices", torch.tensor(city_actions, dtype=torch.long))
+        self.register_buffer("city_node_indices", torch.tensor(city_nodes, dtype=torch.long))
+        self.register_buffer(
+            "robber_action_indices", torch.tensor(robber_actions, dtype=torch.long)
+        )
+        self.register_buffer("robber_tile_indices", torch.tensor(robber_tiles, dtype=torch.long))
+        self.register_buffer("other_action_indices", torch.tensor(other_actions, dtype=torch.long))
+        self.register_buffer(
+            "edge_endpoints",
+            torch.tensor(backbone.edge_pairs, dtype=torch.long),
+        )
+        self._init_weights()
+
+    def _init_weights(self) -> None:
+        for hidden, output in (
+            (self.settlement_hidden, self.settlement_output),
+            (self.road_hidden, self.road_output),
+            (self.city_hidden, self.city_output),
+            (self.robber_hidden, self.robber_output),
+            (self.other_hidden, self.other_output),
+        ):
+            for module in hidden:
+                if not isinstance(module, nn.Linear):
+                    continue
+                orthogonal_init(module)
+            orthogonal_init(output, gain=self.POLICY_OUTPUT_GAIN)
+
+    def hidden_features(self, features: torch.Tensor) -> CatanGraphPolicyHidden:
+        if features.ndim != 2 or features.shape[1] != self.input_dim:
+            raise ValueError(
+                f"Expected Catan graph features [batch, {self.input_dim}], "
+                f"got {tuple(features.shape)}"
+            )
+        batch_size = features.shape[0]
+        node_start = self.pooled_dim
+        tile_start = node_start + self.num_nodes * self.hidden_dim
+        pooled = features[:, : self.pooled_dim]
+        nodes = features[:, node_start:tile_start].reshape(
+            batch_size,
+            self.num_nodes,
+            self.hidden_dim,
+        )
+        tiles = features[:, tile_start:].reshape(
+            batch_size,
+            self.num_tiles,
+            self.hidden_dim,
+        )
+
+        endpoints = self.edge_endpoints[self.road_edge_indices]
+        road_features = torch.cat(
+            (nodes[:, endpoints[:, 0], :], nodes[:, endpoints[:, 1], :]),
+            dim=-1,
+        )
+        return CatanGraphPolicyHidden(
+            settlement=self.settlement_hidden(nodes)[:, self.settlement_node_indices],
+            road=self.road_hidden(road_features),
+            city=self.city_hidden(nodes)[:, self.city_node_indices],
+            robber=self.robber_hidden(tiles)[:, self.robber_tile_indices],
+            other=self.other_hidden(pooled),
+        )
+
+    def _scatter_action_logits(
+        self,
+        settlement_logits: torch.Tensor,
+        road_logits: torch.Tensor,
+        city_logits: torch.Tensor,
+        robber_logits: torch.Tensor,
+        other_logits: torch.Tensor,
+    ) -> torch.Tensor:
+        logits = settlement_logits.new_zeros((settlement_logits.shape[0], self.action_space_size))
+        logits = logits.index_copy(1, self.settlement_action_indices, settlement_logits)
+        logits = logits.index_copy(1, self.road_action_indices, road_logits)
+        logits = logits.index_copy(1, self.city_action_indices, city_logits)
+        logits = logits.index_copy(1, self.robber_action_indices, robber_logits)
+        return logits.index_copy(1, self.other_action_indices, other_logits)
+
+    def logits_from_hidden(self, hidden: CatanGraphPolicyHidden) -> torch.Tensor:
+        return self._scatter_action_logits(
+            self.settlement_output(hidden.settlement).squeeze(-1),
+            self.road_output(hidden.road).squeeze(-1),
+            self.city_output(hidden.city).squeeze(-1),
+            self.robber_output(hidden.robber).squeeze(-1),
+            self.other_output(hidden.other),
+        )
+
+    def forward_with_hidden(
+        self,
+        features: torch.Tensor,
+    ) -> tuple[torch.Tensor, CatanGraphPolicyHidden]:
+        hidden = self.hidden_features(features)
+        return self.logits_from_hidden(hidden), hidden
+
+    def forward(self, features: torch.Tensor) -> torch.Tensor:
+        logits, _ = self.forward_with_hidden(features)
+        return logits
+
+
+class CatanGraphSoftPolicyHead(nn.Module):
+    """Separate Nexus-v3 final projections over shared hard-policy features."""
+
+    POLICY_OUTPUT_GAIN = CatanGraphPolicyHead.POLICY_OUTPUT_GAIN
+
+    def __init__(self, policy_head: CatanGraphPolicyHead) -> None:
+        super().__init__()
+        hidden_dim = policy_head.head_hidden_dim
+        self.settlement_output = nn.Linear(hidden_dim, 1)
+        self.road_output = nn.Linear(hidden_dim, 1)
+        self.city_output = nn.Linear(hidden_dim, 1)
+        self.robber_output = nn.Linear(hidden_dim, 1)
+        self.other_output = nn.Linear(hidden_dim, policy_head.other_action_indices.numel())
+        for output in (
+            self.settlement_output,
+            self.road_output,
+            self.city_output,
+            self.robber_output,
+            self.other_output,
+        ):
+            orthogonal_init(output, gain=self.POLICY_OUTPUT_GAIN)
+
+    def forward(
+        self,
+        hidden: CatanGraphPolicyHidden,
+        policy_head: CatanGraphPolicyHead,
+    ) -> torch.Tensor:
+        return policy_head._scatter_action_logits(
+            self.settlement_output(hidden.settlement).squeeze(-1),
+            self.road_output(hidden.road).squeeze(-1),
+            self.city_output(hidden.city).squeeze(-1),
+            self.robber_output(hidden.robber).squeeze(-1),
+            self.other_output(hidden.other),
+        )
 
 
 class HierarchicalPolicyHead(nn.Module):

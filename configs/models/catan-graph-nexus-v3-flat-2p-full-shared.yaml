@@ -1,0 +1,22 @@
+# Canopy nexus-v3-style graph model over the unchanged Catanatron full vector.
+name: catan-graph-nexus-v3-flat-2p-full-shared
+
+model:
+  model_type: flat
+  backbone_type: catan_graph
+  policy_hidden_dims: [256]
+  critic_hidden_dims: [256]
+  policy_mode: full
+  critic_mode: full
+  network_mode: shared
+  value_head_type: wdl
+  graph_hidden_dim: 256
+  graph_global_hidden_dim: 96
+  graph_num_layers: 4
+  graph_head_hidden_dim: 256
+
+game:
+  map_type: BASE
+  vps_to_win: 15
+  discard_limit: 9
+  num_players: 2

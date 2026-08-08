@@ -11,12 +11,12 @@ import yaml
 
 ObservationLevel = Literal["private", "public", "full"]
 NetworkMode = Literal["shared", "separate"]
-BackboneType = Literal["mlp", "xdim", "xdim_res", "xdim_compact"]
+BackboneType = Literal["mlp", "xdim", "xdim_res", "xdim_compact", "catan_graph"]
 MapType = Literal["BASE", "MINI", "TOURNAMENT"]
 
 OBSERVATION_LEVEL_CHOICES = ("private", "public", "full")
 NETWORK_MODE_CHOICES = ("shared", "separate")
-BACKBONE_TYPE_CHOICES = ("mlp", "xdim", "xdim_res", "xdim_compact")
+BACKBONE_TYPE_CHOICES = ("mlp", "xdim", "xdim_res", "xdim_compact", "catan_graph")
 MAP_TYPE_CHOICES = ("BASE", "MINI", "TOURNAMENT")
 MODEL_TYPE_CHOICES = ("flat", "hierarchical")
 VALUE_HEAD_TYPE_CHOICES = ("scalar", "wdl")
@@ -40,6 +40,10 @@ class ArchitecturePreset:
     discard_limit: int
     num_players: int | None = None
     value_head_type: str = "scalar"
+    graph_hidden_dim: int = 256
+    graph_global_hidden_dim: int = 96
+    graph_num_layers: int = 4
+    graph_head_hidden_dim: int = 256
 
     @property
     def actor_observation_level(self) -> str:
@@ -120,7 +124,27 @@ def load_architecture_preset(path: str | Path) -> ArchitecturePreset:
     model = _require_mapping(raw.get("model"), field="model")
     game = _require_mapping(raw.get("game"), field="game")
 
-    kernel = _parse_int_list(model.get("xdim_cnn_kernel_size"), field="model.xdim_cnn_kernel_size")
+    backbone_type = _parse_choice(
+        model.get("backbone_type"),
+        field="model.backbone_type",
+        choices=BACKBONE_TYPE_CHOICES,
+    )
+    model_type = _parse_choice(
+        model.get("model_type"),
+        field="model.model_type",
+        choices=MODEL_TYPE_CHOICES,
+    )
+    if backbone_type == "catan_graph" and model_type != "flat":
+        raise ValueError("catan_graph backbones require model.model_type: flat")
+    xdim_channels_raw = model.get(
+        "xdim_cnn_channels",
+        [1] if backbone_type == "catan_graph" else None,
+    )
+    kernel_raw = model.get(
+        "xdim_cnn_kernel_size",
+        [3, 5] if backbone_type == "catan_graph" else None,
+    )
+    kernel = _parse_int_list(kernel_raw, field="model.xdim_cnn_kernel_size")
     if len(kernel) != 2:
         raise ValueError("model.xdim_cnn_kernel_size must contain exactly two integers.")
 
@@ -129,14 +153,8 @@ def load_architecture_preset(path: str | Path) -> ArchitecturePreset:
         raise ValueError("game.num_players must be an integer >= 2 when set.")
 
     return ArchitecturePreset(
-        model_type=_parse_choice(
-            model.get("model_type"), field="model.model_type", choices=MODEL_TYPE_CHOICES
-        ),
-        backbone_type=_parse_choice(
-            model.get("backbone_type"),
-            field="model.backbone_type",
-            choices=BACKBONE_TYPE_CHOICES,
-        ),
+        model_type=model_type,
+        backbone_type=backbone_type,
         policy_hidden_dims=_parse_int_list(
             model.get("policy_hidden_dims"), field="model.policy_hidden_dims"
         ),
@@ -152,9 +170,7 @@ def load_architecture_preset(path: str | Path) -> ArchitecturePreset:
         network_mode=_parse_choice(
             model.get("network_mode"), field="model.network_mode", choices=NETWORK_MODE_CHOICES
         ),
-        xdim_cnn_channels=_parse_int_list(
-            model.get("xdim_cnn_channels"), field="model.xdim_cnn_channels"
-        ),
+        xdim_cnn_channels=_parse_int_list(xdim_channels_raw, field="model.xdim_cnn_channels"),
         xdim_cnn_kernel_size=(kernel[0], kernel[1]),
         xdim_policy_fusion_hidden_dim=_parse_optional_int(
             model.get("xdim_policy_fusion_hidden_dim"),
@@ -164,15 +180,36 @@ def load_architecture_preset(path: str | Path) -> ArchitecturePreset:
             model.get("xdim_critic_fusion_hidden_dim"),
             field="model.xdim_critic_fusion_hidden_dim",
         ),
-        map_type=_parse_choice(game.get("map_type"), field="game.map_type", choices=MAP_TYPE_CHOICES),
+        map_type=_parse_choice(
+            game.get("map_type"), field="game.map_type", choices=MAP_TYPE_CHOICES
+        ),
         vps_to_win=_parse_optional_int(game.get("vps_to_win"), field="game.vps_to_win") or 15,
-        discard_limit=_parse_optional_int(game.get("discard_limit"), field="game.discard_limit") or 9,
+        discard_limit=_parse_optional_int(game.get("discard_limit"), field="game.discard_limit")
+        or 9,
         num_players=num_players,
         value_head_type=_parse_choice(
             model.get("value_head_type", "scalar"),
             field="model.value_head_type",
             choices=VALUE_HEAD_TYPE_CHOICES,
         ),
+        graph_hidden_dim=_parse_optional_int(
+            model.get("graph_hidden_dim", 256), field="model.graph_hidden_dim"
+        )
+        or 256,
+        graph_global_hidden_dim=_parse_optional_int(
+            model.get("graph_global_hidden_dim", 96),
+            field="model.graph_global_hidden_dim",
+        )
+        or 96,
+        graph_num_layers=_parse_optional_int(
+            model.get("graph_num_layers", 4), field="model.graph_num_layers"
+        )
+        or 4,
+        graph_head_hidden_dim=_parse_optional_int(
+            model.get("graph_head_hidden_dim", 256),
+            field="model.graph_head_hidden_dim",
+        )
+        or 256,
     )
 
 
@@ -193,6 +230,10 @@ def architecture_train_config_fields(arch: ArchitecturePreset) -> dict[str, Any]
         "xdim_cnn_kernel_size": list(arch.xdim_cnn_kernel_size),
         "xdim_policy_fusion_hidden_dim": arch.xdim_policy_fusion_hidden_dim,
         "xdim_critic_fusion_hidden_dim": arch.xdim_critic_fusion_hidden_dim,
+        "graph_hidden_dim": arch.graph_hidden_dim,
+        "graph_global_hidden_dim": arch.graph_global_hidden_dim,
+        "graph_num_layers": arch.graph_num_layers,
+        "graph_head_hidden_dim": arch.graph_head_hidden_dim,
         "map_type": arch.map_type,
         "vps_to_win": arch.vps_to_win,
         "discard_limit": arch.discard_limit,

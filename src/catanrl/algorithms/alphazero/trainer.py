@@ -26,7 +26,14 @@ import torch
 import torch.nn.functional as F
 
 from ...features.catanatron_utils import COLOR_ORDER, ActorObservationLevel, CriticObservationLevel
-from ...models.heads import FlatPolicyHead, HierarchicalPolicyHead, WDLValueHead
+from ...models.heads import (
+    CatanGraphPolicyHead,
+    CatanGraphPolicyHidden,
+    CatanGraphSoftPolicyHead,
+    FlatPolicyHead,
+    HierarchicalPolicyHead,
+    WDLValueHead,
+)
 from ...models.inference_utils import values_to_wdl_targets
 from ...models.wrappers import PolicyNetworkWrapper, PolicyValueNetworkWrapper, ValueNetworkWrapper
 from .native_search import PolicyTarget
@@ -105,23 +112,29 @@ def _policy_logits_and_features(
     model: PolicyModel,
     states: torch.Tensor,
     model_type: str,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, CatanGraphPolicyHidden | None]:
     features = model.backbone(states)
-    policy_outputs = model.policy_head(features)
+    graph_hidden: CatanGraphPolicyHidden | None = None
+    if isinstance(model.policy_head, CatanGraphPolicyHead):
+        policy_outputs, graph_hidden = model.policy_head.forward_with_hidden(features)
+    else:
+        policy_outputs = model.policy_head(features)
     if model_type == "flat":
         if not isinstance(policy_outputs, torch.Tensor):
             raise TypeError("Flat policy head returned hierarchical outputs.")
-        return policy_outputs, features
+        return policy_outputs, features, graph_hidden
     if model_type == "hierarchical":
         if not isinstance(policy_outputs, tuple):
             raise TypeError("Hierarchical policy head returned flat outputs.")
-        return model.get_flat_action_logits(*policy_outputs), features
+        return model.get_flat_action_logits(*policy_outputs), features, graph_hidden
     raise ValueError(f"Unknown model_type '{model_type}'")
 
 
 def _policy_feature_dim(model: PolicyModel) -> int:
     if isinstance(model.policy_head, FlatPolicyHead):
         return int(model.policy_head.policy_head.in_features)
+    if isinstance(model.policy_head, CatanGraphPolicyHead):
+        return int(model.policy_head.input_dim)
     if isinstance(model.policy_head, HierarchicalPolicyHead):
         return int(model.policy_head.action_type_head.in_features)
     raise TypeError(f"Unsupported policy head for soft-policy training: {type(model.policy_head)}")
@@ -130,7 +143,17 @@ def _policy_feature_dim(model: PolicyModel) -> int:
 def _policy_action_dim(model: PolicyModel) -> int:
     if isinstance(model.policy_head, FlatPolicyHead):
         return int(model.policy_head.policy_head.out_features)
+    if isinstance(model.policy_head, CatanGraphPolicyHead):
+        return int(model.policy_head.action_space_size)
     return int(model.action_space_size)
+
+
+def _new_soft_policy_head(
+    model: PolicyModel,
+) -> FlatPolicyHead | CatanGraphSoftPolicyHead:
+    if isinstance(model.policy_head, CatanGraphPolicyHead):
+        return CatanGraphSoftPolicyHead(model.policy_head)
+    return FlatPolicyHead(_policy_feature_dim(model), _policy_action_dim(model))
 
 
 def _move_optimizer_state(optimizer: torch.optim.Optimizer | None, device: torch.device) -> None:
@@ -208,9 +231,7 @@ class AlphaZeroTrainer:
                 raise ValueError(
                     "Canopy trajectory selection requires completed-Q search and targets."
                 )
-            if config.target_temperature is None or not np.isclose(
-                config.target_temperature, 1.0
-            ):
+            if config.target_temperature is None or not np.isclose(config.target_temperature, 1.0):
                 raise ValueError("Canopy trajectory selection requires target_temperature=1.0.")
         if (
             not np.isfinite(config.c_visit)
@@ -241,19 +262,11 @@ class AlphaZeroTrainer:
         elif student_critic_model is None or teacher_critic_model is None:
             raise ValueError("Separate-network training requires student and teacher critics.")
 
-        self.student_soft_policy_head: FlatPolicyHead | None = None
-        self.teacher_soft_policy_head: FlatPolicyHead | None = None
+        self.student_soft_policy_head: FlatPolicyHead | CatanGraphSoftPolicyHead | None = None
+        self.teacher_soft_policy_head: FlatPolicyHead | CatanGraphSoftPolicyHead | None = None
         if config.soft_policy_weight > 0.0:
-            feature_dim = _policy_feature_dim(student_policy_model)
-            action_dim = _policy_action_dim(student_policy_model)
-            self.student_soft_policy_head = FlatPolicyHead(
-                feature_dim,
-                action_dim,
-            )
-            self.teacher_soft_policy_head = FlatPolicyHead(
-                feature_dim,
-                action_dim,
-            )
+            self.student_soft_policy_head = _new_soft_policy_head(student_policy_model)
+            self.teacher_soft_policy_head = _new_soft_policy_head(teacher_policy_model)
             self.teacher_soft_policy_head.load_state_dict(
                 self.student_soft_policy_head.state_dict()
             )
@@ -499,9 +512,7 @@ class AlphaZeroTrainer:
     # Student optimization
     # ------------------------------------------------------------------
 
-    def iter_replay_epoch_batches(
-        self, epochs: int
-    ) -> Iterator[list[SelfPlayExperience]]:
+    def iter_replay_epoch_batches(self, epochs: int) -> Iterator[list[SelfPlayExperience]]:
         """Yield complete shuffled passes over a stable replay snapshot."""
         if epochs < 1:
             raise ValueError("epochs must be at least 1")
@@ -556,7 +567,7 @@ class AlphaZeroTrainer:
 
         values: torch.Tensor | None = None
         value_logits: torch.Tensor | None = None
-        logits, policy_features = _policy_logits_and_features(
+        logits, policy_features, graph_policy_hidden = _policy_logits_and_features(
             self.student_policy_model,
             actor_states,
             self.config.model_type,
@@ -593,7 +604,19 @@ class AlphaZeroTrainer:
                 torch.zeros_like(policy_targets),
             )
             soft_targets /= soft_targets.sum(dim=-1, keepdim=True).clamp_min(1e-12)
-            soft_logits = self.student_soft_policy_head(policy_features).masked_fill(
+            if isinstance(self.student_soft_policy_head, CatanGraphSoftPolicyHead):
+                if graph_policy_hidden is None or not isinstance(
+                    self.student_policy_model.policy_head,
+                    CatanGraphPolicyHead,
+                ):
+                    raise TypeError("Catan graph soft policy requires graph policy features")
+                soft_logits = self.student_soft_policy_head(
+                    graph_policy_hidden,
+                    self.student_policy_model.policy_head,
+                )
+            else:
+                soft_logits = self.student_soft_policy_head(policy_features)
+            soft_logits = soft_logits.masked_fill(
                 ~action_masks,
                 float("-inf"),
             )
@@ -629,9 +652,11 @@ class AlphaZeroTrainer:
                 value_distribution_targets = torch.from_numpy(
                     np.asarray(target_rows, dtype=np.float32)
                 ).to(self.device)
-            value_loss = -(
-                value_distribution_targets * torch.log_softmax(value_logits, dim=-1)
-            ).sum(dim=-1).mean()
+            value_loss = (
+                -(value_distribution_targets * torch.log_softmax(value_logits, dim=-1))
+                .sum(dim=-1)
+                .mean()
+            )
         elif values is not None and value_targets is not None:
             value_loss = F.mse_loss(values, value_targets)
         else:

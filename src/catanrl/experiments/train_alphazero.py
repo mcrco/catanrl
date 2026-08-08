@@ -438,6 +438,10 @@ def _build_model_pair(
             xdim_cnn_kernel_size=arch.xdim_cnn_kernel_size,
             xdim_fusion_hidden_dim=arch.xdim_policy_fusion_hidden_dim,
             value_head_type=arch.value_head_type,
+            graph_hidden_dim=arch.graph_hidden_dim,
+            graph_global_hidden_dim=arch.graph_global_hidden_dim,
+            graph_num_layers=arch.graph_num_layers,
+            graph_head_hidden_dim=arch.graph_head_hidden_dim,
         )
         return policy, None
 
@@ -452,6 +456,10 @@ def _build_model_pair(
         xdim_cnn_channels=arch.xdim_cnn_channels,
         xdim_cnn_kernel_size=arch.xdim_cnn_kernel_size,
         xdim_fusion_hidden_dim=arch.xdim_policy_fusion_hidden_dim,
+        graph_hidden_dim=arch.graph_hidden_dim,
+        graph_global_hidden_dim=arch.graph_global_hidden_dim,
+        graph_num_layers=arch.graph_num_layers,
+        graph_head_hidden_dim=arch.graph_head_hidden_dim,
     )
     critic = build_critic_model(
         backbone_type=arch.backbone_type,
@@ -463,6 +471,10 @@ def _build_model_pair(
         xdim_cnn_channels=arch.xdim_cnn_channels,
         xdim_cnn_kernel_size=arch.xdim_cnn_kernel_size,
         xdim_fusion_hidden_dim=arch.xdim_critic_fusion_hidden_dim,
+        graph_hidden_dim=arch.graph_hidden_dim,
+        graph_global_hidden_dim=arch.graph_global_hidden_dim,
+        graph_num_layers=arch.graph_num_layers,
+        graph_head_hidden_dim=arch.graph_head_hidden_dim,
     )
     return policy, critic
 
@@ -731,11 +743,7 @@ def _update_search_teacher(
     """Update the self-play teacher, returning acceptance, score, and reason."""
     if strategy == "latest":
         trainer.promote_student()
-        score = (
-            champion_eval_score
-            if candidate_win_rate is None
-            else candidate_win_rate
-        )
+        score = champion_eval_score if candidate_win_rate is None else candidate_win_rate
         return True, score, "latest student becomes next iteration's search teacher"
     if strategy != "gated":
         raise ValueError(f"Unknown teacher update strategy: {strategy}")
@@ -930,12 +938,8 @@ def main() -> None:
         validate_ismcts_observation_levels(
             ismcts_determinizations=args.ismcts_determinizations,
             num_players=arch.num_players,
-            actor_observation_level=cast(
-                ActorObservationLevel, arch.actor_observation_level
-            ),
-            critic_observation_level=cast(
-                CriticObservationLevel, arch.critic_observation_level
-            ),
+            actor_observation_level=cast(ActorObservationLevel, arch.actor_observation_level),
+            critic_observation_level=cast(CriticObservationLevel, arch.critic_observation_level),
         )
         resume = prepare_resume(args, setup.warm_start)
     except (FileNotFoundError, ValueError) as exc:
