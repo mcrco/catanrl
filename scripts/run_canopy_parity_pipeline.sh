@@ -67,4 +67,34 @@ if [[ "${CATANRL_PARITY_RUN_EVAL:-1}" == "1" ]]; then
   mkdir -p "$eval_root"
   scripts/eval_canopy_parity.sh "$alphazero_experiment" "$selected_checkpoint" 12043 \
     2>&1 | tee "$eval_root/run.log"
+
+  canopy_release_repo=${CATANRL_CANOPY_RELEASE_REPO:-}
+  canopy_release_checkpoint=${CATANRL_CANOPY_RELEASE_CHECKPOINT:-}
+  if [[ -n "$canopy_release_repo" || -n "$canopy_release_checkpoint" ]]; then
+    if [[ -z "$canopy_release_repo" || -z "$canopy_release_checkpoint" ]]; then
+      echo "Set both CATANRL_CANOPY_RELEASE_REPO and CATANRL_CANOPY_RELEASE_CHECKPOINT" >&2
+      exit 2
+    fi
+    parity_budget=${CATANRL_PARITY_FULL_SIMULATIONS:-1600}
+    reference_games=${CATANRL_CANOPY_REFERENCE_GAMES:-800}
+    reference_root=${CATANRL_CANOPY_REFERENCE_OUTPUT_DIR:-experiments/canopy-release-reference}
+    reference_result="$reference_root/canopy-nexus-v3-s${parity_budget}-vs-random.json"
+    candidate_result="$eval_root/native-s${parity_budget}-vs-random/results.json"
+    comparison_result="$eval_root/official-canopy-nexus-v3-noninferiority.json"
+
+    if [[ ! -f "$reference_result" ]]; then
+      CATANRL_CANOPY_REFERENCE_SIMULATIONS="$parity_budget" \
+        scripts/eval_canopy_release_reference.sh \
+          "$canopy_release_repo" \
+          "$canopy_release_checkpoint" \
+          "$reference_games" \
+          "$reference_root"
+    fi
+    env -u VIRTUAL_ENV uv run python scripts/compare_canopy_reference.py \
+      --candidate "$candidate_result" \
+      --reference "$reference_result" \
+      --budget "$parity_budget" \
+      --noninferiority-margin "${CATANRL_CANOPY_NONINFERIORITY_MARGIN:-0.05}" \
+      --output "$comparison_result"
+  fi
 fi
