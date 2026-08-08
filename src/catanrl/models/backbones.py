@@ -373,6 +373,9 @@ class CatanGraphBackbone(nn.Module):
     """
 
     node_positions: torch.Tensor
+    edge_positions: torch.Tensor
+    node_edge_incidence: torch.Tensor
+    road_channel_indices: torch.Tensor
     node_adjacency: torch.Tensor
     tile_to_node: torch.Tensor
     node_to_tile: torch.Tensor
@@ -406,7 +409,7 @@ class CatanGraphBackbone(nn.Module):
         num_nodes = len(node_ids)
         num_tiles = len(tile_items)
 
-        node_positions, _ = get_node_and_edge_maps()
+        node_positions, edge_position_map = get_node_and_edge_maps()
         positions = torch.tensor(
             [node_positions[node_id] for node_id in node_ids],
             dtype=torch.long,
@@ -418,13 +421,19 @@ class CatanGraphBackbone(nn.Module):
                 incidence[node_to_local[node_id], tile_index] = 1.0
 
         node_adjacency = torch.zeros(num_nodes, num_nodes, dtype=torch.float32)
+        edges = list(get_edges(catan_map.land_nodes))
+        node_edge_incidence = torch.zeros(num_nodes, len(edges), dtype=torch.float32)
         edge_pairs: list[tuple[int, int]] = []
-        for first, second in get_edges(catan_map.land_nodes):
+        edge_positions: list[tuple[int, int]] = []
+        for edge_index, (first, second) in enumerate(edges):
             first_local = node_to_local[first]
             second_local = node_to_local[second]
             node_adjacency[first_local, second_local] = 1.0
             node_adjacency[second_local, first_local] = 1.0
+            node_edge_incidence[first_local, edge_index] = 1.0
+            node_edge_incidence[second_local, edge_index] = 1.0
             edge_pairs.append((first_local, second_local))
+            edge_positions.append(edge_position_map[(first, second)])
         node_adjacency /= node_adjacency.sum(dim=1, keepdim=True).clamp_min(1.0)
         tile_to_node = incidence / incidence.sum(dim=1, keepdim=True).clamp_min(1.0)
         # ``transpose`` returns a view.  Clone before normalizing so this does
@@ -459,6 +468,17 @@ class CatanGraphBackbone(nn.Module):
         self.output_dim = self.pooled_dim + (num_nodes + num_tiles) * config.hidden_dim
 
         self.register_buffer("node_positions", positions, persistent=False)
+        self.register_buffer(
+            "edge_positions",
+            torch.tensor(edge_positions, dtype=torch.long),
+            persistent=False,
+        )
+        self.register_buffer("node_edge_incidence", node_edge_incidence, persistent=False)
+        self.register_buffer(
+            "road_channel_indices",
+            torch.arange(config.num_players, dtype=torch.long) * 2 + 1,
+            persistent=False,
+        )
         self.register_buffer("node_adjacency", node_adjacency, persistent=False)
         self.register_buffer("tile_to_node", tile_to_node, persistent=False)
         self.register_buffer("node_to_tile", node_to_tile, persistent=False)
@@ -507,6 +527,24 @@ class CatanGraphBackbone(nn.Module):
             self.node_positions[:, 1],
             :,
         ]
+        # Road ownership lives at Catanatron's edge pixels. Aggregate incident
+        # roads into the otherwise-zero road channels at each endpoint so the
+        # graph layers retain local network topology without changing the
+        # observation or checkpoint tensor shapes.
+        edge_raw = board[
+            :,
+            self.edge_positions[:, 0],
+            self.edge_positions[:, 1],
+            :,
+        ]
+        edge_roads = edge_raw.index_select(-1, self.road_channel_indices)
+        incident_roads = torch.einsum(
+            "ne,bep->bnp",
+            self.node_edge_incidence,
+            edge_roads,
+        ) / 3.0
+        node_raw = node_raw.clone()
+        node_raw[..., self.road_channel_indices] = incident_roads
         resource_offset = 2 * self.config.num_players
         tile_source = node_raw[:, :, resource_offset : resource_offset + 6]
         tile_raw = torch.einsum("tn,bnc->btc", self.tile_decoder, tile_source)

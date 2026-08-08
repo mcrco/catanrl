@@ -115,6 +115,43 @@ def test_catan_graph_policy_mapping_covers_every_flat_action_once() -> None:
     assert head.num_tiles == 19
 
 
+def test_catan_graph_injects_edge_roads_into_endpoint_node_features() -> None:
+    model = build_flat_policy_value_network(
+        _graph_config(),
+        get_action_space_size(2, "BASE"),
+        value_head_type="wdl",
+    )
+    assert isinstance(model.backbone, CatanGraphBackbone)
+    backbone = model.backbone
+    state = torch.zeros(1, backbone.config.input_dim)
+    board = state[:, backbone.numeric_dim :].reshape(
+        1,
+        backbone.board_width,
+        backbone.board_height,
+        backbone.board_channels,
+    )
+    edge_x, edge_y = backbone.edge_positions[0].tolist()
+    current_player_road_channel = int(backbone.road_channel_indices[0])
+    board[0, edge_x, edge_y, current_player_road_channel] = 1.0
+    captured_node_inputs: list[torch.Tensor] = []
+
+    def capture_node_inputs(_module, inputs) -> None:
+        captured_node_inputs.append(inputs[0].detach().clone())
+
+    handle = backbone.node_projection.register_forward_pre_hook(capture_node_inputs)
+    try:
+        backbone(state)
+    finally:
+        handle.remove()
+
+    assert len(captured_node_inputs) == 1
+    first, second = backbone.edge_pairs[0]
+    road_features = captured_node_inputs[0][0, :, current_player_road_channel]
+    assert road_features[first] == pytest.approx(1.0 / 3.0)
+    assert road_features[second] == pytest.approx(1.0 / 3.0)
+    assert torch.count_nonzero(road_features) == 2
+
+
 def test_catan_graph_rejects_generic_hierarchical_policy_head() -> None:
     with pytest.raises(ValueError, match="require the flat action model"):
         build_hierarchical_policy_value_network(
