@@ -45,6 +45,7 @@ class _NativeSelfPlaySample:
     action_mask: np.ndarray
     player: int
     search_value: float
+    search_wdl: np.ndarray
     full_search: bool
 
     def __iter__(self):
@@ -71,6 +72,28 @@ def _blend_terminal_search_value(
     terminal = float(np.clip(terminal_value, -1.0, 1.0))
     search = float(np.clip(search_value, -1.0, 1.0))
     return (1.0 - search_weight) * terminal + search_weight * search
+
+
+def _blend_terminal_search_wdl(
+    terminal_value: float,
+    search_wdl: np.ndarray,
+    search_weight: float,
+) -> np.ndarray:
+    """Blend a one-hot terminal outcome with search-refined WDL probabilities."""
+    if not 0.0 <= search_weight <= 1.0:
+        raise ValueError("search_weight must be between 0 and 1")
+    probabilities = np.asarray(search_wdl, dtype=np.float64)
+    if probabilities.shape != (3,):
+        raise ValueError(f"Expected search WDL with shape (3,), got {probabilities.shape}")
+    if not np.isfinite(probabilities).all() or bool((probabilities < 0.0).any()):
+        raise ValueError("search WDL must be finite and non-negative")
+    total = float(probabilities.sum())
+    if total <= 0.0:
+        raise ValueError("search WDL must have positive mass")
+    probabilities = probabilities / total
+    terminal = np.zeros(3, dtype=np.float64)
+    terminal[0 if terminal_value > 0.0 else 2 if terminal_value < 0.0 else 1] = 1.0
+    return (1.0 - search_weight) * terminal + search_weight * probabilities
 
 
 def _choose_trajectory_action(
@@ -140,7 +163,7 @@ def _native_search_policy(
     c_visit: float = 50.0,
     c_scale: float = 1.0,
     search_selection: str = "puct",
-) -> tuple[np.ndarray, int, np.ndarray, float]:
+) -> tuple[np.ndarray, int, np.ndarray, float, np.ndarray]:
     result = run_native_search_policy(
         game=game,
         map_type=map_type,
@@ -169,6 +192,7 @@ def _native_search_policy(
         result.action,
         result.full_state,
         result.diagnostics.search_value,
+        result.wdl,
     )
 
 
@@ -250,7 +274,7 @@ def _play_native_self_play_game(
                     if full_search
                     else int(args_dict.get("fast_simulations", args_dict["num_simulations"]))
                 )
-                policy, action, full_state, search_value = _native_search_policy(
+                policy, action, full_state, search_value, search_wdl = _native_search_policy(
                     game=game,
                     map_type=map_type,
                     inference_backend=inference_backend,
@@ -304,6 +328,7 @@ def _play_native_self_play_game(
                         action_mask=action_mask.copy(),
                         player=current_player,
                         search_value=search_value,
+                        search_wdl=search_wdl,
                         full_search=full_search,
                     )
                 )
@@ -337,7 +362,15 @@ def _native_training_worker_main(
     try:
         for episode_seed in episode_seeds:
             experiences: list[
-                tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float, bool]
+                tuple[
+                    np.ndarray,
+                    np.ndarray,
+                    np.ndarray,
+                    np.ndarray,
+                    float,
+                    bool,
+                    np.ndarray,
+                ]
             ] = []
             stats: Counter[str] = Counter()
             samples, winner = _play_native_self_play_game(
@@ -353,11 +386,12 @@ def _native_training_worker_main(
                 terminal_value = (
                     0.0 if winner is None else (1.0 if sample.player == winner else -1.0)
                 )
-                value = _blend_terminal_search_value(
+                value_wdl = _blend_terminal_search_wdl(
                     terminal_value,
-                    sample.search_value,
+                    sample.search_wdl,
                     search_value_weight,
                 )
+                value = float(value_wdl[0] - value_wdl[2])
                 experiences.append(
                     (
                         sample.actor_state,
@@ -366,6 +400,7 @@ def _native_training_worker_main(
                         sample.action_mask,
                         value,
                         sample.full_search,
+                        value_wdl,
                     )
                 )
             stats["full_search_decisions"] += sum(int(sample.full_search) for sample in samples)
@@ -505,9 +540,15 @@ def generate_native_self_play_data(
     stats: Counter[str] = Counter()
 
     def handle_result(message: dict) -> None:
-        for actor_state, critic_state, policy, action_mask, value, full_search in message[
-            "experiences"
-        ]:
+        for (
+            actor_state,
+            critic_state,
+            policy,
+            action_mask,
+            value,
+            full_search,
+            value_wdl,
+        ) in message["experiences"]:
             experiences.append(
                 SelfPlayExperience(
                     actor_state=actor_state,
@@ -516,6 +557,7 @@ def generate_native_self_play_data(
                     action_mask=action_mask,
                     value=float(value),
                     full_search=bool(full_search),
+                    value_wdl=np.asarray(value_wdl, dtype=np.float32),
                 )
             )
         for key, count in message["stats"].items():

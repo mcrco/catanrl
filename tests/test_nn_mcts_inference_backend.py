@@ -3,8 +3,11 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
+import pytest
 import torch
 
+from catanrl.models.heads import FlatPolicyHead, WDLValueHead
+from catanrl.models.wrappers import PolicyValueNetworkWrapper
 from catanrl.players.nn_mcts_player import (
     _CentralNNMCTSInferenceServer,
     _LocalNNMCTSInferenceBackend,
@@ -47,6 +50,35 @@ def test_local_inference_backend_runs_separate_policy_and_critic_models():
 
     np.testing.assert_allclose(result.policy_logits, np.array([6.0, -1.0, 3.0], dtype=np.float32))
     assert result.value == 0.5
+    assert result.wdl is None
+
+
+def test_local_inference_backend_preserves_shared_wdl_probabilities():
+    model = PolicyValueNetworkWrapper(
+        torch.nn.Identity(),
+        FlatPolicyHead(3, 3),
+        WDLValueHead(3),
+    )
+    assert isinstance(model.value_head, WDLValueHead)
+    assert model.value_head.value_head.bias is not None
+    with torch.no_grad():
+        model.value_head.value_head.weight.zero_()
+        model.value_head.value_head.bias.copy_(torch.log(torch.tensor([0.5, 0.3, 0.2])))
+    backend = _LocalNNMCTSInferenceBackend(
+        policy_model=model,
+        critic_model=None,
+        model_type="flat",
+        device="cpu",
+    )
+
+    result = backend.evaluate_leaf(
+        np.array([1.0, 2.0, 3.0], dtype=np.float32),
+        np.array([1.0, 2.0, 3.0], dtype=np.float32),
+    )
+
+    assert result.wdl is not None
+    np.testing.assert_allclose(result.wdl, [0.5, 0.3, 0.2], atol=1e-7)
+    assert result.value == pytest.approx(0.3)
 
 
 def test_remote_inference_backend_correlates_parallel_leaf_requests():
@@ -146,6 +178,49 @@ def test_central_inference_server_batches_mixed_worker_requests():
     np.testing.assert_allclose(response_1["policy_logits"], np.array([15.0, -1.0, 6.0]))
     np.testing.assert_allclose(response_1["value"], 0.3)
     assert server.stats() == (2, 1)
+
+
+def test_central_inference_server_transports_shared_wdl_probabilities():
+    model = PolicyValueNetworkWrapper(
+        torch.nn.Identity(),
+        FlatPolicyHead(3, 3),
+        WDLValueHead(3),
+    )
+    assert isinstance(model.value_head, WDLValueHead)
+    assert model.value_head.value_head.bias is not None
+    with torch.no_grad():
+        model.value_head.value_head.weight.zero_()
+        model.value_head.value_head.bias.copy_(torch.log(torch.tensor([0.4, 0.4, 0.2])))
+    ctx = mp.get_context("spawn")
+    request_queue = ctx.Queue()
+    response_queue = ctx.Queue()
+    server = _CentralNNMCTSInferenceServer(
+        policy_model=model,
+        critic_model=None,
+        model_type="flat",
+        device="cpu",
+        request_queue=request_queue,
+        response_queues=[response_queue],
+        max_batch_size=4,
+        max_wait_ms=1.0,
+    )
+
+    server.start()
+    try:
+        request_queue.put(
+            _RemoteLeafEvaluationRequest(
+                request_id=30,
+                worker_id=0,
+                actor_features=np.array([1.0, 2.0, 3.0], dtype=np.float32),
+                critic_features=np.array([1.0, 2.0, 3.0], dtype=np.float32),
+            )
+        )
+        response = response_queue.get(timeout=5.0)
+    finally:
+        server.stop()
+
+    np.testing.assert_allclose(response["wdl"], [0.4, 0.4, 0.2], atol=1e-7)
+    assert response["value"] == pytest.approx(0.2)
 
 
 def test_parallel_self_play_assignment_and_merge_helpers_preserve_totals():

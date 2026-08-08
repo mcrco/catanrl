@@ -605,7 +605,30 @@ class AlphaZeroTrainer:
             ).sum(dim=1)
             soft_policy_loss = (per_sample_soft_loss * policy_weights).sum() / policy_weight_sum
         if value_logits is not None and value_targets is not None:
-            value_distribution_targets = values_to_wdl_targets(value_targets)
+            if all(experience.value_wdl is None for experience in batch):
+                value_distribution_targets = values_to_wdl_targets(value_targets)
+            else:
+                target_rows = []
+                for experience in batch:
+                    if experience.value_wdl is None:
+                        value = float(np.clip(experience.value, -1.0, 1.0))
+                        target_rows.append([(1.0 + value) * 0.5, 0.0, (1.0 - value) * 0.5])
+                    else:
+                        row = np.asarray(experience.value_wdl, dtype=np.float32)
+                        if (
+                            row.shape != (3,)
+                            or not np.isfinite(row).all()
+                            or bool((row < 0.0).any())
+                            or float(row.sum()) <= 0.0
+                        ):
+                            raise RuntimeError(
+                                "Search WDL target must contain three finite, "
+                                "non-negative probabilities"
+                            )
+                        target_rows.append(row / float(row.sum()))
+                value_distribution_targets = torch.from_numpy(
+                    np.asarray(target_rows, dtype=np.float32)
+                ).to(self.device)
             value_loss = -(
                 value_distribution_targets * torch.log_softmax(value_logits, dim=-1)
             ).sum(dim=-1).mean()

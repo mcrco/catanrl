@@ -83,3 +83,31 @@ def forward_policy_value(
     value_input = critic_states if critic_states is not None else states
     values = critic_model(value_input).view(-1)
     return logits, values
+
+
+def forward_policy_value_wdl(
+    model: PolicyNetworkWrapper | PolicyValueNetworkWrapper,
+    critic_model: ValueNetworkWrapper | None,
+    states: torch.Tensor,
+    model_type: str,
+    critic_states: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    """Return scalar Q plus full WDL probabilities when the model exposes them."""
+    if isinstance(model, PolicyValueNetworkWrapper) and isinstance(
+        model.value_head, WDLValueHead
+    ):
+        logits, values, value_logits = forward_shared_policy_value_training(
+            model,
+            states,
+            model_type,
+        )
+        assert value_logits is not None
+        return logits, values, torch.softmax(value_logits, dim=-1)
+    logits, values = forward_policy_value(
+        model,
+        critic_model,
+        states,
+        model_type,
+        critic_states=critic_states,
+    )
+    return logits, values, None

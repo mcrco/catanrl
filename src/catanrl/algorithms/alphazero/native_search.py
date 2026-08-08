@@ -49,6 +49,7 @@ class NativeSearchResult:
     policy: np.ndarray
     action: int
     full_state: np.ndarray
+    wdl: np.ndarray
     diagnostics: NativeSearchDiagnostics
 
 
@@ -102,6 +103,31 @@ def _softmax(values: np.ndarray) -> np.ndarray:
     if not np.isfinite(total) or total <= 0.0:
         return np.full(values.shape, 1.0 / values.size, dtype=np.float64)
     return weights / total
+
+
+def _scaled_wdl(wdl: np.ndarray, value_scale: float) -> np.ndarray:
+    """Scale W-L while preserving the network's explicit draw probability."""
+    probabilities = np.asarray(wdl, dtype=np.float64)
+    if probabilities.shape != (3,):
+        raise ValueError(f"Expected WDL with shape (3,), got {probabilities.shape}")
+    if not np.isfinite(probabilities).all() or bool((probabilities < 0.0).any()):
+        raise ValueError("WDL probabilities must be finite and non-negative")
+    total = float(probabilities.sum())
+    if total <= 0.0:
+        raise ValueError("WDL probabilities must have positive mass")
+    probabilities = probabilities / total
+    decisive_mass = float(probabilities[0] + probabilities[2])
+    scaled_q = float(
+        np.clip((probabilities[0] - probabilities[2]) * value_scale, -decisive_mass, decisive_mass)
+    )
+    return np.asarray(
+        [
+            (decisive_mass + scaled_q) * 0.5,
+            probabilities[1],
+            (decisive_mass - scaled_q) * 0.5,
+        ],
+        dtype=np.float64,
+    )
 
 
 def _entropy(probabilities: np.ndarray) -> float:
@@ -255,8 +281,16 @@ def run_native_search_policy(
         root_evaluation = evaluate(full_state)
         neural_evaluations = 1
         backed_up_root_value = float(np.clip(root_evaluation.value * value_scale, -1.0, 1.0))
+        root_wdl = (
+            None
+            if root_evaluation.wdl is None
+            else _scaled_wdl(root_evaluation.wdl, value_scale)
+        )
         if search_selection == "completed-q":
-            search.set_root_value(backed_up_root_value)
+            if root_wdl is None:
+                search.set_root_value(backed_up_root_value)
+            else:
+                search.set_root_wdl(root_wdl)
         if not search.root_expanded:
             search.initialize_root(root_evaluation.policy_logits)
         if add_noise and dirichlet_frac > 0.0:
@@ -274,10 +308,16 @@ def run_native_search_policy(
             search.evaluate_leaf(
                 evaluation.policy_logits,
                 float(evaluation.value) * value_scale,
+                (
+                    None
+                    if evaluation.wdl is None
+                    else _scaled_wdl(evaluation.wdl, value_scale)
+                ),
             )
         visits = search.root_visits().astype(np.float64)
         action_values = search.root_action_values()
         search_metrics = search.metrics()
+        search_wdl = search.root_wdl()
     finally:
         if owns_search:
             search.close()
@@ -346,6 +386,7 @@ def run_native_search_policy(
         policy=policy,
         action=action,
         full_state=full_state,
+        wdl=search_wdl,
         diagnostics=diagnostics,
     )
 

@@ -112,6 +112,7 @@ class NativeMCTSSearch:
         library = self._library
         handle = ctypes.c_void_p
         float_pointer = ctypes.POINTER(ctypes.c_float)
+        double_pointer = ctypes.POINTER(ctypes.c_double)
         library.cppanatron_search_create.argtypes = [
             handle,
             ctypes.c_double,
@@ -137,6 +138,12 @@ class NativeMCTSSearch:
             library.cppanatron_search_set_root_value.argtypes = [
                 handle,
                 ctypes.c_double,
+            ]
+        if hasattr(library, "cppanatron_search_set_root_wdl"):
+            library.cppanatron_search_set_root_wdl.argtypes = [
+                handle,
+                double_pointer,
+                ctypes.c_size_t,
             ]
         if hasattr(library, "cppanatron_search_enable_completed_q_selection"):
             library.cppanatron_search_enable_completed_q_selection.argtypes = [
@@ -168,6 +175,14 @@ class NativeMCTSSearch:
             ctypes.c_size_t,
             ctypes.c_double,
         ]
+        if hasattr(library, "cppanatron_search_evaluate_leaf_wdl"):
+            library.cppanatron_search_evaluate_leaf_wdl.argtypes = [
+                handle,
+                float_pointer,
+                ctypes.c_size_t,
+                double_pointer,
+                ctypes.c_size_t,
+            ]
         library.cppanatron_search_root_visits.argtypes = [
             handle,
             ctypes.POINTER(ctypes.c_uint32),
@@ -178,6 +193,12 @@ class NativeMCTSSearch:
             ctypes.POINTER(ctypes.c_double),
             ctypes.c_size_t,
         ]
+        if hasattr(library, "cppanatron_search_root_wdl"):
+            library.cppanatron_search_root_wdl.argtypes = [
+                handle,
+                double_pointer,
+                ctypes.c_size_t,
+            ]
         if hasattr(library, "cppanatron_search_q_bounds"):
             library.cppanatron_search_q_bounds.argtypes = [
                 handle,
@@ -217,6 +238,19 @@ class NativeMCTSSearch:
             )
         return logits
 
+    @staticmethod
+    def _wdl_distribution(wdl: np.ndarray) -> np.ndarray:
+        probabilities = np.ascontiguousarray(wdl, dtype=np.float64)
+        if probabilities.shape != (3,):
+            raise ValueError(f"Expected WDL with shape (3,), got {probabilities.shape}")
+        if not np.isfinite(probabilities).all() or bool((probabilities < 0.0).any()):
+            raise ValueError("WDL probabilities must be finite and non-negative")
+        total = float(probabilities.sum())
+        if total <= 0.0:
+            raise ValueError("WDL probabilities must have positive mass")
+        probabilities /= total
+        return probabilities
+
     def initialize_root(self, policy_logits: np.ndarray) -> None:
         logits = self._policy_logits(policy_logits)
         self._check_result(
@@ -232,6 +266,20 @@ class NativeMCTSSearch:
         if setter is None:
             raise RuntimeError("cppanatron library does not support root network values")
         self._check_result(setter(self._handle, float(value)))
+
+    def set_root_wdl(self, wdl: np.ndarray) -> None:
+        probabilities = self._wdl_distribution(wdl)
+        setter = getattr(self._library, "cppanatron_search_set_root_wdl", None)
+        if setter is None:
+            self.set_root_value(float(probabilities[0] - probabilities[2]))
+            return
+        self._check_result(
+            setter(
+                self._handle,
+                probabilities.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+                probabilities.size,
+            )
+        )
 
     def add_root_dirichlet_noise(self, alpha: float, fraction: float) -> None:
         self._check_result(
@@ -270,8 +318,26 @@ class NativeMCTSSearch:
             return None
         return self._leaf_observation.copy(), int(player.value)
 
-    def evaluate_leaf(self, policy_logits: np.ndarray, value: float) -> None:
+    def evaluate_leaf(
+        self,
+        policy_logits: np.ndarray,
+        value: float,
+        wdl: np.ndarray | None = None,
+    ) -> None:
         logits = self._policy_logits(policy_logits)
+        evaluate_wdl = getattr(self._library, "cppanatron_search_evaluate_leaf_wdl", None)
+        if wdl is not None and evaluate_wdl is not None:
+            probabilities = self._wdl_distribution(wdl)
+            self._check_result(
+                evaluate_wdl(
+                    self._handle,
+                    logits.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+                    logits.size,
+                    probabilities.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+                    probabilities.size,
+                )
+            )
+            return
         self._check_result(
             self._library.cppanatron_search_evaluate_leaf(
                 self._handle,
@@ -303,6 +369,21 @@ class NativeMCTSSearch:
             )
         )
         return values
+
+    def root_wdl(self) -> np.ndarray:
+        getter = getattr(self._library, "cppanatron_search_root_wdl", None)
+        if getter is None:
+            value = float(self.metrics().root_value)
+            return np.asarray([(1.0 + value) * 0.5, 0.0, (1.0 - value) * 0.5])
+        probabilities = np.empty(3, dtype=np.float64)
+        self._check_result(
+            getter(
+                self._handle,
+                probabilities.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+                probabilities.size,
+            )
+        )
+        return probabilities
 
     @property
     def root_expanded(self) -> bool:

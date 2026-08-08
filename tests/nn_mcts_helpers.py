@@ -24,10 +24,12 @@ class MockInferenceBackend(_NNMCTSInferenceBackend):
         num_actions: int,
         *,
         value: float = 0.0,
+        wdl: np.ndarray | None = None,
         policy_logits: np.ndarray | None = None,
     ) -> None:
         self.num_actions = num_actions
         self.value = float(value)
+        self.wdl = None if wdl is None else np.asarray(wdl, dtype=np.float64)
         if policy_logits is None:
             self.policy_logits = np.zeros(num_actions, dtype=np.float32)
         else:
@@ -47,6 +49,7 @@ class MockInferenceBackend(_NNMCTSInferenceBackend):
         return _LeafEvaluation(
             policy_logits=self.policy_logits.copy(),
             value=self.value,
+            wdl=None if self.wdl is None else self.wdl.copy(),
         )
 
 

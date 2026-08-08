@@ -34,7 +34,7 @@ from catanrl.features.catanatron_utils import (
     get_observation_indices_from_full,
 )
 from catanrl.models import PolicyNetworkWrapper, PolicyValueNetworkWrapper, ValueNetworkWrapper
-from catanrl.models.inference_utils import forward_policy_value
+from catanrl.models.inference_utils import forward_policy_value, forward_policy_value_wdl
 from catanrl.utils.catanatron_action_space import get_action_space_size, to_action_space
 
 EPSILON = 1e-8
@@ -132,6 +132,7 @@ class _Node:
 class _LeafEvaluation:
     policy_logits: np.ndarray
     value: float
+    wdl: np.ndarray | None = None
 
 
 @dataclass
@@ -175,19 +176,21 @@ class _LocalNNMCTSInferenceBackend(_NNMCTSInferenceBackend):
         with torch.inference_mode():
             actor_tensor = torch.from_numpy(actor_features.reshape(1, -1)).to(self.device)
             critic_tensor = torch.from_numpy(critic_features.reshape(1, -1)).to(self.device)
-            logits, value_tensor = forward_policy_value(
+            logits, value_tensor, wdl_tensor = forward_policy_value_wdl(
                 self.policy_model,
                 self.critic_model,
                 actor_tensor,
                 self.model_type,
                 critic_states=critic_tensor,
             )
-            combined = torch.cat([logits.reshape(-1), value_tensor.reshape(-1)]).to("cpu")
-
-        combined_np = combined.numpy()
-        policy_logits = np.array(combined_np[:-1], dtype=np.float32)
-        value = float(np.clip(float(combined_np[-1]), -1.0, 1.0))
-        return _LeafEvaluation(policy_logits=policy_logits, value=value)
+            policy_logits = logits.reshape(-1).to("cpu").numpy().astype(np.float32, copy=False)
+            value = float(np.clip(float(value_tensor.reshape(-1)[0].cpu()), -1.0, 1.0))
+            wdl = (
+                None
+                if wdl_tensor is None
+                else wdl_tensor.reshape(-1, 3)[0].to("cpu").numpy().astype(np.float64)
+            )
+        return _LeafEvaluation(policy_logits=policy_logits, value=value, wdl=wdl)
 
 
 class _RemoteNNMCTSInferenceBackend(_NNMCTSInferenceBackend):
@@ -262,6 +265,7 @@ class _RemoteNNMCTSInferenceBackend(_NNMCTSInferenceBackend):
                     _LeafEvaluation(
                         policy_logits=message["policy_logits"],
                         value=float(message["value"]),
+                        wdl=message.get("wdl"),
                     )
                 )
 
@@ -332,6 +336,7 @@ class _SyncRemoteNNMCTSInferenceBackend(_NNMCTSInferenceBackend):
                 return _LeafEvaluation(
                     policy_logits=message["policy_logits"],
                     value=float(message["value"]),
+                    wdl=message.get("wdl"),
                 )
 
         self.request_queue.put(request)
@@ -418,7 +423,7 @@ class _CentralNNMCTSInferenceServer(threading.Thread):
                         axis=0,
                     )
                     critic_tensor = torch.from_numpy(critic_features).to(self.device)
-                logits, values = forward_policy_value(
+                logits, values, wdl = forward_policy_value_wdl(
                     self.policy_model,
                     self.critic_model,
                     actor_tensor,
@@ -427,15 +432,23 @@ class _CentralNNMCTSInferenceServer(threading.Thread):
                 )
                 policy_logits = logits.detach().cpu().numpy()
                 values_np = values.detach().cpu().numpy()
+                wdl_np = None if wdl is None else wdl.detach().cpu().numpy()
             self.total_evaluations += len(batch)
             self.total_batches += 1
 
-            for request, logits_np, value in zip(batch, policy_logits, values_np):
+            for index, (request, logits_np, value) in enumerate(
+                zip(batch, policy_logits, values_np)
+            ):
                 self.response_queues[request.worker_id].put(
                     {
                         "request_id": request.request_id,
                         "policy_logits": logits_np.astype(np.float32, copy=False),
                         "value": float(np.clip(float(value), -1.0, 1.0)),
+                        "wdl": (
+                            None
+                            if wdl_np is None
+                            else wdl_np[index].astype(np.float64, copy=False)
+                        ),
                     }
                 )
         except Exception as exc:

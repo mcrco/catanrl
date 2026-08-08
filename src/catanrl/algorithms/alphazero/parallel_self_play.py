@@ -189,6 +189,7 @@ class SelfPlayExperience:
     action_mask: np.ndarray
     value: float
     full_search: bool = True
+    value_wdl: np.ndarray | None = None
 
 
 class _TrainingSelfPlayPlayer(NNMCTSPlayer):

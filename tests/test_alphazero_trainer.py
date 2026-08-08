@@ -101,6 +101,7 @@ def _experience(
     *,
     legal_actions: tuple[int, ...] = (0, 1, 2, 3),
     full_search: bool = True,
+    value_wdl: np.ndarray | None = None,
 ) -> SelfPlayExperience:
     policy = np.zeros(4, dtype=np.float32)
     policy[action] = 1.0
@@ -113,6 +114,7 @@ def _experience(
         action_mask=action_mask,
         value=value,
         full_search=full_search,
+        value_wdl=value_wdl,
     )
 
 
@@ -222,6 +224,30 @@ def test_wdl_shared_value_head_trains_categorically_but_infers_scalar_q() -> Non
     assert values.shape == (2,)
     assert torch.all(values >= -1.0)
     assert torch.all(values <= 1.0)
+
+
+def test_wdl_shared_value_head_uses_search_refined_draw_mass() -> None:
+    trainer = _shared_trainer(categorical_value=True)
+    assert isinstance(trainer.student_policy_model, PolicyValueNetworkWrapper)
+    assert isinstance(trainer.student_policy_model.value_head, WDLValueHead)
+    with torch.no_grad():
+        trainer.student_policy_model.value_head.value_head.weight.zero_()
+        trainer.student_policy_model.value_head.value_head.bias.copy_(
+            torch.tensor([2.0, 0.0, -2.0])
+        )
+    draw = np.asarray([0.0, 1.0, 0.0], dtype=np.float32)
+    trainer.replay_buffer.extend(
+        [
+            _experience(0, 0.0, value_wdl=draw),
+            _experience(1, 0.0, value_wdl=draw),
+        ]
+    )
+
+    metrics = trainer.update_weights()
+
+    assert metrics is not None
+    expected = -torch.log_softmax(torch.tensor([2.0, 0.0, -2.0]), dim=-1)[1]
+    assert metrics["value_loss"] == pytest.approx(float(expected))
 
 
 def test_auxiliary_soft_policy_head_is_fresh_masked_and_persisted() -> None:

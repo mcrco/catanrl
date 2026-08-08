@@ -154,6 +154,71 @@ def test_completed_q_search_uses_canopy_root_allocation_and_global_q_bounds():
     assert completed_metrics.q_max >= 0.25
 
 
+def test_native_mcts_preserves_search_refined_wdl_probabilities():
+    game = NativeGame(2, "MINI", seed=47, map_seed=49)
+    logits = np.zeros(game.action_space_size, dtype=np.float32)
+    try:
+        with NativeMCTSSearch(
+            game,
+            "MINI",
+            seed=53,
+            search_selection="completed-q",
+        ) as search:
+            search.set_root_wdl(np.asarray([0.2, 0.6, 0.2]))
+            search.initialize_root(logits)
+            np.testing.assert_allclose(search.root_wdl(), [0.2, 0.6, 0.2])
+
+            leaf = search.select_leaf()
+            assert leaf is not None
+            search.evaluate_leaf(
+                logits,
+                value=0.6,
+                wdl=np.asarray([0.7, 0.2, 0.1]),
+            )
+
+            np.testing.assert_allclose(search.root_wdl(), [0.45, 0.4, 0.15])
+            assert search.metrics().root_value == pytest.approx(0.3)
+    finally:
+        game.close()
+
+
+def test_native_search_returns_full_wdl_from_categorical_backend():
+    game = NativeGame(2, "MINI", seed=55, map_seed=57)
+    backend = MockInferenceBackend(
+        game.action_space_size,
+        value=0.2,
+        wdl=np.asarray([0.5, 0.2, 0.3]),
+    )
+    actor_indices = get_observation_indices_from_full(2, "MINI", "full")
+    try:
+        result = run_native_search_policy(
+            game=game,
+            map_type="MINI",
+            inference_backend=backend,
+            actor_indices=actor_indices,
+            critic_indices=actor_indices,
+            num_simulations=4,
+            c_puct=1.5,
+            search_seed=59,
+            add_noise=False,
+            dirichlet_alpha=0.3,
+            dirichlet_frac=0.0,
+            action_temperature=0.0,
+            target_temperature=1.0,
+            rng=np.random.default_rng(61),
+            search_selection="completed-q",
+            policy_target="completed-q",
+        )
+    finally:
+        game.close()
+
+    np.testing.assert_allclose(result.wdl.sum(), 1.0)
+    assert result.wdl[1] == pytest.approx(0.2)
+    assert result.diagnostics.search_value == pytest.approx(
+        float(result.wdl[0] - result.wdl[2])
+    )
+
+
 def test_native_mcts_reuses_a_deterministic_played_subtree():
     game = NativeGame(2, "MINI", seed=59, map_seed=61)
     logits = np.zeros(game.action_space_size, dtype=np.float32)
@@ -525,16 +590,23 @@ def test_native_self_play_game_emits_standard_legal_training_fields():
         assert float(sample.policy.sum()) == pytest.approx(1.0)
         assert np.all(sample.policy[~sample.action_mask] == 0.0)
         assert sample.player in (0, 1)
+        assert sample.search_wdl.shape == (3,)
+        assert float(sample.search_wdl.sum()) == pytest.approx(1.0)
 
 
 def test_terminal_search_value_blend_stays_on_win_loss_scale():
     from catanrl.algorithms.alphazero.native_self_play import (
+        _blend_terminal_search_wdl,
         _blend_terminal_search_value,
     )
 
     assert _blend_terminal_search_value(1.0, -0.5, 0.0) == 1.0
     assert _blend_terminal_search_value(1.0, -0.5, 0.25) == pytest.approx(0.625)
     assert _blend_terminal_search_value(-1.0, 2.0, 0.25) == pytest.approx(-0.5)
+    np.testing.assert_allclose(
+        _blend_terminal_search_wdl(1.0, np.asarray([0.2, 0.5, 0.3]), 0.25),
+        [0.8, 0.125, 0.075],
+    )
 
 
 def test_native_playout_cap_keeps_fast_decisions_for_value_training():
