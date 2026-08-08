@@ -50,8 +50,8 @@ case "${CATANRL_PARITY_WANDB:-0}" in
       --wandb-project catan
       --wandb-run-name "$experiment_name"
       --wandb-group canopy-parity
-      --wandb-tags native-cppanatron compact-xdim corrected-board-layout \
-        shared-backbone full-full win-reward fresh-dagger-pretrain \
+      --wandb-tags native-cppanatron catan-graph nexus-v3 road-aware \
+        corrected-board-layout shared-backbone full-full win-reward fresh-dagger-pretrain \
         canopy-playout-cap canopy-completed-q canopy-soft-policy \
         canopy-aux-values canopy-adamw continuous-teacher tree-reuse "$value_init_tag"
     )

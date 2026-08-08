@@ -10,7 +10,7 @@ experiment_name=$1
 seed=${2:-43}
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$repo_root"
-model_config=${CATANRL_PARITY_MODEL_CONFIG:-configs/models/xdim-compact-medium-flat-2p-full-shared.yaml}
+model_config=${CATANRL_PARITY_MODEL_CONFIG:-configs/models/catan-graph-nexus-v3-flat-2p-full-shared.yaml}
 wandb_args=()
 case "${CATANRL_PARITY_WANDB:-0}" in
   0) ;;
@@ -20,8 +20,9 @@ case "${CATANRL_PARITY_WANDB:-0}" in
       --wandb-project catan
       --wandb-run-name "$experiment_name"
       --wandb-group dagger
-      --wandb-tags native-cppanatron compact-xdim corrected-board-layout \
-        shared-backbone full-full win-reward fresh-init canopy-pretrain
+      --wandb-tags native-cppanatron catan-graph nexus-v3 road-aware \
+        corrected-board-layout shared-backbone full-full win-reward \
+        fresh-init canopy-pretrain
     )
     ;;
   *)
