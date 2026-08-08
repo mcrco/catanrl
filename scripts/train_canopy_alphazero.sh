@@ -33,6 +33,26 @@ parity_games=${CATANRL_PARITY_GAMES_PER_ITERATION:-256}
 parity_iterations=${CATANRL_PARITY_ITERATIONS:-60}
 parity_full_simulations=${CATANRL_PARITY_FULL_SIMULATIONS:-1600}
 parity_fast_simulations=${CATANRL_PARITY_FAST_SIMULATIONS:-64}
+wandb_args=()
+case "${CATANRL_PARITY_WANDB:-0}" in
+  0) ;;
+  1)
+    wandb_args=(
+      --wandb
+      --wandb-project catan
+      --wandb-run-name "$experiment_name"
+      --wandb-group canopy-parity
+      --wandb-tags native-cppanatron compact-xdim corrected-board-layout \
+        shared-backbone full-full win-reward fresh-dagger-pretrain \
+        canopy-playout-cap canopy-completed-q canopy-soft-policy \
+        continuous-teacher tree-reuse "$value_init_tag"
+    )
+    ;;
+  *)
+    echo "CATANRL_PARITY_WANDB must be 0 or 1" >&2
+    exit 2
+    ;;
+esac
 
 env -u VIRTUAL_ENV uv run python scripts/verify_canopy_contract.py \
   --experiment "$dagger_experiment" \
@@ -93,11 +113,4 @@ env -u VIRTUAL_ENV PYTHONUNBUFFERED=1 uv run python -m catanrl.experiments.train
   --device cuda \
   --seed "$seed" \
   --experiment-name "$experiment_name" \
-  --wandb \
-  --wandb-project catan \
-  --wandb-run-name "$experiment_name" \
-  --wandb-group canopy-parity \
-  --wandb-tags native-cppanatron compact-xdim corrected-board-layout \
-    shared-backbone full-full win-reward fresh-dagger-pretrain \
-    canopy-playout-cap canopy-completed-q canopy-soft-policy \
-    continuous-teacher tree-reuse "$value_init_tag"
+  "${wandb_args[@]}"

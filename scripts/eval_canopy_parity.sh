@@ -18,6 +18,29 @@ raw_games_per_seat=${CATANRL_PARITY_RAW_EVAL_GAMES_PER_SEAT:-500}
 search_games_per_seat=${CATANRL_PARITY_SEARCH_EVAL_GAMES_PER_SEAT:-100}
 search_workers=${CATANRL_PARITY_EVAL_WORKERS:-16}
 search_simulations=${CATANRL_PARITY_FULL_SIMULATIONS:-1600}
+raw_wandb_args=()
+search_wandb_args=()
+case "${CATANRL_PARITY_WANDB:-0}" in
+  0) ;;
+  1)
+    raw_wandb_args=(
+      --wandb
+      --wandb-project catan
+      --wandb-run-name "eval-raw-${experiment_label}-${checkpoint}-s${seed}"
+      --wandb-group canopy-parity-eval
+    )
+    search_wandb_args=(
+      --wandb
+      --wandb-project catan
+      --wandb-run-name "eval-native-s${search_simulations}-${experiment_label}-${checkpoint}-s${seed}"
+      --wandb-group canopy-parity-eval
+    )
+    ;;
+  *)
+    echo "CATANRL_PARITY_WANDB must be 0 or 1" >&2
+    exit 2
+    ;;
+esac
 mkdir -p "$output_root"
 
 env -u VIRTUAL_ENV uv run python scripts/verify_canopy_contract.py \
@@ -35,10 +58,7 @@ env -u VIRTUAL_ENV PYTHONUNBUFFERED=1 uv run python scripts/eval_vs_catanatron.p
   --discard-limit 9 \
   --device cuda \
   --paired-results-out "$output_root/raw-vs-f.json" \
-  --wandb \
-  --wandb-project catan \
-  --wandb-run-name "eval-raw-${experiment_label}-${checkpoint}-s${seed}" \
-  --wandb-group canopy-parity-eval
+  "${raw_wandb_args[@]}"
 
 env -u VIRTUAL_ENV PYTHONUNBUFFERED=1 uv run python scripts/eval_native_mcts_budget_sweep.py \
   --experiment "$experiment" \
@@ -61,7 +81,4 @@ env -u VIRTUAL_ENV PYTHONUNBUFFERED=1 uv run python scripts/eval_native_mcts_bud
   --turns-limit 1000 \
   --device cuda \
   --output-dir "$output_root/native-s${search_simulations}-vs-f" \
-  --wandb \
-  --wandb-project catan \
-  --wandb-run-name "eval-native-s${search_simulations}-${experiment_label}-${checkpoint}-s${seed}" \
-  --wandb-group canopy-parity-eval
+  "${search_wandb_args[@]}"

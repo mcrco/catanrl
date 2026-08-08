@@ -11,6 +11,24 @@ seed=${2:-43}
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$repo_root"
 model_config=${CATANRL_PARITY_MODEL_CONFIG:-configs/models/xdim-compact-medium-flat-2p-full-shared.yaml}
+wandb_args=()
+case "${CATANRL_PARITY_WANDB:-0}" in
+  0) ;;
+  1)
+    wandb_args=(
+      --wandb
+      --wandb-project catan
+      --wandb-run-name "$experiment_name"
+      --wandb-group dagger
+      --wandb-tags native-cppanatron compact-xdim corrected-board-layout \
+        shared-backbone full-full win-reward fresh-init canopy-pretrain
+    )
+    ;;
+  *)
+    echo "CATANRL_PARITY_WANDB must be 0 or 1" >&2
+    exit 2
+    ;;
+esac
 
 env -u VIRTUAL_ENV uv run python scripts/verify_canopy_contract.py \
   --config "$model_config"
@@ -43,9 +61,4 @@ env -u VIRTUAL_ENV PYTHONUNBUFFERED=1 uv run python -m catanrl.experiments.train
   --device cuda \
   --seed "$seed" \
   --experiment-name "$experiment_name" \
-  --wandb \
-  --wandb-project catan \
-  --wandb-run-name "$experiment_name" \
-  --wandb-group dagger \
-  --wandb-tags native-cppanatron compact-xdim corrected-board-layout \
-    shared-backbone full-full win-reward fresh-init canopy-pretrain
+  "${wandb_args[@]}"
