@@ -723,6 +723,8 @@ class CanopyBridgeProcess:
     def decide_many(
         self,
         games_and_actions: Sequence[tuple[Game, Sequence[Action]]],
+        *,
+        active_game_ids: Sequence[str] | None = None,
     ) -> list[Action]:
         if not games_and_actions:
             return []
@@ -734,7 +736,13 @@ class CanopyBridgeProcess:
         self._next_id += 1
         snapshots: list[dict[str, Any]] = []
         next_record_counts: dict[str, int] = {}
-        active_ids = {game.id for game, _ in games_and_actions}
+        requested_ids = {game.id for game, _ in games_and_actions}
+        active_ids = requested_ids if active_game_ids is None else set(active_game_ids)
+        missing = requested_ids - active_ids
+        if missing:
+            raise ValueError(
+                f"active_game_ids must include every requested game; missing {sorted(missing)}"
+            )
         self._record_counts = {
             game_id: count
             for game_id, count in self._record_counts.items()
@@ -774,6 +782,7 @@ class CanopyBridgeProcess:
             next_record_counts[game.id] = len(records)
         payload = {
             "id": request_id,
+            "active_game_ids": sorted(active_ids),
             "states": snapshots,
         }
         self._process.stdin.write(json.dumps(payload, separators=(",", ":")) + "\n")

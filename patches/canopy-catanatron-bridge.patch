@@ -1,9 +1,9 @@
 diff --git a/examples/catan/catanatron_bridge.rs b/examples/catan/catanatron_bridge.rs
 new file mode 100644
-index 0000000..a368b73
+index 0000000..a1a6a72
 --- /dev/null
 +++ b/examples/catan/catanatron_bridge.rs
-@@ -0,0 +1,482 @@
+@@ -0,0 +1,488 @@
 +//! JSON-lines bridge for evaluating the released Canopy Catan model on
 +//! authoritative Catanatron states.
 +//!
@@ -33,6 +33,7 @@ index 0000000..a368b73
 +#[derive(Deserialize)]
 +struct BridgeRequest {
 +    id: u64,
++    active_game_ids: Option<Vec<String>>,
 +    states: Vec<StateSnapshot>,
 +}
 +
@@ -350,6 +351,7 @@ index 0000000..a368b73
 +
 +fn search_batch(
 +    states: Vec<ImportedState>,
++    active_game_ids: Option<&[String]>,
 +    evaluator: &(dyn Evaluator<GameState> + Sync),
 +    simulations: u32,
 +    rng: &mut fastrand::Rng,
@@ -362,8 +364,10 @@ index 0000000..a368b73
 +        dirichlet_epsilon: 0.0,
 +        ..Config::default()
 +    };
-+    let active_ids: HashSet<&str> = states.iter().map(|state| state.game_id.as_str()).collect();
-+    saved_searches.retain(|game_id, _| active_ids.contains(game_id.as_str()));
++    let active_ids: HashSet<String> = active_game_ids
++        .map(|ids| ids.iter().cloned().collect())
++        .unwrap_or_else(|| states.iter().map(|state| state.game_id.clone()).collect());
++    saved_searches.retain(|game_id, _| active_ids.contains(game_id));
 +
 +    let mut game_ids = Vec::with_capacity(states.len());
 +    let mut searches = Vec::with_capacity(states.len());
@@ -459,6 +463,7 @@ index 0000000..a368b73
 +            }
 +        };
 +        let request_id = request.id;
++        let active_game_ids = request.active_game_ids;
 +        let states: Result<Vec<_>, _> = request.states.into_iter().map(build_state).collect();
 +        match states {
 +            Ok(states) => {
@@ -466,6 +471,7 @@ index 0000000..a368b73
 +                    id: request_id,
 +                    actions: search_batch(
 +                        states,
++                        active_game_ids.as_deref(),
 +                        &*evaluator,
 +                        simulations,
 +                        &mut rng,
