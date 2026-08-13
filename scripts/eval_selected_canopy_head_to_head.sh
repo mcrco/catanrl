@@ -13,6 +13,12 @@ canopy_checkpoint=$4
 output=$5
 games_per_seat=$6
 seed=${7:-52043}
+smoke_simulations=${CATANRL_CANOPY_H2H_SMOKE_SIMULATIONS:-0}
+
+if ! [[ "$smoke_simulations" =~ ^[0-9]+$ ]]; then
+  echo "CATANRL_CANOPY_H2H_SMOKE_SIMULATIONS must be a non-negative integer" >&2
+  exit 2
+fi
 
 if [[ ! -s "$selected_file" ]]; then
   echo "selected checkpoint file is missing or empty: $selected_file" >&2
@@ -26,6 +32,28 @@ fi
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$repo_root"
+if (( smoke_simulations > 0 )); then
+  smoke_output=${output%.json}.smoke.json
+  env -u VIRTUAL_ENV \
+    UV_CACHE_DIR=/tmp/catanrl-uv-cache \
+    uv run python scripts/eval_canopy_head_to_head.py \
+    --experiment "$source_experiment" \
+    --which "$selector" \
+    --canopy-binary "$canopy_binary" \
+    --canopy-checkpoint "$canopy_checkpoint" \
+    --simulations "$smoke_simulations" \
+    --games-per-seat 1 \
+    --num-workers 2 \
+    --inference-batch-size 8 \
+    --inference-wait-ms 2 \
+    --canopy-batch-size 2 \
+    --canopy-wait-ms 5 \
+    --seed "$seed" \
+    --max-actions 2000 \
+    --device cuda \
+    --output "$smoke_output"
+fi
+
 exec env -u VIRTUAL_ENV \
   UV_CACHE_DIR=/tmp/catanrl-uv-cache \
   uv run python scripts/eval_canopy_head_to_head.py \
