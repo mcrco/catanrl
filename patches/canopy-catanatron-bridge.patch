@@ -1,6 +1,6 @@
 diff --git a/examples/catan/catanatron_bridge.rs b/examples/catan/catanatron_bridge.rs
 new file mode 100644
-index 0000000..63e5157
+index 0000000..a368b73
 --- /dev/null
 +++ b/examples/catan/catanatron_bridge.rs
 @@ -0,0 +1,482 @@
@@ -323,10 +323,10 @@ index 0000000..63e5157
 +        "turn-start settlement",
 +    )?;
 +    state.roads_placed_at_turn_start = snapshot.roads_placed_at_turn_start;
-+    // Imported searches must expose Catanatron's full legal action set.  The
-+    // canonical ordering and setup/robber dominance filters are Canopy
-+    // self-play optimizations, not part of the Catanatron rules contract.
-+    state.canonical_build_order = false;
++    // Preserve Canopy's canonical search pruning. It only removes dominated
++    // action orderings/targets inside the bot's search; every selected action
++    // is still resolved against Catanatron's authoritative legal-action list.
++    state.canonical_build_order = true;
 +    state.min_step = 0;
 +    state.min_trade_idx = 0;
 +    state.min_city_node = 0;
