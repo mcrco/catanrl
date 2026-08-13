@@ -5,8 +5,13 @@ from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
-from catanrl.eval.canopy_head_to_head import BatchingCanopyBackend, play_head_to_head_game
+from catanrl.eval.canopy_head_to_head import (
+    BatchingCanopyBackend,
+    play_head_to_head_game,
+    summarize_canopy_head_to_head,
+)
 
 
 class _FirstLegalCanopyBackend:
@@ -18,6 +23,25 @@ class _FirstLegalCanopyBackend:
 
     def decide(self, _game, actions):
         return actions[0]
+
+
+def test_direct_summary_requires_both_seats_and_gates_on_canopy_win_rate() -> None:
+    records = [
+        {
+            "seat": "first" if index % 2 == 0 else "second",
+            "win": index < 120,
+            "draw": False,
+            "vps": 12,
+        }
+        for index in range(200)
+    ]
+    summary = summarize_canopy_head_to_head(records, 0.05)
+    assert summary["win_rate"] == 0.6
+    assert summary["noninferiority"]["passes"] is True
+    assert summary["superiority"]["passes"] is True
+
+    with pytest.raises(ValueError, match="second-seat"):
+        summarize_canopy_head_to_head(records[::2], 0.05)
 
 
 def test_canopy_batcher_retains_idle_live_search_trees() -> None:

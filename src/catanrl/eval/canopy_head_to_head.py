@@ -10,6 +10,7 @@ from collections.abc import Sequence
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass
+from statistics import NormalDist
 from typing import Any, Literal, cast
 
 import numpy as np
@@ -30,6 +31,7 @@ from catanrl.eval.native_mcts_budget import (
     _replay_native_action,
     _search,
 )
+from catanrl.eval.reporting import wilson_interval
 from catanrl.features.catanatron_utils import full_game_to_features
 from catanrl.players.nn_mcts_player import (
     _CentralNNMCTSInferenceServer,
@@ -45,6 +47,60 @@ from catanrl.utils.catanatron_map import build_catan_map_from_native_game
 from catanrl.utils.seeding import derive_map_and_game_seeds, derive_seed
 
 MapType = Literal["BASE", "MINI", "TOURNAMENT"]
+
+
+def summarize_canopy_head_to_head(
+    records: Sequence[dict[str, Any]],
+    noninferiority_margin: float,
+) -> dict[str, Any]:
+    """Summarize direct candidate wins, including a conservative parity gate."""
+
+    if not records:
+        raise ValueError("At least one direct Canopy game is required")
+    if not 0.0 <= noninferiority_margin < 0.5:
+        raise ValueError("noninferiority_margin must be in [0, 0.5)")
+    games = len(records)
+    wins = sum(bool(record["win"]) for record in records)
+    draws = sum(bool(record["draw"]) for record in records)
+    ci_low, ci_high = wilson_interval(wins, games)
+    one_sided_low, _ = wilson_interval(wins, games, z=NormalDist().inv_cdf(0.95))
+    by_seat = {}
+    for seat in ("first", "second"):
+        rows = [record for record in records if record["seat"] == seat]
+        if not rows:
+            raise ValueError(f"Direct Canopy games contain no {seat}-seat records")
+        seat_wins = sum(bool(record["win"]) for record in rows)
+        seat_low, seat_high = wilson_interval(seat_wins, len(rows))
+        by_seat[seat] = {
+            "games": len(rows),
+            "wins": seat_wins,
+            "draws": sum(bool(record["draw"]) for record in rows),
+            "win_rate": seat_wins / len(rows),
+            "win_rate_ci95": [seat_low, seat_high],
+        }
+    return {
+        "games": games,
+        "wins": wins,
+        "losses": games - wins - draws,
+        "draws": draws,
+        "win_rate": wins / games,
+        "win_rate_ci95": [ci_low, ci_high],
+        "mean_vps": sum(int(record["vps"]) for record in records) / games,
+        "noninferiority": {
+            "null_win_rate": 0.5 - noninferiority_margin,
+            "margin": noninferiority_margin,
+            "confidence": 0.95,
+            "one_sided_wilson_low": one_sided_low,
+            "passes": one_sided_low > 0.5 - noninferiority_margin,
+        },
+        "superiority": {
+            "null_win_rate": 0.5,
+            "confidence": 0.95,
+            "one_sided_wilson_low": one_sided_low,
+            "passes": one_sided_low > 0.5,
+        },
+        "by_seat": by_seat,
+    }
 
 
 @dataclass
@@ -440,4 +496,5 @@ __all__ = [
     "BatchingCanopyBackend",
     "play_head_to_head_game",
     "run_canopy_head_to_head",
+    "summarize_canopy_head_to_head",
 ]

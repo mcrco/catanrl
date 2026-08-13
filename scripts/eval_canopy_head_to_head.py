@@ -6,14 +6,15 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from statistics import NormalDist
 from typing import Any, cast
 
 import torch
 
 from catanrl.eval.canopy_catanatron_bridge import CanopyBridgeProcess
-from catanrl.eval.canopy_head_to_head import run_canopy_head_to_head
-from catanrl.eval.reporting import wilson_interval
+from catanrl.eval.canopy_head_to_head import (
+    run_canopy_head_to_head,
+    summarize_canopy_head_to_head,
+)
 from catanrl.experiment_store import KIND_POLICY_VALUE, load_experiment
 from catanrl.experiments.canopy_contract import validate_canopy_experiment
 from catanrl.features.catanatron_utils import (
@@ -64,49 +65,6 @@ def _parse_args() -> argparse.Namespace:
     if not 0.0 <= args.noninferiority_margin < 0.5:
         parser.error("--noninferiority-margin must be in [0, 0.5)")
     return args
-
-
-def _summary(records: list[dict[str, Any]], noninferiority_margin: float) -> dict[str, Any]:
-    games = len(records)
-    wins = sum(bool(record["win"]) for record in records)
-    draws = sum(bool(record["draw"]) for record in records)
-    ci_low, ci_high = wilson_interval(wins, games)
-    one_sided_low, _ = wilson_interval(wins, games, z=NormalDist().inv_cdf(0.95))
-    by_seat = {}
-    for seat in ("first", "second"):
-        rows = [record for record in records if record["seat"] == seat]
-        seat_wins = sum(bool(record["win"]) for record in rows)
-        seat_low, seat_high = wilson_interval(seat_wins, len(rows))
-        by_seat[seat] = {
-            "games": len(rows),
-            "wins": seat_wins,
-            "draws": sum(bool(record["draw"]) for record in rows),
-            "win_rate": seat_wins / len(rows),
-            "win_rate_ci95": [seat_low, seat_high],
-        }
-    return {
-        "games": games,
-        "wins": wins,
-        "losses": games - wins - draws,
-        "draws": draws,
-        "win_rate": wins / games,
-        "win_rate_ci95": [ci_low, ci_high],
-        "mean_vps": sum(int(record["vps"]) for record in records) / games,
-        "noninferiority": {
-            "null_win_rate": 0.5 - noninferiority_margin,
-            "margin": noninferiority_margin,
-            "confidence": 0.95,
-            "one_sided_wilson_low": one_sided_low,
-            "passes": one_sided_low > 0.5 - noninferiority_margin,
-        },
-        "superiority": {
-            "null_win_rate": 0.5,
-            "confidence": 0.95,
-            "one_sided_wilson_low": one_sided_low,
-            "passes": one_sided_low > 0.5,
-        },
-        "by_seat": by_seat,
-    }
 
 
 def main() -> None:
@@ -234,7 +192,7 @@ def main() -> None:
             "root_noise": False,
             "noninferiority_margin": args.noninferiority_margin,
         },
-        "summary": _summary(records, args.noninferiority_margin),
+        "summary": summarize_canopy_head_to_head(records, args.noninferiority_margin),
         "game_records": records,
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
