@@ -30,6 +30,7 @@ from catanrl.eval.reporting import wilson_interval
 from catanrl.features.catanatron_utils import (
     ActorObservationLevel,
     CriticObservationLevel,
+    full_game_to_features,
     get_observation_indices_from_full,
 )
 from catanrl.players.nn_mcts_player import _RemoteNNMCTSInferenceBackend
@@ -559,6 +560,26 @@ def _play_catanatron_shadow_budget_game(
                 raise RuntimeError(
                     f"Catanatron/native legal actions diverged at decision {decision_index}: "
                     f"{differing}"
+                )
+            python_features = full_game_to_features(
+                game,
+                2,
+                args_dict["map_type"],
+                base_color=game.state.current_color(),
+            )
+            native_features = full_native_features(
+                native,
+                args_dict["map_type"],
+                native.current_player,
+            )
+            if not np.allclose(native_features, python_features, rtol=0.0, atol=1e-7):
+                differing = np.flatnonzero(
+                    ~np.isclose(native_features, python_features, rtol=0.0, atol=1e-7)
+                )
+                first = differing[:16].tolist()
+                raise RuntimeError(
+                    "Catanatron/native feature representations diverged at decision "
+                    f"{decision_index}; first differing indices: {first}"
                 )
             valid_indices = np.flatnonzero(native_mask)
             if valid_indices.size == 0:
