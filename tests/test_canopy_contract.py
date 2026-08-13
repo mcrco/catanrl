@@ -15,6 +15,7 @@ from catanrl.experiment_store import (
 from catanrl.experiments.architecture_config import load_architecture_preset
 from catanrl.experiments.canopy_contract import (
     CanopyContractError,
+    canopy_checkpoint_global_iteration,
     validate_canopy_architecture,
     validate_canopy_experiment,
 )
@@ -91,3 +92,19 @@ def test_experiment_contract_rejects_legacy_layout_or_shaped_reward(
             _experiment(tmp_path, **kwargs),
             require_terminal_dagger=True,
         )
+
+
+def test_checkpoint_global_iteration_composes_branch_offset(tmp_path):
+    experiment = _experiment(tmp_path)
+    experiment.metadata.train_config["self_play_iteration_offset"] = 9
+
+    assert canopy_checkpoint_global_iteration(experiment, 10) == 19
+
+
+@pytest.mark.parametrize("offset", [-1, True, 1.5])
+def test_checkpoint_global_iteration_rejects_invalid_branch_offset(tmp_path, offset):
+    experiment = _experiment(tmp_path)
+    experiment.metadata.train_config["self_play_iteration_offset"] = offset
+
+    with pytest.raises(CanopyContractError, match="self_play_iteration_offset"):
+        canopy_checkpoint_global_iteration(experiment, 2)

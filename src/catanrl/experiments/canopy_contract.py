@@ -95,8 +95,25 @@ def validate_canopy_experiment(
     _raise_if_violations(violations)
 
 
+def canopy_checkpoint_global_iteration(
+    experiment: Experiment,
+    checkpoint_step: int,
+) -> int:
+    """Map a branch-local checkpoint number to its global self-play iteration."""
+
+    if isinstance(checkpoint_step, bool) or checkpoint_step < 0:
+        raise ValueError("checkpoint_step must be a non-negative integer")
+    raw_offset = experiment.metadata.train_config.get("self_play_iteration_offset", 0)
+    if isinstance(raw_offset, bool) or not isinstance(raw_offset, int) or raw_offset < 0:
+        raise CanopyContractError(
+            "train_config.self_play_iteration_offset must be a non-negative integer"
+        )
+    return raw_offset + checkpoint_step
+
+
 __all__ = [
     "CanopyContractError",
+    "canopy_checkpoint_global_iteration",
     "validate_canopy_architecture",
     "validate_canopy_experiment",
 ]
