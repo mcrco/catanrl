@@ -9,6 +9,7 @@ to an action from Catanatron's own ``playable_actions`` list.
 from __future__ import annotations
 
 import json
+import random
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,9 +32,11 @@ from catanatron.models.enums import (
     EdgeRef,
     NodeRef,
 )
-from catanatron.models.player import Color, Player
+from catanatron.models.player import Color, Player, SimplePlayer
 from catanatron.models.tiles import Port
 from catanatron.state_functions import player_has_rolled, player_key
+
+from catanrl.utils.catanatron_game import force_player_order
 
 CANOPY_LAND_HEXES: tuple[tuple[int, int], ...] = (
     (0, -2),
@@ -169,7 +172,11 @@ def _trade_ratios(game: Game, color: Color) -> list[int]:
     return ratios
 
 
-def _player_snapshot(game: Game, color: Color) -> dict[str, Any]:
+def _player_snapshot(
+    game: Game,
+    color: Color,
+    tested_non_knight: int,
+) -> dict[str, Any]:
     state = game.state
     key = player_key(state, color)
     turn_records = _turn_records(game, color)
@@ -207,8 +214,128 @@ def _player_snapshot(game: Game, color: Color) -> dict[str, Any]:
         ),
         "building_vps": len(settlements) + 2 * len(cities),
         "trade_ratios": _trade_ratios(game, color),
-        "tested_non_knight": 0,
+        "tested_non_knight": tested_non_knight,
     }
+
+
+def _robber_blocks_player(game: Game, color: Color) -> bool:
+    state = game.state
+    tile = state.board.map.land_tiles[state.board.robber_coordinate]
+    if tile.resource is None:
+        return False
+    buildings = set(state.buildings_by_color[color][SETTLEMENT]) | set(
+        state.buildings_by_color[color][CITY]
+    )
+    return bool(buildings.intersection(tile.nodes.values()))
+
+
+def _dev_cards_in_hand(game: Game, color: Color) -> int:
+    key = player_key(game.state, color)
+    return sum(int(game.state.player_state[f"{key}_{card}_IN_HAND"]) for card in CANOPY_DEV_ORDER)
+
+
+def _update_tested_non_knight_before_action(
+    game: Game,
+    action: Action,
+    tested: list[int],
+) -> None:
+    if action.action_type != ActionType.END_TURN or not _robber_blocks_player(game, action.color):
+        return
+    index = game.state.color_to_index[action.color]
+    bought_this_turn = sum(
+        record.action.color == action.color
+        and record.action.action_type == ActionType.BUY_DEVELOPMENT_CARD
+        for record in _turn_records(game, action.color)
+    )
+    eligible_old = max(0, _dev_cards_in_hand(game, action.color) - bought_this_turn)
+    tested[index] = max(tested[index], eligible_old)
+
+
+def _update_tested_non_knight_after_action(
+    game: Game,
+    action: Action,
+    tested: list[int],
+) -> None:
+    index = game.state.color_to_index[action.color]
+    if action.action_type == ActionType.PLAY_KNIGHT_CARD:
+        tested[index] = 0
+    elif action.action_type in {
+        ActionType.PLAY_ROAD_BUILDING,
+        ActionType.PLAY_YEAR_OF_PLENTY,
+        ActionType.PLAY_MONOPOLY,
+    }:
+        tested[index] = min(tested[index], _dev_cards_in_hand(game, action.color))
+
+
+@dataclass
+class _CanopyHistory:
+    """Incremental reconstruction of Canopy's history-derived Nexus-v3 fields."""
+
+    replay: Game
+    tested_non_knight: list[int]
+    record_count: int = 0
+
+    @classmethod
+    def from_game(cls, game: Game) -> "_CanopyHistory":
+        # Upstream Catanatron uses module-global randomness. Replaying recorded
+        # outcomes must never perturb the authoritative live games' dice RNG.
+        random_state = random.getstate()
+        try:
+            players = [SimplePlayer(color) for color in game.state.colors]
+            replay = Game(
+                players=players,
+                seed=game.seed,
+                discard_limit=game.state.discard_limit,
+                friendly_robber=game.friendly_robber,
+                vps_to_win=game.vps_to_win,
+                catan_map=game.state.board.map,
+            )
+            force_player_order(replay, players)
+        finally:
+            random.setstate(random_state)
+        history = cls(replay=replay, tested_non_knight=[0, 0])
+        history.sync(game)
+        return history
+
+    def sync(self, game: Game) -> tuple[int, int]:
+        records = game.state.action_records
+        if len(records) < self.record_count:
+            raise ValueError("Catanatron action history moved backwards")
+        random_state = random.getstate()
+        try:
+            for record in records[self.record_count :]:
+                _update_tested_non_knight_before_action(
+                    self.replay,
+                    record.action,
+                    self.tested_non_knight,
+                )
+                # Recorded roll actions carry the realized dice in ``value``
+                # while the live legal intent is ROLL(None), so Catanatron's
+                # replay API intentionally bypasses intent-level validation.
+                self.replay.execute(
+                    record.action,
+                    validate_action=False,
+                    action_record=record,
+                )
+                _update_tested_non_knight_after_action(
+                    self.replay,
+                    record.action,
+                    self.tested_non_knight,
+                )
+            self.record_count = len(records)
+        finally:
+            random.setstate(random_state)
+        if self.replay.state.current_color() != game.state.current_color():
+            raise ValueError("Catanatron history replay current player diverged")
+        if self.replay.state.board.robber_coordinate != game.state.board.robber_coordinate:
+            raise ValueError("Catanatron history replay robber diverged")
+        return tuple(self.tested_non_knight)
+
+
+def canopy_tested_non_knight(game: Game) -> tuple[int, int]:
+    """Derive Canopy's Nexus-v3 behavioral history signal from action records."""
+
+    return _CanopyHistory.from_game(game).sync(game)
 
 
 def _phase_snapshot(game: Game) -> dict[str, Any]:
@@ -250,6 +377,7 @@ def game_to_canopy_snapshot(
     game: Game,
     *,
     tree_actions: list[int] | None = None,
+    tested_non_knight: Sequence[int] | None = None,
 ) -> dict[str, Any]:
     """Serialize one authoritative Catanatron decision state for Canopy."""
 
@@ -332,6 +460,9 @@ def game_to_canopy_snapshot(
     current_index = state.color_to_index[current_color]
     roller_color = state.colors[state.current_turn_index]
     current_settlements = settlements[current_index]
+    tested = canopy_tested_non_knight(game) if tested_non_knight is None else tested_non_knight
+    if len(tested) != 2 or any(value < 0 for value in tested):
+        raise ValueError("tested_non_knight must contain two non-negative counts")
     return {
         "game_id": game.id,
         "tree_actions": [] if tree_actions is None else tree_actions,
@@ -341,7 +472,10 @@ def game_to_canopy_snapshot(
         "ports": ports,
         "tile_nodes": tile_nodes,
         "tile_edges": tile_edges,
-        "players": [_player_snapshot(game, color) for color in state.colors],
+        "players": [
+            _player_snapshot(game, color, int(tested[index]))
+            for index, color in enumerate(state.colors)
+        ],
         "settlements": settlements,
         "cities": cities,
         "roads": roads,
@@ -552,6 +686,7 @@ class CanopyBridgeProcess:
             raise ValueError("simulations must be positive")
         self._next_id = 0
         self._record_counts: dict[str, int] = {}
+        self._histories: dict[str, _CanopyHistory] = {}
         self._process = subprocess.Popen(
             [
                 str(binary),
@@ -599,6 +734,17 @@ class CanopyBridgeProcess:
         self._next_id += 1
         snapshots: list[dict[str, Any]] = []
         next_record_counts: dict[str, int] = {}
+        active_ids = {game.id for game, _ in games_and_actions}
+        self._record_counts = {
+            game_id: count
+            for game_id, count in self._record_counts.items()
+            if game_id in active_ids
+        }
+        self._histories = {
+            game_id: history
+            for game_id, history in self._histories.items()
+            if game_id in active_ids
+        }
         for game, _ in games_and_actions:
             records = game.state.action_records
             previous_count = self._record_counts.get(game.id, len(records))
@@ -613,7 +759,18 @@ class CanopyBridgeProcess:
                 # An action outside Canopy's fixed space invalidates reuse, but
                 # the exact imported root remains fully evaluable.
                 tree_actions = None
-            snapshots.append(game_to_canopy_snapshot(game, tree_actions=tree_actions))
+            history = self._histories.get(game.id)
+            if history is None:
+                history = _CanopyHistory.from_game(game)
+                self._histories[game.id] = history
+            tested_non_knight = history.sync(game)
+            snapshots.append(
+                game_to_canopy_snapshot(
+                    game,
+                    tree_actions=tree_actions,
+                    tested_non_knight=tested_non_knight,
+                )
+            )
             next_record_counts[game.id] = len(records)
         payload = {
             "id": request_id,
@@ -660,6 +817,7 @@ __all__ = [
     "CanopyCatanatronPlayer",
     "CanopyTopologyMapping",
     "canopy_action_to_catanatron",
+    "canopy_tested_non_knight",
     "catanatron_action_to_canopy",
     "game_to_canopy_snapshot",
 ]

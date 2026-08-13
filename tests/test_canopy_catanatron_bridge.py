@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import json
+import random
 
 from catanatron.game import Game
-from catanatron.models.enums import RESOURCES, Action, ActionPrompt, ActionType
+from catanatron.models.enums import RESOURCES, SETTLEMENT, Action, ActionPrompt, ActionType
 from catanatron.models.player import Color, RandomPlayer
 
 from catanrl.eval.canopy_catanatron_bridge import (
     CANOPY_LAND_HEXES,
     CanopyTopologyMapping,
+    _update_tested_non_knight_after_action,
+    _update_tested_non_knight_before_action,
     canopy_action_to_catanatron,
+    canopy_tested_non_knight,
     catanatron_action_to_canopy,
     game_to_canopy_snapshot,
 )
@@ -27,7 +31,7 @@ def _game(seed: int = 7) -> Game:
 def test_canopy_snapshot_preserves_base_topology_contract() -> None:
     game = _game()
     mapping = CanopyTopologyMapping.from_game(game)
-    snapshot = game_to_canopy_snapshot(game)
+    snapshot = game_to_canopy_snapshot(game, tested_non_knight=(0, 0))
 
     assert len(mapping.nodes) == 54
     assert len(mapping.edges) == 72
@@ -140,7 +144,7 @@ def test_snapshot_uses_prompt_and_turn_owner_for_robber_phase_state() -> None:
     state.discard_counts = [0, 2]
     state.player_state["P0_HAS_ROLLED"] = True
 
-    snapshot = game_to_canopy_snapshot(game)
+    snapshot = game_to_canopy_snapshot(game, tested_non_knight=(0, 0))
     assert snapshot["phase"] == {"kind": "discard", "remaining": 2, "roller": 0}
     assert snapshot["pre_roll"] is False
 
@@ -150,5 +154,59 @@ def test_snapshot_uses_prompt_and_turn_owner_for_robber_phase_state() -> None:
     state.current_prompt = ActionPrompt.PLAY_TURN
     state.is_discarding = False
     state.is_moving_knight = True
-    snapshot = game_to_canopy_snapshot(game)
+    snapshot = game_to_canopy_snapshot(game, tested_non_knight=(0, 0))
     assert snapshot["phase"] == {"kind": "main"}
+
+
+def test_tested_non_knight_matches_canopy_transition_contract() -> None:
+    game = _game()
+    state = game.state
+    color = state.colors[0]
+    index = state.color_to_index[color]
+    key = f"P{index}"
+    coordinate, tile = next(
+        (coordinate, tile)
+        for coordinate, tile in state.board.map.land_tiles.items()
+        if tile.resource is not None
+    )
+    state.board.robber_coordinate = coordinate
+    state.buildings_by_color[color][SETTLEMENT].append(next(iter(tile.nodes.values())))
+    state.player_state[f"{key}_KNIGHT_IN_HAND"] = 2
+    tested = [0, 0]
+
+    _update_tested_non_knight_before_action(
+        game,
+        Action(color, ActionType.END_TURN, None),
+        tested,
+    )
+    assert tested[index] == 2
+
+    state.player_state[f"{key}_KNIGHT_IN_HAND"] = 0
+    state.player_state[f"{key}_YEAR_OF_PLENTY_IN_HAND"] = 1
+    _update_tested_non_knight_after_action(
+        game,
+        Action(color, ActionType.PLAY_YEAR_OF_PLENTY, ("WOOD", "WOOD")),
+        tested,
+    )
+    assert tested[index] == 1
+
+    _update_tested_non_knight_after_action(
+        game,
+        Action(color, ActionType.PLAY_KNIGHT_CARD, None),
+        tested,
+    )
+    assert tested[index] == 0
+
+
+def test_history_derivation_does_not_perturb_catanatron_randomness() -> None:
+    game = _game(seed=29)
+    for _ in range(30):
+        game.execute(game.playable_actions[0])
+
+    random.seed(8675309)
+    before = random.getstate()
+    tested = canopy_tested_non_knight(game)
+
+    assert random.getstate() == before
+    assert len(tested) == 2
+    assert all(value >= 0 for value in tested)
