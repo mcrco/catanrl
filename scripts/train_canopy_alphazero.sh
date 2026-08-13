@@ -2,16 +2,37 @@
 set -euo pipefail
 
 if [[ $# -lt 2 || $# -gt 4 ]]; then
-  echo "usage: $0 DAGGER_EXPERIMENT EXPERIMENT_NAME [retain|reset] [SEED]" >&2
+  echo "usage: $0 SOURCE_EXPERIMENT EXPERIMENT_NAME [retain|reset] [SEED]" >&2
   exit 2
 fi
 
-dagger_experiment=$1
+source_experiment=$1
 experiment_name=$2
 value_init=${3:-retain}
 seed=${4:-43}
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$repo_root"
+
+load_which=${CATANRL_PARITY_LOAD_WHICH:-best}
+self_play_iteration_offset=${CATANRL_PARITY_SELF_PLAY_ITERATION_OFFSET:-0}
+if ! [[ "$self_play_iteration_offset" =~ ^[0-9]+$ ]]; then
+  echo "CATANRL_PARITY_SELF_PLAY_ITERATION_OFFSET must be a non-negative integer" >&2
+  exit 2
+fi
+case "${CATANRL_PARITY_REQUIRE_TERMINAL_DAGGER:-1}" in
+  0)
+    source_contract_args=()
+    source_tag=alphazero-continuation
+    ;;
+  1)
+    source_contract_args=(--require-terminal-dagger)
+    source_tag=fresh-dagger-pretrain
+    ;;
+  *)
+    echo "CATANRL_PARITY_REQUIRE_TERMINAL_DAGGER must be 0 or 1" >&2
+    exit 2
+    ;;
+esac
 
 case "$value_init" in
   retain)
@@ -68,7 +89,7 @@ case "${CATANRL_PARITY_WANDB:-0}" in
       --wandb-run-name "$experiment_name"
       --wandb-group canopy-parity
       --wandb-tags native-cppanatron catan-graph nexus-v3 road-aware \
-        corrected-board-layout shared-backbone full-full win-reward fresh-dagger-pretrain \
+        corrected-board-layout shared-backbone full-full win-reward "$source_tag" \
         canopy-playout-cap canopy-completed-q canopy-soft-policy \
         canopy-adamw continuous-teacher tree-reuse "$aux_value_tag" "$value_init_tag"
     )
@@ -80,15 +101,15 @@ case "${CATANRL_PARITY_WANDB:-0}" in
 esac
 
 env -u VIRTUAL_ENV uv run python scripts/verify_canopy_contract.py \
-  --experiment "$dagger_experiment" \
-  --which best \
-  --require-terminal-dagger
+  --experiment "$source_experiment" \
+  --which "$load_which" \
+  "${source_contract_args[@]}"
 
 env -u VIRTUAL_ENV PYTHONUNBUFFERED=1 uv run python -m catanrl.experiments.train_alphazero \
   --mode iterate \
   --teacher-update latest \
-  --load-from-experiment "$dagger_experiment" \
-  --load-from-which best \
+  --load-from-experiment "$source_experiment" \
+  --load-from-which "$load_which" \
   "${value_init_args[@]}" \
   --self-play-backend cppanatron \
   --ismcts-determinizations 1 \
@@ -105,6 +126,7 @@ env -u VIRTUAL_ENV PYTHONUNBUFFERED=1 uv run python -m catanrl.experiments.train
   --c-scale 1.0 \
   --search-value-weight-max 0.85 \
   --search-value-weight-ramp-iterations 60 \
+  --self-play-iteration-offset "$self_play_iteration_offset" \
   --iterations "$parity_iterations" \
   --games-per-iteration "$parity_games" \
   --optimizer-epochs 2 \

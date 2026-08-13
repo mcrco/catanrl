@@ -201,6 +201,16 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         help="Self-play iterations over which root-Q target weight ramps from zero.",
     )
     search.add_argument(
+        "--self-play-iteration-offset",
+        type=int,
+        default=0,
+        help=(
+            "Completed self-play iterations before a weight-only warm start. "
+            "This preserves iteration-dependent seeds and target ramps; resume "
+            "state takes precedence."
+        ),
+    )
+    search.add_argument(
         "--policy-target",
         choices=("visits", "completed-q"),
         default="visits",
@@ -493,6 +503,8 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         parser.error("--search-value-weight-max must be between 0 and 1")
     if args.search_value_weight_ramp_iterations < 0:
         parser.error("--search-value-weight-ramp-iterations cannot be negative")
+    if args.self_play_iteration_offset < 0:
+        parser.error("--self-play-iteration-offset cannot be negative")
     if not math.isfinite(args.c_visit) or args.c_visit < 0.0:
         parser.error("--c-visit must be finite and non-negative")
     if not math.isfinite(args.c_scale) or args.c_scale < 0.0:
@@ -1129,6 +1141,7 @@ def main() -> None:
         fast_simulations=args.fast_simulations,
         search_value_weight_max=args.search_value_weight_max,
         search_value_weight_ramp_iterations=args.search_value_weight_ramp_iterations,
+        self_play_iteration_offset=args.self_play_iteration_offset,
         prunning=args.prunning,
         ismcts_determinizations=args.ismcts_determinizations,
         temperature=args.temperature,

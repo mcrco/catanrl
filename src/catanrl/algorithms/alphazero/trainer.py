@@ -78,6 +78,7 @@ class AlphaZeroConfig:
     fast_simulations: int = 64
     search_value_weight_max: float = 0.0
     search_value_weight_ramp_iterations: int = 1
+    self_play_iteration_offset: int = 0
     prunning: bool = False
     ismcts_determinizations: int = 1
     temperature: float = 1.0
@@ -262,6 +263,8 @@ class AlphaZeroTrainer:
             raise ValueError("search_value_weight_max must be between 0 and 1.")
         if config.search_value_weight_ramp_iterations < 0:
             raise ValueError("search_value_weight_ramp_iterations cannot be negative.")
+        if config.self_play_iteration_offset < 0:
+            raise ValueError("self_play_iteration_offset cannot be negative.")
         if config.policy_target not in ("visits", "completed-q"):
             raise ValueError("policy_target must be 'visits' or 'completed-q'.")
         if config.search_selection not in ("puct", "completed-q"):
@@ -353,7 +356,10 @@ class AlphaZeroTrainer:
             print(f"Disk-backed replay: {self.replay_buffer.storage_path}", flush=True)
         else:
             self.replay_buffer = deque(maxlen=config.buffer_size)
-        self._self_play_calls = 0
+        # A warm start loads weights without trainer state.  Let continuation
+        # runs preserve iteration-dependent seeds and target schedules; a true
+        # resume still replaces this from the persisted state below.
+        self._self_play_calls = config.self_play_iteration_offset
         # Optimizers must be constructed after the first device placement so
         # their parameter references cannot point at pre-conversion tensors.
         self.student_policy_model.to(self.device)
@@ -985,7 +991,9 @@ class AlphaZeroTrainer:
             self.policy_optimizer.load_state_dict(state["policy_optimizer"])
         if self.critic_optimizer is not None and state.get("critic_optimizer") is not None:
             self.critic_optimizer.load_state_dict(state["critic_optimizer"])
-        self._self_play_calls = int(state.get("self_play_calls", 0))
+        self._self_play_calls = int(
+            state.get("self_play_calls", self.config.self_play_iteration_offset)
+        )
         if state.get("python_random_state") is not None:
             random.setstate(state["python_random_state"])
         if state.get("numpy_random_state") is not None:

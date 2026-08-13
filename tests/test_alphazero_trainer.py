@@ -44,6 +44,7 @@ def _trainer(
     value_loss_weight: float = 0.0,
     offload_inactive_models: bool = False,
     device: str = "cpu",
+    self_play_iteration_offset: int = 0,
 ) -> AlphaZeroTrainer:
     torch.manual_seed(0)
     student_policy, student_critic = _models()
@@ -61,6 +62,7 @@ def _trainer(
         offload_inactive_models=offload_inactive_models,
         device=device,
         seed=7,
+        self_play_iteration_offset=self_play_iteration_offset,
     )
     return AlphaZeroTrainer(
         config,
@@ -629,6 +631,30 @@ def test_native_search_value_weight_ramps_by_self_play_iteration(
     assert weights == pytest.approx([0.3, 0.6, 0.6])
 
 
+def test_weight_only_warm_start_can_continue_self_play_iteration_schedule(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trainer = _trainer(self_play_iteration_offset=7)
+    trainer.config.self_play_backend = "cppanatron"
+    trainer.config.search_value_weight_max = 0.85
+    trainer.config.search_value_weight_ramp_iterations = 60
+    calls = []
+
+    def fake_generate_native_self_play_data(**kwargs):
+        calls.append((kwargs["seed"], kwargs["search_value_weight"]))
+        return [_experience(1, -1.0)], {"games": 1}
+
+    monkeypatch.setattr(
+        "catanrl.algorithms.alphazero.trainer.generate_native_self_play_data",
+        fake_generate_native_self_play_data,
+    )
+
+    trainer.collect_self_play(1)
+
+    assert calls == [(7 + 7 * 1_000_003, pytest.approx(0.85 * 8 / 60))]
+    assert trainer.state_dict()["self_play_calls"] == 8
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
 def test_cuda_offload_preserves_optimizer_parameter_bindings(
     monkeypatch: pytest.MonkeyPatch,
@@ -721,6 +747,8 @@ def test_cli_accepts_bounded_native_self_play_controls() -> None:
             "4",
             "--games-per-worker",
             "3",
+            "--self-play-iteration-offset",
+            "7",
         ]
     )
 
@@ -730,6 +758,7 @@ def test_cli_accepts_bounded_native_self_play_controls() -> None:
     assert args.self_play_result_chunk_size == 32
     assert args.self_play_max_attempts == 4
     assert args.games_per_worker == 3
+    assert args.self_play_iteration_offset == 7
 
 
 def test_warm_start_can_keep_policy_but_reset_shared_value_head(tmp_path) -> None:
