@@ -14,13 +14,7 @@ from catanatron.models.enums import (
     ActionRecord,
     ActionType,
 )
-from catanatron.models.map import (
-    BASE_MAP_TEMPLATE,
-    MINI_MAP_TEMPLATE,
-    CatanMap,
-    build_map,
-    initialize_tiles,
-)
+from catanatron.models.map import MINI_MAP_TEMPLATE, build_map
 from catanatron.models.player import Color, RandomPlayer
 from catanatron.models.tiles import LandTile, Port, Water
 from catanatron.players.value import ValueFunctionPlayer, base_fn
@@ -33,6 +27,7 @@ from catanrl.envs.cppanatron import (
 from catanrl.features.catanatron_utils import full_game_to_features
 from catanrl.utils.catanatron_action_space import from_action_space, to_action_space
 from catanrl.utils.catanatron_game import force_player_order
+from catanrl.utils.catanatron_map import build_catan_map_from_native_game
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -116,29 +111,17 @@ def test_native_binding_selects_number_placement():
             number_placement="random",
         ) as randomized,
     ):
-        official_tiles = {
-            tile[:3]: (tile[5], tile[6]) for tile in official.tiles() if tile[4] == 0
-        }
+        official_tiles = {tile[:3]: (tile[5], tile[6]) for tile in official.tiles() if tile[4] == 0}
         randomized_tiles = {
-            tile[:3]: (tile[5], tile[6])
-            for tile in randomized.tiles()
-            if tile[4] == 0
+            tile[:3]: (tile[5], tile[6]) for tile in randomized.tiles() if tile[4] == 0
         }
 
         assert {
-            coordinate: resource
-            for coordinate, (resource, _number) in official_tiles.items()
-        } == {
-            coordinate: resource
-            for coordinate, (resource, _number) in randomized_tiles.items()
-        }
+            coordinate: resource for coordinate, (resource, _number) in official_tiles.items()
+        } == {coordinate: resource for coordinate, (resource, _number) in randomized_tiles.items()}
         assert {
-            coordinate: number
-            for coordinate, (_resource, number) in official_tiles.items()
-        } != {
-            coordinate: number
-            for coordinate, (_resource, number) in randomized_tiles.items()
-        }
+            coordinate: number for coordinate, (_resource, number) in official_tiles.items()
+        } != {coordinate: number for coordinate, (_resource, number) in randomized_tiles.items()}
 
 
 @pytest.mark.parametrize("map_type", ["MINI", "BASE"])
@@ -148,9 +131,7 @@ def test_native_random_maps_match_python_template_contract(map_type, seed):
     python_map = build_map(map_type, number_placement="random")
 
     with NativeGame(num_players=2, map_type=map_type, seed=seed) as native_game:
-        native_tiles = {
-            (tile[0], tile[1], tile[2]): tile[3:] for tile in native_game.tiles()
-        }
+        native_tiles = {(tile[0], tile[1], tile[2]): tile[3:] for tile in native_game.tiles()}
         assert set(native_tiles) == set(python_map.tiles)
 
         for coordinate, python_tile in python_map.tiles.items():
@@ -188,13 +169,13 @@ def test_native_random_maps_match_python_template_contract(map_type, seed):
             if kind == 0
         )
         assert native_land_resources == Counter(
-            {-1 if resource is None else resource: count
-             for resource, count in python_land_resources.items()}
+            {
+                -1 if resource is None else resource: count
+                for resource, count in python_land_resources.items()
+            }
         )
 
-        python_numbers = Counter(
-            tile.number for tile in python_map.land_tiles.values()
-        )
+        python_numbers = Counter(tile.number for tile in python_map.land_tiles.values())
         native_numbers = Counter(
             number
             for _id, kind, _resource, number, _direction, _nodes in native_tiles.values()
@@ -223,8 +204,10 @@ def test_native_random_maps_match_python_template_contract(map_type, seed):
             if kind == 2
         )
         assert native_ports == Counter(
-            {-1 if resource is None else resource: count
-             for resource, count in python_ports.items()}
+            {
+                -1 if resource is None else resource: count
+                for resource, count in python_ports.items()
+            }
         )
 
 
@@ -259,10 +242,7 @@ def _python_player_tuple(game: Game, color: Color):
         tuple(state[f"{key}_{resource}_IN_HAND"] for resource in RESOURCES),
         tuple(state[f"{key}_{card}_IN_HAND"] for card in DEVELOPMENT_CARDS),
         tuple(state[f"{key}_PLAYED_{card}"] for card in DEVELOPMENT_CARDS),
-        tuple(
-            bool(state[f"{key}_{card}_OWNED_AT_START"])
-            for card in DEVELOPMENT_CARDS[:-1]
-        ),
+        tuple(bool(state[f"{key}_{card}_OWNED_AT_START"]) for card in DEVELOPMENT_CARDS[:-1]),
     )
 
 
@@ -286,45 +266,6 @@ def _native_player_tuple(game: NativeGame, index: int):
     )
 
 
-def _python_map_matching_native(
-    native_game: NativeGame,
-    map_type: str,
-) -> CatanMap:
-    if map_type == "TOURNAMENT":
-        return build_map("TOURNAMENT")
-
-    template = MINI_MAP_TEMPLATE if map_type == "MINI" else BASE_MAP_TEMPLATE
-    native_tiles = {
-        (tile[0], tile[1], tile[2]): tile[3:] for tile in native_game.tiles()
-    }
-    placed_land_resources = []
-    placed_numbers = []
-    placed_port_resources = []
-    for coordinate, tile_type in template.topology.items():
-        _id, kind, resource, number, _direction, _nodes = native_tiles[coordinate]
-        if tile_type is LandTile:
-            assert kind == 0
-            placed_land_resources.append(
-                None if resource < 0 else RESOURCES[resource]
-            )
-            if resource >= 0:
-                placed_numbers.append(number)
-        elif isinstance(tile_type, tuple):
-            assert kind == 2
-            placed_port_resources.append(
-                None if resource < 0 else RESOURCES[resource]
-            )
-
-    tiles = initialize_tiles(
-        template,
-        shuffled_port_resources_param=list(reversed(placed_port_resources)),
-        shuffled_tile_resources_param=list(reversed(placed_land_resources)),
-        shuffled_numbers_param=list(reversed(placed_numbers)),
-        number_placement="random",
-    )
-    return CatanMap.from_tiles(tiles)
-
-
 @pytest.mark.parametrize("map_type", ["MINI", "BASE", "TOURNAMENT"])
 @pytest.mark.parametrize("num_players", [2, 3, 4])
 def test_replayed_python_and_native_transitions_match(map_type, num_players):
@@ -341,7 +282,7 @@ def test_replayed_python_and_native_transitions_match(map_type, num_players):
         python_game = Game(
             players,
             seed=777,
-            catan_map=_python_map_matching_native(native_game, map_type),
+            catan_map=build_catan_map_from_native_game(native_game, map_type),
             vps_to_win=6,
         )
         force_player_order(python_game, players)
@@ -363,9 +304,9 @@ def test_replayed_python_and_native_transitions_match(map_type, num_players):
                 err_msg=f"legal-action mismatch before replay step {step}",
             )
             assert native_game.current_player == python_game.state.current_player_index
-            assert native_game.current_prompt == list(
-                type(python_game.state.current_prompt)
-            ).index(python_game.state.current_prompt)
+            assert native_game.current_prompt == list(type(python_game.state.current_prompt)).index(
+                python_game.state.current_prompt
+            )
             assert native_game.num_turns == python_game.state.num_turns
             for index, color in enumerate(colors):
                 native_player = _native_player_tuple(native_game, index)
@@ -380,9 +321,7 @@ def test_replayed_python_and_native_transitions_match(map_type, num_players):
             assert native_game.winner == (
                 None if python_winner is None else colors.index(python_winner)
             )
-            assert native_game.resource_bank == tuple(
-                python_game.state.resource_freqdeck
-            )
+            assert native_game.resource_bank == tuple(python_game.state.resource_freqdeck)
             assert native_game.development_cards_remaining == len(
                 python_game.state.development_listdeck
             )
@@ -441,13 +380,10 @@ def test_replayed_python_and_native_transitions_match(map_type, num_players):
                 ActionType.MOVE_ROBBER,
             }
             if not any(
-                action.action_type in stochastic_types
-                for action in python_game.playable_actions
+                action.action_type in stochastic_types for action in python_game.playable_actions
             ):
                 python_expert = ValueFunctionPlayer(python_game.state.current_color())
-                expert_action = python_expert.decide(
-                    python_game, python_game.playable_actions
-                )
+                expert_action = python_expert.decide(python_game, python_game.playable_actions)
                 python_expert_index = to_action_space(
                     expert_action,
                     num_players,
@@ -505,10 +441,7 @@ def test_replayed_python_and_native_transitions_match(map_type, num_players):
                 result = next(
                     resource
                     for resource in RESOURCES
-                    if python_game.state.player_state[
-                        f"{victim_key}_{resource}_IN_HAND"
-                    ]
-                    > 0
+                    if python_game.state.player_state[f"{victim_key}_{resource}_IN_HAND"] > 0
                 )
                 stolen_resource = RESOURCES.index(result)
 

@@ -28,6 +28,7 @@ def _payloads() -> tuple[dict, dict]:
     canopy = {
         "implementation": "cullback/canopy adapted into Catanatron",
         "game_engine": "Catanatron",
+        "map_layout_source": "cppanatron layout imported into Catanatron",
         "opponent": "F",
         "map_type": "BASE",
         "number_placement": "random",
@@ -47,6 +48,8 @@ def _payloads() -> tuple[dict, dict]:
             "experiment": "candidate",
             "checkpoint": "7",
             "game_opponent": "value",
+            "authoritative_engine": "catanatron",
+            "map_layout_source": "cppanatron layout imported into Catanatron",
             "map_type": "BASE",
             "vps_to_win": 15,
             "discard_limit": 9,
@@ -77,6 +80,14 @@ def test_compare_canopy_to_native_rejects_contract_drift() -> None:
     native["config"]["discard_limit"] = 7
 
     with pytest.raises(ValueError, match="discard threshold"):
+        compare_canopy_to_native(canopy, native)
+
+
+def test_compare_canopy_to_native_rejects_native_authority() -> None:
+    canopy, native = _payloads()
+    native["config"]["authoritative_engine"] = "native"
+
+    with pytest.raises(ValueError, match="Candidate games were not governed by Catanatron"):
         compare_canopy_to_native(canopy, native)
 
 

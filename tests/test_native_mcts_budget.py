@@ -16,6 +16,7 @@ from catanrl.eval.native_mcts_budget import (
     _game_worker_main,
     _iter_budget_game_results,
     _play_budget_game,
+    _play_catanatron_shadow_budget_game,
     _search,
     run_native_budget_games,
 )
@@ -234,6 +235,68 @@ def test_native_budget_games_rejects_invalid_root_noise_fraction(fraction):
             device="cpu",
             root_dirichlet_fraction=fraction,
         )
+
+
+def test_catanatron_authority_rejects_threaded_games_per_worker():
+    with pytest.raises(ValueError, match="games_per_worker=1"):
+        run_native_budget_games(
+            policy_model=None,
+            critic_model=None,
+            model_type="flat",
+            map_type="BASE",
+            actor_observation_level="full",
+            critic_observation_level="full",
+            budget=1,
+            games_per_seat=1,
+            num_workers=1,
+            games_per_worker=2,
+            inference_batch_size=1,
+            inference_wait_ms=1.0,
+            c_puct=2.5,
+            seed=1,
+            vps_to_win=15,
+            discard_limit=9,
+            device="cpu",
+            authoritative_engine="catanatron",
+        )
+
+
+def test_catanatron_authoritative_game_replays_native_shadow(monkeypatch):
+    def fake_search(*, game, **_kwargs):
+        return SimpleNamespace(
+            action=int(np.flatnonzero(game.valid_action_mask())[0]),
+            diagnostics=_diagnostics(depth=2, agreement=1.0),
+        )
+
+    monkeypatch.setattr("catanrl.eval.native_mcts_budget._search", fake_search)
+
+    record, diagnostics, calibration = _play_catanatron_shadow_budget_game(
+        episode_seed=101,
+        mcts_seat=0,
+        budget=1,
+        args_dict={
+            "map_type": "BASE",
+            "discard_limit": 9,
+            "vps_to_win": 15,
+            "turns_limit": 1000,
+            "max_actions": 20,
+            "game_opponent": "value",
+            "tree_reuse": False,
+            "c_puct": 2.5,
+            "canonical_pruning": True,
+            "search_selection": "completed-q",
+            "c_visit": 50.0,
+            "c_scale": 1.0,
+        },
+        actor_indices=np.array([0]),
+        critic_indices=np.array([0]),
+        inference_backend=object(),  # type: ignore[arg-type]
+    )
+
+    assert record["authoritative_engine"] == "Catanatron"
+    assert record["actions"] >= 20
+    assert diagnostics.count > 0
+    assert calibration.count == diagnostics.count
 
 
 def test_native_budget_worker_streams_each_game(monkeypatch):

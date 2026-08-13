@@ -11,9 +11,15 @@ from typing import Any, Literal
 
 import numpy as np
 import torch
+from catanatron.game import Game
+from catanatron.models.enums import DEVELOPMENT_CARDS, RESOURCES, ActionType
+from catanatron.models.player import Color, SimplePlayer
+from catanatron.players.value import ValueFunctionPlayer
+from catanatron.state_functions import get_actual_victory_points
 
 from catanrl.algorithms.alphazero.native_search import (
     NativeSearchDiagnostics,
+    reconcile_search_after_observed_step,
     run_native_search_policy,
     step_game_and_reconcile_search,
 )
@@ -27,11 +33,18 @@ from catanrl.features.catanatron_utils import (
     get_observation_indices_from_full,
 )
 from catanrl.players.nn_mcts_player import _RemoteNNMCTSInferenceBackend
-from catanrl.utils.catanatron_action_space import canopy_action_count_increment
+from catanrl.utils.catanatron_action_space import (
+    canopy_action_count_increment,
+    from_action_space,
+    to_action_space,
+)
+from catanrl.utils.catanatron_game import force_player_order
+from catanrl.utils.catanatron_map import build_catan_map_from_native_game
 from catanrl.utils.seeding import derive_map_and_game_seeds, derive_seed
 
 MapType = Literal["BASE", "MINI", "TOURNAMENT"]
 GameOpponent = Literal["random", "raw", "value"]
+AuthoritativeEngine = Literal["native", "catanatron"]
 
 _MEAN_DIAGNOSTIC_FIELDS = (
     "simulations",
@@ -465,6 +478,207 @@ def _play_budget_game(
         game.close()
 
 
+def _catanatron_native_mask(game: Game, map_type: MapType, action_space_size: int) -> np.ndarray:
+    mask = np.zeros(action_space_size, dtype=np.bool_)
+    colors = tuple(game.state.colors)
+    for action in game.playable_actions:
+        mask[to_action_space(action, 2, map_type, colors)] = True
+    return mask
+
+
+def _replay_native_action(
+    native: NativeGame, action: int, action_type: ActionType, result: Any
+) -> None:
+    kwargs: dict[str, Any] = {}
+    if action_type == ActionType.ROLL:
+        kwargs["dice"] = tuple(int(value) for value in result)
+    elif action_type == ActionType.BUY_DEVELOPMENT_CARD:
+        kwargs["development_card"] = DEVELOPMENT_CARDS.index(result)
+    elif action_type == ActionType.MOVE_ROBBER and result is not None:
+        kwargs["stolen_resource"] = RESOURCES.index(result)
+    native.step(action, **kwargs)
+
+
+def _play_catanatron_shadow_budget_game(
+    *,
+    episode_seed: int,
+    mcts_seat: int,
+    budget: int,
+    args_dict: dict[str, Any],
+    actor_indices: np.ndarray,
+    critic_indices: np.ndarray,
+    inference_backend: _RemoteNNMCTSInferenceBackend,
+) -> tuple[
+    dict[str, Any],
+    SearchDiagnosticsAccumulator,
+    CriticCalibrationAccumulator,
+]:
+    """Run native search while Catanatron owns every actual state transition."""
+
+    map_seed, game_seed = derive_map_and_game_seeds(episode_seed)
+    diagnostics = SearchDiagnosticsAccumulator()
+    calibration_rows: list[tuple[float, int]] = []
+    calibration = CriticCalibrationAccumulator()
+    native = NativeGame(
+        2,
+        args_dict["map_type"],
+        seed=game_seed,
+        map_seed=map_seed,
+        number_placement="random",
+        discard_limit=int(args_dict["discard_limit"]),
+        vps_to_win=int(args_dict["vps_to_win"]),
+    )
+    candidate = SimplePlayer(Color.RED)
+    opponent = ValueFunctionPlayer(Color.BLUE)
+    players = [candidate, opponent] if mcts_seat == 0 else [opponent, candidate]
+    game = Game(
+        players=players,
+        catan_map=build_catan_map_from_native_game(native, args_dict["map_type"]),
+        seed=game_seed,
+        discard_limit=int(args_dict["discard_limit"]),
+        vps_to_win=int(args_dict["vps_to_win"]),
+    )
+    force_player_order(game, players)
+    decision_index = 0
+    action_count = 0
+    max_actions = int(args_dict.get("max_actions", 0))
+    opponent_rng = np.random.default_rng(derive_seed(episode_seed, "native_budget_random_opponent"))
+    search: NativeMCTSSearch | None = None
+    try:
+        while (
+            game.winning_color() is None
+            and game.state.num_turns < int(args_dict["turns_limit"])
+            and (max_actions <= 0 or action_count < max_actions)
+        ):
+            python_mask = _catanatron_native_mask(
+                game, args_dict["map_type"], native.action_space_size
+            )
+            native_mask = native.valid_action_mask()
+            if not np.array_equal(native_mask, python_mask):
+                differing = np.flatnonzero(native_mask != python_mask).tolist()
+                raise RuntimeError(
+                    f"Catanatron/native legal actions diverged at decision {decision_index}: "
+                    f"{differing}"
+                )
+            valid_indices = np.flatnonzero(native_mask)
+            if valid_indices.size == 0:
+                raise RuntimeError("Catanatron parity game has no legal action")
+
+            if valid_indices.size == 1:
+                action_index = int(valid_indices[0])
+            elif native.current_player == mcts_seat:
+                if search is None and bool(args_dict.get("tree_reuse", False)):
+                    search = NativeMCTSSearch(
+                        native,
+                        args_dict["map_type"],
+                        c_puct=float(args_dict["c_puct"]),
+                        seed=derive_seed(
+                            episode_seed,
+                            "native_budget_search",
+                            decision_index,
+                        ),
+                        canonical_pruning=bool(args_dict.get("canonical_pruning", False)),
+                        search_selection=args_dict.get("search_selection", "puct"),
+                        c_visit=float(args_dict.get("c_visit", 50.0)),
+                        c_scale=float(args_dict.get("c_scale", 1.0)),
+                    )
+                search_result = _search(
+                    game=native,
+                    budget=budget,
+                    decision_index=decision_index,
+                    episode_seed=episode_seed,
+                    args_dict=args_dict,
+                    actor_indices=actor_indices,
+                    critic_indices=critic_indices,
+                    inference_backend=inference_backend,
+                    search=search,
+                )
+                diagnostics.add(search_result.diagnostics)
+                calibration_rows.append((search_result.diagnostics.network_value, mcts_seat))
+                action_index = search_result.action
+            elif args_dict["game_opponent"] == "value":
+                opponent_action = game.state.current_player().decide(game, game.playable_actions)
+                action_index = to_action_space(
+                    opponent_action,
+                    2,
+                    args_dict["map_type"],
+                    tuple(game.state.colors),
+                )
+            elif args_dict["game_opponent"] == "random":
+                action_index = int(opponent_rng.choice(valid_indices))
+            else:
+                action_index = _raw_policy_action(
+                    native,
+                    args_dict["map_type"],
+                    actor_indices,
+                    critic_indices,
+                    inference_backend,
+                )
+
+            catanatron_action = from_action_space(
+                action_index,
+                game.state.current_color(),
+                2,
+                args_dict["map_type"],
+                tuple(game.state.colors),
+                game.playable_actions,
+            )
+            if catanatron_action not in game.playable_actions:
+                raise RuntimeError(
+                    f"Native action {action_index} is not an authoritative Catanatron action: "
+                    f"{catanatron_action}"
+                )
+            record = game.execute(catanatron_action)
+            _replay_native_action(
+                native,
+                action_index,
+                catanatron_action.action_type,
+                record.result,
+            )
+            search = reconcile_search_after_observed_step(
+                game=native,
+                map_type=args_dict["map_type"],
+                action=action_index,
+                search=search,
+            )
+            decision_index += 1
+            action_count += canopy_action_count_increment(action_index, 2, args_dict["map_type"])
+
+        winner_color = game.winning_color()
+        winner = None if winner_color is None else game.state.color_to_index[winner_color]
+        if native.winner != winner:
+            raise RuntimeError(f"Catanatron/native winners diverged: {winner} != {native.winner}")
+        for prediction, player in calibration_rows:
+            target = 0.0 if winner is None else (1.0 if winner == player else -1.0)
+            calibration.add(prediction, target)
+        candidate_vps = get_actual_victory_points(game.state, candidate.color)
+        return (
+            {
+                "budget": budget,
+                "seat": "first" if mcts_seat == 0 else "second",
+                "episode_seed": episode_seed,
+                "win": winner == mcts_seat,
+                "draw": winner is None,
+                "winner": winner,
+                "vps": int(candidate_vps),
+                "total_vps": int(
+                    sum(get_actual_victory_points(game.state, color) for color in game.state.colors)
+                ),
+                "turns": int(game.state.num_turns),
+                "actions": action_count,
+                "native_decisions": decision_index,
+                "opponent": args_dict["game_opponent"],
+                "authoritative_engine": "Catanatron",
+            },
+            diagnostics,
+            calibration,
+        )
+    finally:
+        if search is not None:
+            search.close()
+        native.close()
+
+
 def _game_worker_main(
     worker_id: int,
     request_queue: mp.Queue,
@@ -552,7 +766,12 @@ def _iter_budget_game_results(
         CriticCalibrationAccumulator,
     ]:
         mcts_seat, episode_seed = scenario
-        return _play_budget_game(
+        play_game = (
+            _play_catanatron_shadow_budget_game
+            if args_dict.get("authoritative_engine") == "catanatron"
+            else _play_budget_game
+        )
+        return play_game(
             episode_seed=episode_seed,
             mcts_seat=mcts_seat,
             budget=budget,
@@ -713,6 +932,7 @@ def _common_args(
     c_scale: float = 1.0,
     root_dirichlet_alpha: float = 0.3,
     root_dirichlet_fraction: float = 0.0,
+    authoritative_engine: AuthoritativeEngine = "native",
 ) -> dict[str, Any]:
     return {
         "map_type": map_type,
@@ -733,6 +953,7 @@ def _common_args(
         "c_scale": c_scale,
         "root_dirichlet_alpha": root_dirichlet_alpha,
         "root_dirichlet_fraction": root_dirichlet_fraction,
+        "authoritative_engine": authoritative_engine,
     }
 
 
@@ -767,6 +988,7 @@ def run_native_budget_games(
     c_scale: float = 1.0,
     root_dirichlet_alpha: float = 0.3,
     root_dirichlet_fraction: float = 0.0,
+    authoritative_engine: AuthoritativeEngine = "native",
 ) -> NativeBudgetGameResult:
     if budget < 1:
         raise ValueError("budget must be at least 1")
@@ -774,6 +996,13 @@ def run_native_budget_games(
         raise ValueError("games_per_seat must be at least 1")
     if games_per_worker < 1:
         raise ValueError("games_per_worker must be at least 1")
+    if authoritative_engine not in ("native", "catanatron"):
+        raise ValueError("authoritative_engine must be 'native' or 'catanatron'")
+    if authoritative_engine == "catanatron" and games_per_worker != 1:
+        raise ValueError(
+            "Catanatron-authoritative games require games_per_worker=1 because "
+            "upstream Catanatron uses process-global randomness"
+        )
     if max_actions < 0:
         raise ValueError("max_actions cannot be negative")
     if game_opponent not in ("random", "raw", "value"):
@@ -812,6 +1041,7 @@ def run_native_budget_games(
         c_scale=c_scale,
         root_dirichlet_alpha=root_dirichlet_alpha,
         root_dirichlet_fraction=root_dirichlet_fraction,
+        authoritative_engine=authoritative_engine,
     )
     args_dict["games_per_worker"] = games_per_worker
     aggregate = NativeBudgetGameResult()

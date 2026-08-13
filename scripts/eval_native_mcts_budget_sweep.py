@@ -48,6 +48,15 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--games-per-seat", type=int, default=32)
     parser.add_argument(
+        "--authoritative-engine",
+        choices=("native", "catanatron"),
+        default="native",
+        help=(
+            "Run actual games in native cppanatron, or keep Catanatron authoritative "
+            "and use an exactly replayed native shadow only for search."
+        ),
+    )
+    parser.add_argument(
         "--game-opponent",
         choices=("random", "raw", "value"),
         default="raw",
@@ -144,6 +153,11 @@ def _parse_args() -> argparse.Namespace:
         parser.error("--max-actions cannot be negative")
     if args.games_per_worker < 1:
         parser.error("--games-per-worker must be at least 1")
+    if args.authoritative_engine == "catanatron":
+        if args.games_per_worker != 1:
+            parser.error("--authoritative-engine catanatron requires --games-per-worker 1")
+        if not args.skip_probes:
+            parser.error("--authoritative-engine catanatron requires --skip-probes")
     return args
 
 
@@ -214,6 +228,12 @@ def main() -> None:
         "probe_stride": args.probe_stride,
         "games_per_seat": args.games_per_seat,
         "game_opponent": args.game_opponent,
+        "authoritative_engine": args.authoritative_engine,
+        "map_layout_source": (
+            "cppanatron layout imported into Catanatron"
+            if args.authoritative_engine == "catanatron"
+            else "cppanatron native"
+        ),
         "num_workers": args.num_workers,
         "games_per_worker": args.games_per_worker,
         "inference_batch_size": args.inference_batch_size,
@@ -350,6 +370,7 @@ def main() -> None:
                     value_scale=args.value_scale,
                     tree_reuse=args.tree_reuse,
                     canonical_pruning=args.canonical_pruning,
+                    authoritative_engine=args.authoritative_engine,
                 )
                 summary = games.summary()
                 payload["game_sweeps"][str(budget)] = {

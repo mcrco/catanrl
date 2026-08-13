@@ -75,6 +75,23 @@ def step_game_and_reconcile_search(
     """Play an action and retain a subtree only when it exactly follows the game."""
     game.step(action)
 
+    return reconcile_search_after_observed_step(
+        game=game,
+        map_type=map_type,
+        action=action,
+        search=search,
+    )
+
+
+def reconcile_search_after_observed_step(
+    *,
+    game: NativeGame,
+    map_type: MapType,
+    action: int,
+    search: NativeMCTSSearch | None,
+) -> NativeMCTSSearch | None:
+    """Reconcile reuse after the caller applies an authoritative replay step."""
+
     retained = search is not None and search.advance(action, game)
     if search is not None and not retained:
         search.close()
@@ -183,10 +200,7 @@ def _completed_q_policy(
     # Canopy normalizes against bounds widened across the entire search. Older
     # PUCT backends can still use the conservative root-only approximation.
     has_search_bounds = (
-        q_min is not None
-        and q_max is not None
-        and np.isfinite(q_min)
-        and np.isfinite(q_max)
+        q_min is not None and q_max is not None and np.isfinite(q_min) and np.isfinite(q_max)
     )
     if has_search_bounds:
         assert q_min is not None and q_max is not None
@@ -251,9 +265,7 @@ def run_native_search_policy(
     def evaluate(full_observation: np.ndarray):
         actor_observation = full_observation[actor_indices]
         critic_observation = (
-            actor_observation
-            if shared_observation
-            else full_observation[critic_indices]
+            actor_observation if shared_observation else full_observation[critic_indices]
         )
         return inference_backend.evaluate_leaf(actor_observation, critic_observation)
 
@@ -282,9 +294,7 @@ def run_native_search_policy(
         neural_evaluations = 1
         backed_up_root_value = float(np.clip(root_evaluation.value * value_scale, -1.0, 1.0))
         root_wdl = (
-            None
-            if root_evaluation.wdl is None
-            else _scaled_wdl(root_evaluation.wdl, value_scale)
+            None if root_evaluation.wdl is None else _scaled_wdl(root_evaluation.wdl, value_scale)
         )
         if search_selection == "completed-q":
             if root_wdl is None:
@@ -308,11 +318,7 @@ def run_native_search_policy(
             search.evaluate_leaf(
                 evaluation.policy_logits,
                 float(evaluation.value) * value_scale,
-                (
-                    None
-                    if evaluation.wdl is None
-                    else _scaled_wdl(evaluation.wdl, value_scale)
-                ),
+                (None if evaluation.wdl is None else _scaled_wdl(evaluation.wdl, value_scale)),
             )
         visits = search.root_visits().astype(np.float64)
         action_values = search.root_action_values()

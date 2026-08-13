@@ -82,8 +82,19 @@ def compare_canopy_to_native(
         raise ValueError("Canopy payload was not produced by the Catanatron adapter")
     if canopy_payload.get("game_engine") != "Catanatron":
         raise ValueError("Released Canopy games were not governed by Catanatron")
+    if canopy_payload.get("map_layout_source") != (
+        "cppanatron layout imported into Catanatron"
+    ):
+        raise ValueError("Released Canopy games did not use the shared cppanatron map layout")
 
     config = native_payload["config"]
+    if config.get("authoritative_engine") != "catanatron":
+        raise ValueError("Candidate games were not governed by Catanatron")
+    _require_equal(
+        "map layout source",
+        canopy_payload["map_layout_source"],
+        config.get("map_layout_source"),
+    )
     canopy_budget = int(canopy_payload["simulations"])
     selected_budget = canopy_budget if budget is None else int(budget)
     sweep = native_payload["game_sweeps"].get(str(selected_budget))

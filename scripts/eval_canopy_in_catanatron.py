@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -20,6 +22,7 @@ from catanatron.players.value import ValueFunctionPlayer
 from catanatron.state_functions import get_actual_victory_points
 from tqdm import tqdm
 
+from catanrl.envs.cppanatron import NativeGame
 from catanrl.envs.cppanatron.puffer_env import TURNS_LIMIT
 from catanrl.eval.canopy_catanatron_bridge import CanopyBridgeProcess
 from catanrl.eval.reporting import EvalResult, summarize_eval_results
@@ -28,7 +31,7 @@ from catanrl.utils.catanatron_action_space import (
     to_action_space,
 )
 from catanrl.utils.catanatron_game import force_player_order
-from catanrl.utils.catanatron_map import build_catan_map
+from catanrl.utils.catanatron_map import build_catan_map_from_native_game
 from catanrl.utils.seeding import derive_map_and_game_seeds, derive_seed
 
 
@@ -37,6 +40,7 @@ class LiveGame:
     game: Game
     episode_seed: int
     seat: str
+    rng_state: object
     action_count: int = 0
 
     @property
@@ -46,22 +50,56 @@ class LiveGame:
 
 def _new_game(episode_seed: int, seat: str) -> LiveGame:
     map_seed, game_seed = derive_map_and_game_seeds(episode_seed)
+    with NativeGame(
+        2,
+        "BASE",
+        seed=game_seed,
+        map_seed=map_seed,
+        number_placement="random",
+        discard_limit=9,
+        vps_to_win=15,
+    ) as native_layout:
+        catan_map = build_catan_map_from_native_game(native_layout, "BASE")
     canopy = SimplePlayer(Color.RED)
     opponent = ValueFunctionPlayer(Color.BLUE)
     players = [canopy, opponent] if seat == "first" else [opponent, canopy]
-    game = Game(
-        players=players,
-        catan_map=build_catan_map("BASE", seed=map_seed, number_placement="random"),
-        seed=game_seed,
-        discard_limit=9,
-        vps_to_win=15,
+    process_rng_state = random.getstate()
+    try:
+        game = Game(
+            players=players,
+            catan_map=catan_map,
+            seed=game_seed,
+            discard_limit=9,
+            vps_to_win=15,
+        )
+        force_player_order(game, players)
+        game_rng_state = random.getstate()
+    finally:
+        random.setstate(process_rng_state)
+    return LiveGame(
+        game=game,
+        episode_seed=episode_seed,
+        seat=seat,
+        rng_state=game_rng_state,
     )
-    force_player_order(game, players)
-    return LiveGame(game=game, episode_seed=episode_seed, seat=seat)
+
+
+@contextmanager
+def _game_random_state(live: LiveGame):
+    """Isolate Catanatron's module-global RNG for each interleaved game."""
+
+    process_rng_state = random.getstate()
+    random.setstate(live.rng_state)
+    try:
+        yield
+    finally:
+        live.rng_state = random.getstate()
+        random.setstate(process_rng_state)
 
 
 def _execute(live: LiveGame, action) -> None:
-    live.game.execute(action)
+    with _game_random_state(live):
+        live.game.execute(action)
     action_index = to_action_space(action, 2, "BASE", live.game.state.colors)
     live.action_count += canopy_action_count_increment(action_index, 2, "BASE")
 
@@ -87,9 +125,10 @@ def _play_batch(
                         break
                     _execute(live, game.playable_actions[0])
                 else:
-                    opponent_action = game.state.current_player().decide(
-                        game, game.playable_actions
-                    )
+                    with _game_random_state(live):
+                        opponent_action = game.state.current_player().decide(
+                            game, game.playable_actions
+                        )
                     _execute(live, opponent_action)
 
         decisions = [
@@ -208,6 +247,7 @@ def main() -> None:
         "checkpoint": str(args.checkpoint.resolve()),
         "checkpoint_name": args.checkpoint.name,
         "game_engine": "Catanatron",
+        "map_layout_source": "cppanatron layout imported into Catanatron",
         "opponent": "F",
         "map_type": "BASE",
         "number_placement": "random",
