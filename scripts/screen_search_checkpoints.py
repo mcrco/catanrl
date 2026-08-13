@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Screen saved checkpoints with paired native MCTS games against Catanatron F."""
+"""Screen saved checkpoints with paired MCTS games against Catanatron F."""
 
 from __future__ import annotations
 
@@ -31,6 +31,15 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--top-k", type=int, default=3)
     parser.add_argument("--num-workers", type=int, default=16)
     parser.add_argument("--games-per-worker", type=int, default=1)
+    parser.add_argument(
+        "--authoritative-engine",
+        choices=("native", "catanatron"),
+        default="native",
+        help=(
+            "Run actual games in cppanatron, or keep Catanatron authoritative "
+            "and use cppanatron only as an exactly replayed search shadow."
+        ),
+    )
     parser.add_argument("--inference-batch-size", type=int, default=64)
     parser.add_argument("--inference-wait-ms", type=float, default=2.0)
     parser.add_argument("--seed", type=int, default=41051)
@@ -50,6 +59,8 @@ def _parse_args() -> argparse.Namespace:
             parser.error(f"--{name.replace('_', '-')} must be at least 1")
     if args.max_actions < 0:
         parser.error("--max-actions cannot be negative")
+    if args.authoritative_engine == "catanatron" and args.games_per_worker != 1:
+        parser.error("--authoritative-engine catanatron requires --games-per-worker 1")
     return args
 
 
@@ -95,6 +106,12 @@ def main() -> None:
             "games_per_seat": args.games_per_seat,
             "top_k": args.top_k,
             "game_opponent": "value",
+            "authoritative_engine": args.authoritative_engine,
+            "map_layout_source": (
+                "cppanatron layout imported into Catanatron"
+                if args.authoritative_engine == "catanatron"
+                else "cppanatron native"
+            ),
             "seed": args.seed,
             "device": str(device),
             "search_selection": "completed-q",
@@ -156,6 +173,7 @@ def main() -> None:
             tree_reuse=True,
             canonical_pruning=True,
             max_actions=args.max_actions,
+            authoritative_engine=args.authoritative_engine,
         )
         payload["sweeps"][str(selector)] = {
             "summary": games.summary(),
