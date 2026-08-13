@@ -73,6 +73,9 @@ def _write(path: Path, payload: dict[str, Any]) -> None:
 
 def main() -> None:
     args = _parse_args()
+    # A failed selector must never leave a stale checkpoint that a downstream
+    # expensive run can mistake for fresh direct-Canopy evidence.
+    args.selected_output.unlink(missing_ok=True)
     screen_payload = json.loads(args.search_screen.read_text())
     selectors = shortlist_from_search_screen(screen_payload, top_k=args.top_k)
     if not args.canopy_binary.is_file():
@@ -120,6 +123,7 @@ def main() -> None:
     }
     payload: dict[str, Any] = {
         "schema_version": 1,
+        "status": "running",
         "selection_opponent": "released cullback/canopy nexus-v3",
         "authoritative_engine": "Catanatron",
         "shortlist_source": str(args.search_screen.resolve()),
@@ -190,8 +194,10 @@ def main() -> None:
     ranking, paired = rank_direct_canopy_results(payload["sweeps"])
     payload["ranking"] = ranking
     payload["paired_vs_top"] = paired
-    _write(args.output, payload)
     selected = str(ranking[0]["selector"])
+    payload["selected"] = selected
+    payload["status"] = "complete"
+    _write(args.output, payload)
     args.selected_output.parent.mkdir(parents=True, exist_ok=True)
     args.selected_output.write_text(selected + "\n")
     print(f"Selected checkpoint {selected} by direct Canopy play; wrote {args.output}")

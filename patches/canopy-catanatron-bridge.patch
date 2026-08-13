@@ -1,9 +1,9 @@
 diff --git a/examples/catan/catanatron_bridge.rs b/examples/catan/catanatron_bridge.rs
 new file mode 100644
-index 0000000..a1a6a72
+index 0000000..6ad0032
 --- /dev/null
 +++ b/examples/catan/catanatron_bridge.rs
-@@ -0,0 +1,488 @@
+@@ -0,0 +1,576 @@
 +//! JSON-lines bridge for evaluating the released Canopy Catan model on
 +//! authoritative Catanatron states.
 +//!
@@ -349,6 +349,93 @@ index 0000000..a1a6a72
 +    state: GameState,
 +}
 +
++fn same_authoritative_phase(left: &Phase, right: &Phase) -> bool {
++    match (left, right) {
++        (
++            Phase::Discard {
++                player: left_player,
++                remaining: left_remaining,
++                roller: left_roller,
++                ..
++            },
++            Phase::Discard {
++                player: right_player,
++                remaining: right_remaining,
++                roller: right_roller,
++                ..
++            },
++        ) => {
++            left_player == right_player
++                && left_remaining == right_remaining
++                && left_roller == right_roller
++        }
++        _ => left == right,
++    }
++}
++
++/// Compare every game field governed by authoritative Catanatron outcomes.
++///
++/// Canopy-only canonical ordering fields are intentionally excluded: when the
++/// real action path reaches the same authoritative position, the retained
++/// values are more exact than a root imported midway through a turn. In
++/// particular, discard `min_resource` and turn-start build snapshots encode
++/// how the retained subtree was canonicalized, not a Catanatron rule.
++fn same_authoritative_state(left: &GameState, right: &GameState) -> bool {
++    left.players == right.players
++        && left.current_player == right.current_player
++        && left.boards == right.boards
++        && left.bank == right.bank
++        && left.dev_deck == right.dev_deck
++        && left.robber == right.robber
++        && same_authoritative_phase(&left.phase, &right.phase)
++        && left.turn_number == right.turn_number
++        && left.pre_roll == right.pre_roll
++        && left.setup_count == right.setup_count
++        && left.longest_road == right.longest_road
++        && left.largest_army == right.largest_army
++        && left.dice == right.dice
++        && left.vp_limit == right.vp_limit
++        && left.discard_threshold == right.discard_threshold
++        && left.friendly_robber == right.friendly_robber
++        && left.last_setup_node == right.last_setup_node
++}
++
++#[cfg(test)]
++mod bridge_tests {
++    use super::*;
++
++    #[test]
++    fn retained_state_check_ignores_only_canopy_discard_ordering() {
++        let mut retained = GameState::from_seed(17, Dice::Random);
++        retained.current_player = Player::One;
++        retained.phase = Phase::Discard {
++            player: Player::One,
++            remaining: 3,
++            roller: Player::Two,
++            min_resource: 2,
++        };
++        let mut imported = retained.clone();
++        imported.phase = Phase::Discard {
++            player: Player::One,
++            remaining: 3,
++            roller: Player::Two,
++            min_resource: 0,
++        };
++        assert!(same_authoritative_state(&retained, &imported));
++
++        imported.current_player = Player::Two;
++        assert!(!same_authoritative_state(&retained, &imported));
++    }
++
++    #[test]
++    fn retained_state_check_rejects_authoritative_hand_drift() {
++        let retained = GameState::from_seed(19, Dice::Random);
++        let mut imported = retained.clone();
++        imported.players[Player::One].hand[Resource::Lumber] = 1;
++        assert!(!same_authoritative_state(&retained, &imported));
++    }
++}
++
 +fn search_batch(
 +    states: Vec<ImportedState>,
 +    active_game_ids: Option<&[String]>,
@@ -379,9 +466,10 @@ index 0000000..a1a6a72
 +        search.set_num_simulations(simulations);
 +        if imported.reuse_tree {
 +            let walked = search.walk_tree_exact(&imported.tree_actions);
-+            if walked == imported.tree_actions.len() {
++            if walked == imported.tree_actions.len()
++                && same_authoritative_state(search.state(), &imported.state)
++            {
 +                search.cancel_search();
-+                search.update_state(|state| *state = imported.state);
 +            } else {
 +                search.reset(imported.state);
 +            }
@@ -539,6 +627,41 @@ index d0ad819..422ba30 100644
      }
 
      /// When both players share a tile and one is friendly-protected,
+diff --git a/examples/catan/game/dev_card.rs b/examples/catan/game/dev_card.rs
+index b9e9981..c85314d 100644
+--- a/examples/catan/game/dev_card.rs
++++ b/examples/catan/game/dev_card.rs
+@@ -42,7 +42,7 @@ impl IndexMut<DevCardKind> for DevCardArray {
+ /// Per-type distributions are derived from visible information (hands + played
+ /// piles) via `GameState::unknown_dev_pool()` when needed. This avoids the
+ /// impossible task of tracking per-type counts when opponent draws are hidden.
+-#[derive(Clone, Copy, Debug)]
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+ pub struct DevCardDeck {
+     pub total: u8,
+ }
+diff --git a/examples/catan/game/dice.rs b/examples/catan/game/dice.rs
+index 5cf82d1..8f954a1 100644
+--- a/examples/catan/game/dice.rs
++++ b/examples/catan/game/dice.rs
+@@ -5,7 +5,7 @@ const TOTAL_CARDS: u8 = 36;
+ const MIN_CARDS_RESHUFFLE: u8 = 13;
+ const RECENT_MEMORY: usize = 5;
+
+-#[derive(Clone, Copy, Debug)]
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+ pub enum Dice {
+     Random,
+     Balanced(BalancedDice),
+@@ -27,7 +27,7 @@ impl Dice {
+     }
+ }
+
+-#[derive(Clone, Copy, Debug)]
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+ pub struct BalancedDice {
+     deck: [u8; 11],
+     cards_left: u8,
 diff --git a/examples/catan/game/mod.rs b/examples/catan/game/mod.rs
 index d33b6e7..7480fd9 100644
 --- a/examples/catan/game/mod.rs
@@ -553,9 +676,18 @@ index d33b6e7..7480fd9 100644
      } else if state.pre_roll {
          state.phase = Phase::Roll;
 diff --git a/examples/catan/game/road.rs b/examples/catan/game/road.rs
-index ac72148..f4613ee 100644
+index ac72148..424c778 100644
 --- a/examples/catan/game/road.rs
 +++ b/examples/catan/game/road.rs
+@@ -29,7 +29,7 @@ use super::board::{AdjacencyBitboards, EdgeId, NodeId};
+
+ const EDGE_MASK: u128 = (1u128 << 72) - 1;
+
+-#[derive(Clone, Copy, Debug, Default)]
++#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+ pub struct RoadNetwork {
+     pub roads: u128, // bits 0..72 — player's placed roads
+     reachable: u128, // bits 0..72 — empty edges adjacent to network
 @@ -37,6 +37,49 @@ pub struct RoadNetwork {
  }
 
@@ -632,9 +764,27 @@ index ac72148..f4613ee 100644
      fn opponent_building_shrinks_frontier() {
          let topo = make_topo();
 diff --git a/examples/catan/game/state.rs b/examples/catan/game/state.rs
-index aa8d78c..f76d787 100644
+index aa8d78c..bdabf2e 100644
 --- a/examples/catan/game/state.rs
 +++ b/examples/catan/game/state.rs
+@@ -14,7 +14,7 @@ use super::road::RoadNetwork;
+ use super::topology::Topology;
+
+ /// Bitboard representation of a player's buildings and road network.
+-#[derive(Clone, Copy, Debug, Default)]
++#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+ pub struct PlayerBoards {
+     /// Bitmask of node positions with settlements (bits 0..54).
+     pub settlements: u64,
+@@ -25,7 +25,7 @@ pub struct PlayerBoards {
+ }
+
+ /// Per-player game state: resources, pieces, dev cards, and scoring.
+-#[derive(Clone, Debug)]
++#[derive(Clone, Debug, PartialEq, Eq)]
+ pub struct PlayerState {
+     /// Resource cards currently in hand.
+     pub hand: ResourceArray,
 @@ -146,6 +146,8 @@ pub struct GameState {
      pub dice: Dice,
      pub vp_limit: u8,

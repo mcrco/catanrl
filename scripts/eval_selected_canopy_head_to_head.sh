@@ -14,6 +14,7 @@ output=$5
 games_per_seat=$6
 seed=${7:-52043}
 smoke_simulations=${CATANRL_CANOPY_H2H_SMOKE_SIMULATIONS:-0}
+selection_result=${CATANRL_CANOPY_SELECTION_RESULT:-}
 
 if ! [[ "$smoke_simulations" =~ ^[0-9]+$ ]]; then
   echo "CATANRL_CANOPY_H2H_SMOKE_SIMULATIONS must be a non-negative integer" >&2
@@ -28,6 +29,22 @@ IFS= read -r selector < "$selected_file"
 if ! [[ "$selector" =~ ^[0-9]+$ ]]; then
   echo "selected checkpoint must be a non-negative integer, got: $selector" >&2
   exit 1
+fi
+if [[ -n "$selection_result" ]]; then
+  if [[ ! -s "$selection_result" ]]; then
+    echo "direct Canopy selection result is missing or empty: $selection_result" >&2
+    exit 1
+  fi
+  env -u VIRTUAL_ENV UV_CACHE_DIR=/tmp/catanrl-uv-cache \
+    uv run python -c \
+    'import json, pathlib, sys
+p=json.load(open(sys.argv[1]))
+s=pathlib.Path(sys.argv[2]).read_text().strip()
+assert p.get("status") == "complete", "direct Canopy selection did not complete"
+assert p.get("selection_opponent") == "released cullback/canopy nexus-v3"
+assert str(p.get("selected")) == s, "selection JSON and checkpoint file disagree"
+assert str(p["ranking"][0]["selector"]) == s, "selected checkpoint is not direct Canopy rank 1"' \
+    "$selection_result" "$selected_file"
 fi
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)

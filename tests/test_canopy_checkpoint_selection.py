@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+
 import pytest
 
 from catanrl.eval.canopy_checkpoint_selection import (
@@ -43,3 +47,39 @@ def test_direct_ranking_uses_canopy_wins_then_vps() -> None:
     ranking, paired = rank_direct_canopy_results(sweeps)
     assert [row["selector"] for row in ranking] == ["9", "10", "7"]
     assert set(paired) == {"7", "10"}
+
+
+def test_selected_eval_rejects_incomplete_direct_selection(tmp_path) -> None:
+    selected = tmp_path / "selected"
+    selected.write_text("9\n")
+    selection = tmp_path / "selection.json"
+    selection.write_text(
+        json.dumps(
+            {
+                "status": "running",
+                "selection_opponent": "released cullback/canopy nexus-v3",
+                "selected": "9",
+                "ranking": [{"selector": "9"}],
+            }
+        )
+    )
+    result = subprocess.run(
+        [
+            "bash",
+            "scripts/eval_selected_canopy_head_to_head.sh",
+            "unused-experiment",
+            str(selected),
+            "unused-binary",
+            "unused-checkpoint",
+            str(tmp_path / "output.json"),
+            "1",
+        ],
+        env={
+            **os.environ,
+            "CATANRL_CANOPY_SELECTION_RESULT": str(selection),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert "direct Canopy selection did not complete" in result.stderr
