@@ -262,8 +262,10 @@ def test_worker_coalescer_sends_one_batch_for_concurrent_game_threads():
     def evaluate(index: int):
         barrier.wait()
         return backend.evaluate_leaf(
-            np.full(3, index, dtype=np.float32),
-            np.full(2, index, dtype=np.float32),
+            # Production graph observations arrive with a singleton leading row;
+            # coalescing must not turn these into [batch, 1, features].
+            np.full((1, 3), index, dtype=np.float32),
+            np.full((1, 2), index, dtype=np.float32),
         )
 
     try:

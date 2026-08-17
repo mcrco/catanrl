@@ -439,8 +439,12 @@ class _CoalescingNNMCTSInferenceBackend(_NNMCTSInferenceBackend):
         future: Future[_LeafEvaluation] = Future()
         self.requests.put(
             _CoalescedLeafEvaluationRequest(
-                actor_features=np.asarray(actor_features, dtype=np.float32),
-                critic_features=np.asarray(critic_features, dtype=np.float32),
+                # Scalar inference has historically accepted both flat features and
+                # singleton-row features (the local backend flattens either form).
+                # Preserve that contract before stacking independent requests into
+                # one true [batch, features] tensor.
+                actor_features=np.asarray(actor_features, dtype=np.float32).reshape(-1),
+                critic_features=np.asarray(critic_features, dtype=np.float32).reshape(-1),
                 future=future,
             )
         )
