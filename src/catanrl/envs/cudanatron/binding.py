@@ -63,6 +63,47 @@ class _Tile(ctypes.Structure):
     ]
 
 
+class _NodePosition(ctypes.Structure):
+    _fields_ = [
+        ("node", ctypes.c_int32),
+        ("x", ctypes.c_int32),
+        ("y", ctypes.c_int32),
+    ]
+
+
+class _EdgePosition(ctypes.Structure):
+    _fields_ = [
+        ("a", ctypes.c_int32),
+        ("b", ctypes.c_int32),
+        ("x", ctypes.c_int32),
+        ("y", ctypes.c_int32),
+    ]
+
+
+class _TilePosition(ctypes.Structure):
+    _fields_ = [
+        ("x", ctypes.c_int32),
+        ("y", ctypes.c_int32),
+        ("z", ctypes.c_int32),
+        ("board_x", ctypes.c_int32),
+        ("board_y", ctypes.c_int32),
+    ]
+
+
+class _SearchMetrics(ctypes.Structure):
+    _fields_ = [
+        ("simulations", ctypes.c_uint64),
+        ("principal_variation_depth", ctypes.c_uint32),
+        ("maximum_depth", ctypes.c_uint32),
+        ("mean_depth", ctypes.c_double),
+        ("root_value", ctypes.c_double),
+        ("retained_root_visits", ctypes.c_uint32),
+        ("pruned_actions", ctypes.c_uint64),
+        ("coalesced_outcomes", ctypes.c_uint64),
+        ("tree_reused", ctypes.c_int32),
+    ]
+
+
 @dataclass(frozen=True)
 class NativePlayerState:
     victory_points: int
@@ -223,7 +264,140 @@ def _load_library(path: Path | None = None) -> ctypes.CDLL:
         ctypes.c_char_p,
         ctypes.c_size_t,
     ]
+    library.cudanatron_game_set_observation_layout.argtypes = [
+        handle,
+        ctypes.c_int32,
+        ctypes.c_int32,
+        ctypes.POINTER(_NodePosition),
+        ctypes.c_size_t,
+        ctypes.POINTER(_EdgePosition),
+        ctypes.c_size_t,
+        ctypes.POINTER(_TilePosition),
+        ctypes.c_size_t,
+    ]
+    library.cudanatron_game_observation_size.argtypes = [handle]
+    library.cudanatron_game_observation_size.restype = ctypes.c_int32
+    library.cudanatron_game_write_observation.argtypes = [
+        handle,
+        ctypes.c_int32,
+        ctypes.POINTER(ctypes.c_float),
+        ctypes.c_size_t,
+    ]
+    library.cudanatron_search_pool_create.argtypes = [
+        ctypes.POINTER(handle),
+        ctypes.c_size_t,
+        ctypes.c_double,
+        ctypes.c_uint64,
+        ctypes.c_int32,
+    ]
+    library.cudanatron_search_pool_create.restype = handle
+    library.cudanatron_search_pool_destroy.argtypes = [handle]
+    library.cudanatron_search_pool_size.argtypes = [handle]
+    library.cudanatron_search_pool_size.restype = ctypes.c_int32
+    library.cudanatron_search_pool_observation_size.argtypes = [handle]
+    library.cudanatron_search_pool_observation_size.restype = ctypes.c_int32
+    library.cudanatron_search_pool_initialize_roots.argtypes = [
+        handle,
+        ctypes.POINTER(ctypes.c_float),
+        ctypes.c_size_t,
+        ctypes.c_size_t,
+    ]
+    library.cudanatron_search_pool_set_root_wdls.argtypes = [
+        handle,
+        ctypes.POINTER(ctypes.c_double),
+        ctypes.c_size_t,
+    ]
+    library.cudanatron_search_pool_enable_completed_q.argtypes = [
+        handle,
+        ctypes.c_double,
+        ctypes.c_double,
+    ]
+    library.cudanatron_search_pool_add_dirichlet_noise.argtypes = [
+        handle,
+        ctypes.c_double,
+        ctypes.c_double,
+    ]
+    library.cudanatron_search_pool_add_simulations_all.argtypes = [handle, ctypes.c_int32]
+    library.cudanatron_search_pool_remaining_simulations.argtypes = [handle]
+    library.cudanatron_search_pool_remaining_simulations.restype = ctypes.c_int32
+    library.cudanatron_search_pool_select_leaves.argtypes = [
+        handle,
+        ctypes.c_int32,
+        ctypes.POINTER(ctypes.c_float),
+        ctypes.c_size_t,
+        ctypes.POINTER(ctypes.c_int32),
+        ctypes.POINTER(ctypes.c_int32),
+    ]
+    library.cudanatron_search_pool_select_leaves.restype = ctypes.c_int32
+    library.cudanatron_search_pool_evaluate_leaves.argtypes = [
+        handle,
+        ctypes.POINTER(ctypes.c_int32),
+        ctypes.c_size_t,
+        ctypes.POINTER(ctypes.c_float),
+        ctypes.c_size_t,
+        ctypes.c_size_t,
+        ctypes.POINTER(ctypes.c_double),
+        ctypes.c_size_t,
+    ]
+    library.cudanatron_search_pool_root_visits.argtypes = [
+        handle,
+        ctypes.c_int32,
+        ctypes.POINTER(ctypes.c_uint32),
+        ctypes.c_size_t,
+    ]
+    library.cudanatron_search_pool_root_wdl.argtypes = [
+        handle,
+        ctypes.c_int32,
+        ctypes.POINTER(ctypes.c_double),
+        ctypes.c_size_t,
+    ]
+    library.cudanatron_search_pool_metrics.argtypes = [
+        handle,
+        ctypes.c_int32,
+        ctypes.POINTER(_SearchMetrics),
+    ]
+    library.cudanatron_search_pool_advance.argtypes = [
+        handle,
+        ctypes.c_int32,
+        ctypes.c_size_t,
+    ]
+    library.cudanatron_search_pool_advance.restype = ctypes.c_int32
+    library.cudanatron_search_pool_advance_to_game.argtypes = [
+        handle,
+        ctypes.c_int32,
+        ctypes.c_size_t,
+        handle,
+    ]
+    library.cudanatron_search_pool_advance_to_game.restype = ctypes.c_int32
     return library
+
+
+def observation_layout_arrays():
+    from catanatron.gym.board_tensor_features import (
+        HEIGHT,
+        WIDTH,
+        get_node_and_edge_maps,
+        get_tile_coordinate_map,
+    )
+
+    node_map, edge_map = get_node_and_edge_maps()
+    nodes = (_NodePosition * len(node_map))(
+        *(_NodePosition(node, x, y) for node, (x, y) in node_map.items())
+    )
+    unique_edges: dict[tuple[int, int], tuple[int, int]] = {}
+    for (a, b), position in edge_map.items():
+        unique_edges.setdefault(tuple(sorted((a, b))), position)
+    edges = (_EdgePosition * len(unique_edges))(
+        *(_EdgePosition(a, b, x, y) for (a, b), (x, y) in unique_edges.items())
+    )
+    tile_map = get_tile_coordinate_map()
+    tiles = (_TilePosition * len(tile_map))(
+        *(
+            _TilePosition(int(x), int(y), int(z), board_x, board_y)
+            for (x, y, z), (board_y, board_x) in tile_map.items()
+        )
+    )
+    return WIDTH, HEIGHT, nodes, edges, tiles
 
 
 class NativeGame:
@@ -269,6 +443,7 @@ class NativeGame:
         self.action_space_size = int(
             self._library.cudanatron_game_action_space_size(self._handle)
         )
+        self._layout_ready = False
 
     def _raise_last_error(self) -> None:
         message = self._library.cudanatron_last_error()
@@ -435,6 +610,46 @@ class NativeGame:
         )
         return buffer.value.decode()
 
+    def ensure_observation_layout(self) -> None:
+        if self._layout_ready:
+            return
+        width, height, nodes, edges, tiles = observation_layout_arrays()
+        self._check(
+            self._library.cudanatron_game_set_observation_layout(
+                self._handle,
+                width,
+                height,
+                nodes,
+                len(nodes),
+                edges,
+                len(edges),
+                tiles,
+                len(tiles),
+            )
+        )
+        self._layout_ready = True
+
+    def observation_size(self) -> int:
+        self.ensure_observation_layout()
+        size = int(self._library.cudanatron_game_observation_size(self._handle))
+        if size < 0:
+            self._raise_last_error()
+        return size
+
+    def observation(self, base_player: int | None = None) -> np.ndarray:
+        self.ensure_observation_layout()
+        player = self.current_player if base_player is None else int(base_player)
+        output = np.zeros(self.observation_size(), dtype=np.float32)
+        self._check(
+            self._library.cudanatron_game_write_observation(
+                self._handle,
+                player,
+                output.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+                output.size,
+            )
+        )
+        return output
+
     def close(self) -> None:
         if getattr(self, "_handle", None):
             self._library.cudanatron_game_destroy(self._handle)
@@ -448,3 +663,227 @@ class NativeGame:
 
     def __del__(self) -> None:
         self.close()
+
+
+@dataclass(frozen=True)
+class NativeSearchMetrics:
+    simulations: int
+    principal_variation_depth: int
+    maximum_depth: int
+    mean_depth: float
+    root_value: float
+    retained_root_visits: int
+    pruned_actions: int
+    coalesced_outcomes: int
+    tree_reused: bool
+
+
+class NativeSearchPool:
+    """Coordinator over independent native MCTS searches.
+
+    Python only supplies batched neural evaluations. Terminal backups stay
+    inside C++ and do not occupy leaf-batch slots.
+    """
+
+    def __init__(
+        self,
+        games: list[NativeGame],
+        *,
+        c_puct: float = 1.5,
+        seed: int = 0,
+        canonical_pruning: bool = False,
+    ) -> None:
+        if not games:
+            raise ValueError("search pool requires at least one game")
+        for game in games:
+            game.ensure_observation_layout()
+        self._library = games[0]._library
+        self._games = games
+        handles = (ctypes.c_void_p * len(games))(*[game._handle for game in games])
+        self._handle = self._library.cudanatron_search_pool_create(
+            handles,
+            len(games),
+            float(c_puct),
+            int(seed),
+            int(canonical_pruning),
+        )
+        if not self._handle:
+            message = self._library.cudanatron_last_error()
+            raise RuntimeError(message.decode() if message else "unknown cudanatron error")
+        self.size = int(self._library.cudanatron_search_pool_size(self._handle))
+        self.observation_size = int(
+            self._library.cudanatron_search_pool_observation_size(self._handle)
+        )
+        self.action_space_size = games[0].action_space_size
+
+    def _raise_last_error(self) -> None:
+        message = self._library.cudanatron_last_error()
+        raise RuntimeError(message.decode() if message else "unknown cudanatron error")
+
+    def _check(self, result: int) -> None:
+        if result != 0:
+            self._raise_last_error()
+
+    def initialize_roots(self, policy_logits: np.ndarray) -> None:
+        logits = np.ascontiguousarray(policy_logits, dtype=np.float32)
+        if logits.ndim != 2 or logits.shape[0] != self.size:
+            raise ValueError("root policy logits must have shape (num_searches, action_space)")
+        self._check(
+            self._library.cudanatron_search_pool_initialize_roots(
+                self._handle,
+                logits.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+                logits.shape[1],
+                logits.shape[1],
+            )
+        )
+
+    def set_root_wdls(self, wdls: np.ndarray) -> None:
+        values = np.ascontiguousarray(wdls, dtype=np.float64)
+        if values.ndim != 2 or values.shape[0] != self.size or values.shape[1] < 3:
+            raise ValueError("root WDLs must have shape (num_searches, 3)")
+        self._check(
+            self._library.cudanatron_search_pool_set_root_wdls(
+                self._handle,
+                values.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+                values.shape[1],
+            )
+        )
+
+    def enable_completed_q(self, c_visit: float = 50.0, c_scale: float = 1.0) -> None:
+        self._check(
+            self._library.cudanatron_search_pool_enable_completed_q(
+                self._handle, float(c_visit), float(c_scale)
+            )
+        )
+
+    def add_dirichlet_noise(self, alpha: float, fraction: float) -> None:
+        self._check(
+            self._library.cudanatron_search_pool_add_dirichlet_noise(
+                self._handle, float(alpha), float(fraction)
+            )
+        )
+
+    def add_simulations_all(self, count: int) -> None:
+        self._check(self._library.cudanatron_search_pool_add_simulations_all(self._handle, int(count)))
+
+    @property
+    def remaining_simulations(self) -> int:
+        return int(self._library.cudanatron_search_pool_remaining_simulations(self._handle))
+
+    def select_leaves(self, capacity: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        observations = np.zeros((capacity, self.observation_size), dtype=np.float32)
+        players = np.full(capacity, -1, dtype=np.int32)
+        tokens = np.full(capacity, -1, dtype=np.int32)
+        filled = int(
+            self._library.cudanatron_search_pool_select_leaves(
+                self._handle,
+                int(capacity),
+                observations.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+                self.observation_size,
+                players.ctypes.data_as(ctypes.POINTER(ctypes.c_int32)),
+                tokens.ctypes.data_as(ctypes.POINTER(ctypes.c_int32)),
+            )
+        )
+        if filled < 0:
+            self._raise_last_error()
+        return observations[:filled], players[:filled], tokens[:filled]
+
+    def evaluate_leaves(
+        self,
+        tokens: np.ndarray,
+        policy_logits: np.ndarray,
+        wdls: np.ndarray,
+    ) -> None:
+        token_values = np.ascontiguousarray(tokens, dtype=np.int32)
+        logits = np.ascontiguousarray(policy_logits, dtype=np.float32)
+        values = np.ascontiguousarray(wdls, dtype=np.float64)
+        if logits.ndim != 2 or values.ndim != 2:
+            raise ValueError("leaf policy and WDL must be 2-D")
+        if logits.shape[0] != token_values.size or values.shape[0] != token_values.size:
+            raise ValueError("leaf batch dimensions do not match tokens")
+        self._check(
+            self._library.cudanatron_search_pool_evaluate_leaves(
+                self._handle,
+                token_values.ctypes.data_as(ctypes.POINTER(ctypes.c_int32)),
+                token_values.size,
+                logits.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+                logits.shape[1],
+                logits.shape[1],
+                values.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+                values.shape[1],
+            )
+        )
+
+    def root_visits(self, index: int) -> np.ndarray:
+        visits = np.zeros(self.action_space_size, dtype=np.uint32)
+        self._check(
+            self._library.cudanatron_search_pool_root_visits(
+                self._handle,
+                int(index),
+                visits.ctypes.data_as(ctypes.POINTER(ctypes.c_uint32)),
+                visits.size,
+            )
+        )
+        return visits
+
+    def root_wdl(self, index: int) -> np.ndarray:
+        wdl = np.zeros(3, dtype=np.float64)
+        self._check(
+            self._library.cudanatron_search_pool_root_wdl(
+                self._handle,
+                int(index),
+                wdl.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+                wdl.size,
+            )
+        )
+        return wdl
+
+    def metrics(self, index: int) -> NativeSearchMetrics:
+        raw = _SearchMetrics()
+        self._check(
+            self._library.cudanatron_search_pool_metrics(
+                self._handle, int(index), ctypes.byref(raw)
+            )
+        )
+        return NativeSearchMetrics(
+            simulations=int(raw.simulations),
+            principal_variation_depth=int(raw.principal_variation_depth),
+            maximum_depth=int(raw.maximum_depth),
+            mean_depth=float(raw.mean_depth),
+            root_value=float(raw.root_value),
+            retained_root_visits=int(raw.retained_root_visits),
+            pruned_actions=int(raw.pruned_actions),
+            coalesced_outcomes=int(raw.coalesced_outcomes),
+            tree_reused=bool(raw.tree_reused),
+        )
+
+    def advance(self, index: int, action: int) -> bool:
+        result = int(self._library.cudanatron_search_pool_advance(self._handle, int(index), int(action)))
+        if result < 0:
+            self._raise_last_error()
+        return result == 1
+
+    def advance_to(self, index: int, action: int, observed: NativeGame) -> bool:
+        result = int(
+            self._library.cudanatron_search_pool_advance_to_game(
+                self._handle, int(index), int(action), observed._handle
+            )
+        )
+        if result < 0:
+            self._raise_last_error()
+        return result == 1
+
+    def close(self) -> None:
+        if getattr(self, "_handle", None):
+            self._library.cudanatron_search_pool_destroy(self._handle)
+            self._handle = None
+
+    def __enter__(self) -> NativeSearchPool:
+        return self
+
+    def __exit__(self, *_args) -> None:
+        self.close()
+
+    def __del__(self) -> None:
+        self.close()
+

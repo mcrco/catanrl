@@ -10,6 +10,8 @@
 #include "cudanatron/action_space.hpp"
 #include "cudanatron/game.hpp"
 #include "cudanatron/map.hpp"
+#include "cudanatron/mcts.hpp"
+#include "cudanatron/observation.hpp"
 
 using cudanatron::ActionPrompt;
 using cudanatron::FlatActionSpace;
@@ -28,13 +30,28 @@ using cudanatron::execute_action;
 using cudanatron::initialize_game;
 using cudanatron::turns_since;
 using cudanatron::winning_player;
-using cudanatron::write_legal_mask;
+using cudanatron::EdgePosition;
+using cudanatron::MCTSSearch;
+using cudanatron::NodePosition;
+using cudanatron::ObservationLayout;
+using cudanatron::SearchPool;
+using cudanatron::TilePosition;
+using cudanatron::WDL;
+using cudanatron::fill_observation_layout;
+using cudanatron::full_observation_size;
+using cudanatron::write_full_observation;
 
 struct cudanatron_game {
     GameConfig config{};
     PackedMap map{};
     PackedGame game{};
     FlatActionSpace action_space{};
+    ObservationLayout layout{};
+    bool has_layout{false};
+};
+
+struct cudanatron_search_pool {
+    std::unique_ptr<SearchPool> pool;
 };
 
 namespace {
@@ -130,6 +147,53 @@ Replay make_replay(
         replay.stolen_resource = static_cast<std::int8_t>(stolen_resource);
     }
     return replay;
+}
+
+void apply_observation_layout(
+    cudanatron_game* handle,
+    int32_t width,
+    int32_t height,
+    const cudanatron_node_position* nodes,
+    size_t node_count,
+    const cudanatron_edge_position* edges,
+    size_t edge_count,
+    const cudanatron_tile_position* tiles,
+    size_t tile_count) {
+    if (handle == nullptr) {
+        throw std::invalid_argument("null game");
+    }
+    std::vector<NodePosition> node_positions(node_count);
+    for (size_t i = 0; i < node_count; ++i) {
+        node_positions[i] = NodePosition{nodes[i].node, nodes[i].x, nodes[i].y};
+    }
+    std::vector<EdgePosition> edge_positions(edge_count);
+    for (size_t i = 0; i < edge_count; ++i) {
+        edge_positions[i] = EdgePosition{edges[i].a, edges[i].b, edges[i].x, edges[i].y};
+    }
+    std::vector<TilePosition> tile_positions(tile_count);
+    for (size_t i = 0; i < tile_count; ++i) {
+        tile_positions[i] = TilePosition{
+            tiles[i].x,
+            tiles[i].y,
+            tiles[i].z,
+            tiles[i].board_x,
+            tiles[i].board_y,
+        };
+    }
+    require_ok(
+        fill_observation_layout(
+            &handle->layout,
+            width,
+            height,
+            node_positions.data(),
+            static_cast<int>(node_positions.size()),
+            edge_positions.data(),
+            static_cast<int>(edge_positions.size()),
+            tile_positions.data(),
+            static_cast<int>(tile_positions.size()),
+            handle->map),
+        "observation layout");
+    handle->has_layout = true;
 }
 
 }  // namespace
@@ -477,6 +541,373 @@ int32_t cudanatron_game_action_key(
         buffer,
         static_cast<int>(buffer_size));
     return 0;
+}
+
+int32_t cudanatron_game_set_observation_layout(
+    cudanatron_game* handle,
+    int32_t width,
+    int32_t height,
+    const cudanatron_node_position* nodes,
+    size_t node_count,
+    const cudanatron_edge_position* edges,
+    size_t edge_count,
+    const cudanatron_tile_position* tiles,
+    size_t tile_count) {
+    try {
+        if (nodes == nullptr || edges == nullptr || tiles == nullptr) {
+            throw std::invalid_argument("observation layout pointers are null");
+        }
+        apply_observation_layout(
+            handle,
+            width,
+            height,
+            nodes,
+            node_count,
+            edges,
+            edge_count,
+            tiles,
+            tile_count);
+        return 0;
+    } catch (const std::exception& error) {
+        set_error(error);
+        return -1;
+    }
+}
+
+int32_t cudanatron_game_observation_size(const cudanatron_game* handle) {
+    if (handle == nullptr || !handle->has_layout) {
+        return -1;
+    }
+    return full_observation_size(
+        handle->game.num_players, handle->layout.width, handle->layout.height);
+}
+
+int32_t cudanatron_game_write_observation(
+    const cudanatron_game* handle,
+    int32_t base_player,
+    float* output,
+    size_t output_size) {
+    if (handle == nullptr || output == nullptr) {
+        last_error = "null game or observation";
+        return -1;
+    }
+    if (!handle->has_layout) {
+        last_error = "observation layout has not been set";
+        return -1;
+    }
+    const Status status = write_full_observation(
+        handle->map,
+        handle->game,
+        base_player,
+        handle->layout,
+        output,
+        static_cast<int>(output_size));
+    if (status != Status::ok) {
+        last_error = "failed to write observation";
+        return -1;
+    }
+    return 0;
+}
+
+cudanatron_search_pool* cudanatron_search_pool_create(
+    cudanatron_game* const* games,
+    size_t game_count,
+    double c_puct,
+    uint64_t seed,
+    int32_t canonical_pruning) {
+    try {
+        if (games == nullptr || game_count == 0) {
+            throw std::invalid_argument("search pool requires at least one game");
+        }
+        ObservationLayout layout{};
+        bool has_layout = false;
+        std::vector<std::unique_ptr<MCTSSearch>> searches;
+        searches.reserve(game_count);
+        for (size_t i = 0; i < game_count; ++i) {
+            auto* game = games[i];
+            if (game == nullptr) {
+                throw std::invalid_argument("search pool contains a null game");
+            }
+            if (!game->has_layout) {
+                throw std::invalid_argument("search pool games need an observation layout");
+            }
+            if (!has_layout) {
+                layout = game->layout;
+                has_layout = true;
+            }
+            searches.push_back(std::make_unique<MCTSSearch>(
+                game->map,
+                game->game,
+                game->action_space,
+                c_puct,
+                seed + static_cast<uint64_t>(i),
+                canonical_pruning != 0));
+        }
+        auto handle = std::make_unique<cudanatron_search_pool>();
+        handle->pool = std::make_unique<SearchPool>(layout, std::move(searches));
+        return handle.release();
+    } catch (const std::exception& error) {
+        set_error(error);
+        return nullptr;
+    }
+}
+
+void cudanatron_search_pool_destroy(cudanatron_search_pool* handle) { delete handle; }
+
+int32_t cudanatron_search_pool_size(const cudanatron_search_pool* handle) {
+    return handle == nullptr || handle->pool == nullptr ? -1 : handle->pool->size();
+}
+
+int32_t cudanatron_search_pool_observation_size(const cudanatron_search_pool* handle) {
+    return handle == nullptr || handle->pool == nullptr ? -1
+                                                        : handle->pool->observation_size();
+}
+
+int32_t cudanatron_search_pool_initialize_roots(
+    cudanatron_search_pool* handle,
+    const float* policy_logits,
+    size_t policy_stride,
+    size_t policy_size) {
+    if (handle == nullptr || handle->pool == nullptr) {
+        last_error = "null search pool";
+        return -1;
+    }
+    try {
+        handle->pool->initialize_roots(
+            policy_logits,
+            static_cast<int>(policy_stride),
+            static_cast<int>(policy_size));
+        return 0;
+    } catch (const std::exception& error) {
+        set_error(error);
+        return -1;
+    }
+}
+
+int32_t cudanatron_search_pool_set_root_wdls(
+    cudanatron_search_pool* handle,
+    const double* wdls,
+    size_t wdl_stride) {
+    if (handle == nullptr || handle->pool == nullptr) {
+        last_error = "null search pool";
+        return -1;
+    }
+    try {
+        handle->pool->set_root_network_wdls(wdls, static_cast<int>(wdl_stride));
+        return 0;
+    } catch (const std::exception& error) {
+        set_error(error);
+        return -1;
+    }
+}
+
+int32_t cudanatron_search_pool_enable_completed_q(
+    cudanatron_search_pool* handle,
+    double c_visit,
+    double c_scale) {
+    if (handle == nullptr || handle->pool == nullptr) {
+        last_error = "null search pool";
+        return -1;
+    }
+    try {
+        handle->pool->enable_completed_q_selection(c_visit, c_scale);
+        return 0;
+    } catch (const std::exception& error) {
+        set_error(error);
+        return -1;
+    }
+}
+
+int32_t cudanatron_search_pool_add_dirichlet_noise(
+    cudanatron_search_pool* handle,
+    double alpha,
+    double fraction) {
+    if (handle == nullptr || handle->pool == nullptr) {
+        last_error = "null search pool";
+        return -1;
+    }
+    try {
+        handle->pool->add_root_dirichlet_noise(alpha, fraction);
+        return 0;
+    } catch (const std::exception& error) {
+        set_error(error);
+        return -1;
+    }
+}
+
+int32_t cudanatron_search_pool_add_simulations_all(
+    cudanatron_search_pool* handle,
+    int32_t count) {
+    if (handle == nullptr || handle->pool == nullptr) {
+        last_error = "null search pool";
+        return -1;
+    }
+    try {
+        handle->pool->add_simulations_all(count);
+        return 0;
+    } catch (const std::exception& error) {
+        set_error(error);
+        return -1;
+    }
+}
+
+int32_t cudanatron_search_pool_remaining_simulations(const cudanatron_search_pool* handle) {
+    return handle == nullptr || handle->pool == nullptr ? -1
+                                                        : handle->pool->remaining_simulations();
+}
+
+int32_t cudanatron_search_pool_select_leaves(
+    cudanatron_search_pool* handle,
+    int32_t capacity,
+    float* observations,
+    size_t observation_stride,
+    int32_t* players,
+    int32_t* tokens) {
+    if (handle == nullptr || handle->pool == nullptr) {
+        last_error = "null search pool";
+        return -1;
+    }
+    try {
+        return handle->pool->select_leaves(
+            capacity,
+            observations,
+            static_cast<int>(observation_stride),
+            players,
+            tokens);
+    } catch (const std::exception& error) {
+        set_error(error);
+        return -1;
+    }
+}
+
+int32_t cudanatron_search_pool_evaluate_leaves(
+    cudanatron_search_pool* handle,
+    const int32_t* tokens,
+    size_t count,
+    const float* policy_logits,
+    size_t policy_stride,
+    size_t policy_size,
+    const double* wdls,
+    size_t wdl_stride) {
+    if (handle == nullptr || handle->pool == nullptr) {
+        last_error = "null search pool";
+        return -1;
+    }
+    try {
+        handle->pool->evaluate_leaves(
+            tokens,
+            static_cast<int>(count),
+            policy_logits,
+            static_cast<int>(policy_stride),
+            static_cast<int>(policy_size),
+            wdls,
+            static_cast<int>(wdl_stride));
+        return 0;
+    } catch (const std::exception& error) {
+        set_error(error);
+        return -1;
+    }
+}
+
+int32_t cudanatron_search_pool_root_visits(
+    const cudanatron_search_pool* handle,
+    int32_t index,
+    uint32_t* visits,
+    size_t visit_count) {
+    if (handle == nullptr || handle->pool == nullptr) {
+        last_error = "null search pool";
+        return -1;
+    }
+    try {
+        handle->pool->search(index).root_visits(visits, static_cast<int>(visit_count));
+        return 0;
+    } catch (const std::exception& error) {
+        set_error(error);
+        return -1;
+    }
+}
+
+int32_t cudanatron_search_pool_root_wdl(
+    const cudanatron_search_pool* handle,
+    int32_t index,
+    double* wdl,
+    size_t wdl_size) {
+    if (handle == nullptr || handle->pool == nullptr || wdl == nullptr || wdl_size < 3) {
+        last_error = "null search pool or WDL buffer";
+        return -1;
+    }
+    try {
+        const WDL value = handle->pool->search(index).root_wdl();
+        wdl[0] = value.win;
+        wdl[1] = value.draw;
+        wdl[2] = value.loss;
+        return 0;
+    } catch (const std::exception& error) {
+        set_error(error);
+        return -1;
+    }
+}
+
+int32_t cudanatron_search_pool_metrics(
+    const cudanatron_search_pool* handle,
+    int32_t index,
+    cudanatron_search_metrics* output) {
+    if (handle == nullptr || handle->pool == nullptr || output == nullptr) {
+        last_error = "null search pool or metrics";
+        return -1;
+    }
+    try {
+        const auto metrics = handle->pool->search(index).metrics();
+        output->simulations = metrics.simulations;
+        output->principal_variation_depth = metrics.principal_variation_depth;
+        output->maximum_depth = metrics.maximum_depth;
+        output->mean_depth = metrics.mean_depth;
+        output->root_value = metrics.root_value;
+        output->retained_root_visits = metrics.retained_root_visits;
+        output->pruned_actions = metrics.pruned_actions;
+        output->coalesced_outcomes = metrics.coalesced_outcomes;
+        output->tree_reused = metrics.tree_reused ? 1 : 0;
+        return 0;
+    } catch (const std::exception& error) {
+        set_error(error);
+        return -1;
+    }
+}
+
+int32_t cudanatron_search_pool_advance(
+    cudanatron_search_pool* handle,
+    int32_t index,
+    size_t action_index) {
+    if (handle == nullptr || handle->pool == nullptr) {
+        last_error = "null search pool";
+        return -1;
+    }
+    try {
+        return handle->pool->advance(index, static_cast<int>(action_index)) ? 1 : 0;
+    } catch (const std::exception& error) {
+        set_error(error);
+        return -1;
+    }
+}
+
+int32_t cudanatron_search_pool_advance_to_game(
+    cudanatron_search_pool* handle,
+    int32_t index,
+    size_t action_index,
+    const cudanatron_game* observed_game) {
+    if (handle == nullptr || handle->pool == nullptr || observed_game == nullptr) {
+        last_error = "null search pool or observed game";
+        return -1;
+    }
+    try {
+        return handle->pool->advance_to(
+                   index, static_cast<int>(action_index), observed_game->game)
+                   ? 1
+                   : 0;
+    } catch (const std::exception& error) {
+        set_error(error);
+        return -1;
+    }
 }
 
 }  // extern "C"

@@ -573,24 +573,6 @@ CUDANATRON_HD void collect_robber_victims(
     }
 }
 
-CUDANATRON_HD bool packed_actions_equal(const PackedAction& lhs, const PackedAction& rhs) {
-    if (lhs.type != rhs.type || lhs.player != rhs.player || lhs.node != rhs.node ||
-        lhs.edge != rhs.edge || lhs.resource != rhs.resource ||
-        lhs.resource_b != rhs.resource_b || lhs.yop_count != rhs.yop_count ||
-        lhs.maritime_rate != rhs.maritime_rate || lhs.maritime_offer != rhs.maritime_offer ||
-        lhs.maritime_ask != rhs.maritime_ask || lhs.robber_tile != rhs.robber_tile ||
-        lhs.robber_victim != rhs.robber_victim || lhs.trade_partner != rhs.trade_partner) {
-        return false;
-    }
-    for (int i = 0; i < kResourceCount; ++i) {
-        if (lhs.trade_offering[i] != rhs.trade_offering[i] ||
-            lhs.trade_asking[i] != rhs.trade_asking[i]) {
-            return false;
-        }
-    }
-    return true;
-}
-
 CUDANATRON_HD PackedAction make_basic(ActionType type, int player) {
     PackedAction action{};
     action.type = type;
@@ -670,6 +652,24 @@ CUDANATRON_HD bool search_equivalent(const PackedGame& lhs, const PackedGame& rh
     const auto* b = reinterpret_cast<const unsigned char*>(&rhs);
     for (std::size_t i = 0; i < sizeof(PackedGame); ++i) {
         if (a[i] != b[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+CUDANATRON_HD bool packed_actions_equal(const PackedAction& lhs, const PackedAction& rhs) {
+    if (lhs.type != rhs.type || lhs.player != rhs.player || lhs.node != rhs.node ||
+        lhs.edge != rhs.edge || lhs.resource != rhs.resource ||
+        lhs.resource_b != rhs.resource_b || lhs.yop_count != rhs.yop_count ||
+        lhs.maritime_rate != rhs.maritime_rate || lhs.maritime_offer != rhs.maritime_offer ||
+        lhs.maritime_ask != rhs.maritime_ask || lhs.robber_tile != rhs.robber_tile ||
+        lhs.robber_victim != rhs.robber_victim || lhs.trade_partner != rhs.trade_partner) {
+        return false;
+    }
+    for (int i = 0; i < kResourceCount; ++i) {
+        if (lhs.trade_offering[i] != rhs.trade_offering[i] ||
+            lhs.trade_asking[i] != rhs.trade_asking[i]) {
             return false;
         }
     }

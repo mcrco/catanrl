@@ -24,6 +24,12 @@ CUDANATRON_HD int num_resource_cards(const PackedGame& game, int player);
 
 CUDANATRON_HD bool search_equivalent(const PackedGame& lhs, const PackedGame& rhs);
 
+CUDANATRON_HD bool packed_actions_equal(const PackedAction& lhs, const PackedAction& rhs);
+
 CUDANATRON_HD int turns_since(int completed_turns, int last_completed_turn);
+
+CUDANATRON_HD inline int remaining_discards(const PackedGame& game, int player) {
+    return game.discard_counts[player];
+}
 
 }  // namespace cudanatron

@@ -13,6 +13,9 @@ add_library(cudanatron
     src/map.cu
     src/game.cu
     src/action_space.cu
+    src/observation.cu
+    src/chance.cu
+    src/mcts.cpp
 )
 add_library(cudanatron::cudanatron ALIAS cudanatron)
 
@@ -32,6 +35,11 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra -Wpedantic>
         $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-Wall,-Wextra>
     )
+endif()
+
+find_package(OpenMP)
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(cudanatron PUBLIC OpenMP::OpenMP_CXX)
 endif()
 
 add_library(cudanatron_c SHARED src/c_api.cu)

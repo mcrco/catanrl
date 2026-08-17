@@ -71,6 +71,27 @@ typedef struct cudanatron_tile {
     int32_t nodes[6];
 } cudanatron_tile;
 
+typedef struct cudanatron_node_position {
+    int32_t node;
+    int32_t x;
+    int32_t y;
+} cudanatron_node_position;
+
+typedef struct cudanatron_edge_position {
+    int32_t a;
+    int32_t b;
+    int32_t x;
+    int32_t y;
+} cudanatron_edge_position;
+
+typedef struct cudanatron_tile_position {
+    int32_t x;
+    int32_t y;
+    int32_t z;
+    int32_t board_x;
+    int32_t board_y;
+} cudanatron_tile_position;
+
 typedef struct cudanatron_search_metrics {
     uint64_t simulations;
     uint32_t principal_variation_depth;
@@ -147,6 +168,94 @@ CUDANATRON_API int32_t cudanatron_game_action_key(
     int32_t index,
     char* buffer,
     size_t buffer_size);
+CUDANATRON_API int32_t cudanatron_game_set_observation_layout(
+    cudanatron_game* handle,
+    int32_t width,
+    int32_t height,
+    const cudanatron_node_position* nodes,
+    size_t node_count,
+    const cudanatron_edge_position* edges,
+    size_t edge_count,
+    const cudanatron_tile_position* tiles,
+    size_t tile_count);
+CUDANATRON_API int32_t cudanatron_game_observation_size(const cudanatron_game* handle);
+CUDANATRON_API int32_t cudanatron_game_write_observation(
+    const cudanatron_game* handle,
+    int32_t base_player,
+    float* output,
+    size_t output_size);
+
+CUDANATRON_API cudanatron_search_pool* cudanatron_search_pool_create(
+    cudanatron_game* const* games,
+    size_t game_count,
+    double c_puct,
+    uint64_t seed,
+    int32_t canonical_pruning);
+CUDANATRON_API void cudanatron_search_pool_destroy(cudanatron_search_pool* handle);
+CUDANATRON_API int32_t cudanatron_search_pool_size(const cudanatron_search_pool* handle);
+CUDANATRON_API int32_t cudanatron_search_pool_observation_size(
+    const cudanatron_search_pool* handle);
+CUDANATRON_API int32_t cudanatron_search_pool_initialize_roots(
+    cudanatron_search_pool* handle,
+    const float* policy_logits,
+    size_t policy_stride,
+    size_t policy_size);
+CUDANATRON_API int32_t cudanatron_search_pool_set_root_wdls(
+    cudanatron_search_pool* handle,
+    const double* wdls,
+    size_t wdl_stride);
+CUDANATRON_API int32_t cudanatron_search_pool_enable_completed_q(
+    cudanatron_search_pool* handle,
+    double c_visit,
+    double c_scale);
+CUDANATRON_API int32_t cudanatron_search_pool_add_dirichlet_noise(
+    cudanatron_search_pool* handle,
+    double alpha,
+    double fraction);
+CUDANATRON_API int32_t cudanatron_search_pool_add_simulations_all(
+    cudanatron_search_pool* handle,
+    int32_t count);
+CUDANATRON_API int32_t cudanatron_search_pool_remaining_simulations(
+    const cudanatron_search_pool* handle);
+CUDANATRON_API int32_t cudanatron_search_pool_select_leaves(
+    cudanatron_search_pool* handle,
+    int32_t capacity,
+    float* observations,
+    size_t observation_stride,
+    int32_t* players,
+    int32_t* tokens);
+CUDANATRON_API int32_t cudanatron_search_pool_evaluate_leaves(
+    cudanatron_search_pool* handle,
+    const int32_t* tokens,
+    size_t count,
+    const float* policy_logits,
+    size_t policy_stride,
+    size_t policy_size,
+    const double* wdls,
+    size_t wdl_stride);
+CUDANATRON_API int32_t cudanatron_search_pool_root_visits(
+    const cudanatron_search_pool* handle,
+    int32_t index,
+    uint32_t* visits,
+    size_t visit_count);
+CUDANATRON_API int32_t cudanatron_search_pool_root_wdl(
+    const cudanatron_search_pool* handle,
+    int32_t index,
+    double* wdl,
+    size_t wdl_size);
+CUDANATRON_API int32_t cudanatron_search_pool_metrics(
+    const cudanatron_search_pool* handle,
+    int32_t index,
+    cudanatron_search_metrics* output);
+CUDANATRON_API int32_t cudanatron_search_pool_advance(
+    cudanatron_search_pool* handle,
+    int32_t index,
+    size_t action_index);
+CUDANATRON_API int32_t cudanatron_search_pool_advance_to_game(
+    cudanatron_search_pool* handle,
+    int32_t index,
+    size_t action_index,
+    const cudanatron_game* observed_game);
 
 #ifdef __cplusplus
 }

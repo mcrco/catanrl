@@ -136,7 +136,7 @@ std::string flat_key(const FlatAction& action) {
            value_repr(action) + ")";
 }
 
-FlatAction packed_to_flat(
+CUDANATRON_HD FlatAction packed_to_flat(
     const PackedMap& map,
     const PackedGame& game,
     PackedAction action) {
@@ -186,7 +186,7 @@ FlatAction packed_to_flat(
     return flat;
 }
 
-bool same_flat(const FlatAction& lhs, const FlatAction& rhs) {
+CUDANATRON_HD bool same_flat(const FlatAction& lhs, const FlatAction& rhs) {
     return lhs.type == rhs.type && lhs.node == rhs.node && lhs.edge_a == rhs.edge_a &&
            lhs.edge_b == rhs.edge_b && lhs.resource == rhs.resource &&
            lhs.resource_b == rhs.resource_b && lhs.yop_count == rhs.yop_count &&
@@ -303,7 +303,7 @@ Status build_flat_action_space(
     return Status::ok;
 }
 
-int flat_index(
+CUDANATRON_HD int flat_index(
     const FlatActionSpace& space,
     const PackedMap& map,
     const PackedGame& game,
@@ -317,7 +317,7 @@ int flat_index(
     return -1;
 }
 
-PackedAction decode_flat_action(
+CUDANATRON_HD PackedAction decode_flat_action(
     const FlatActionSpace& space,
     const PackedMap& map,
     const PackedGame& game,
@@ -367,7 +367,7 @@ PackedAction decode_flat_action(
     return action;
 }
 
-void write_legal_mask(
+CUDANATRON_HD void write_legal_mask(
     const PackedMap& map,
     const PackedGame& game,
     const FlatActionSpace& space,

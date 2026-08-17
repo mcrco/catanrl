@@ -16,19 +16,19 @@ Status build_flat_action_space(
     const PackedMap& map,
     int num_players);
 
-int flat_index(
+CUDANATRON_HD int flat_index(
     const FlatActionSpace& space,
     const PackedMap& map,
     const PackedGame& game,
     PackedAction action);
 
-PackedAction decode_flat_action(
+CUDANATRON_HD PackedAction decode_flat_action(
     const FlatActionSpace& space,
     const PackedMap& map,
     const PackedGame& game,
     int index);
 
-void write_legal_mask(
+CUDANATRON_HD void write_legal_mask(
     const PackedMap& map,
     const PackedGame& game,
     const FlatActionSpace& space,

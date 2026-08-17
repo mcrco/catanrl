@@ -292,6 +292,13 @@ def test_replayed_python_and_native_transitions_match(map_type, num_players):
             }
             assert set(native_game.roads()) == python_roads
             np.testing.assert_allclose(
+                native_game.observation(base_player=0),
+                full_native_features(native_game, map_type, base_player=0),
+                rtol=0,
+                atol=1e-6,
+                err_msg=f"native observation writer mismatch before replay step {step}",
+            )
+            np.testing.assert_allclose(
                 full_native_features(native_game, map_type, base_player=0),
                 full_game_to_features(
                     python_game,
@@ -349,3 +356,40 @@ def test_replayed_python_and_native_transitions_match(map_type, num_players):
                 development_card=development_card,
                 stolen_resource=stolen_resource,
             )
+
+
+def test_search_pool_selects_and_evaluates_leaf_batches():
+    from catanrl.envs.cudanatron import NativeSearchPool
+
+    games = [
+        NativeGame(num_players=2, map_type="MINI", seed=seed)
+        for seed in (1, 2, 3, 4)
+    ]
+    try:
+        for game in games:
+            while game.current_prompt in (0, 1):
+                game.step(int(np.flatnonzero(game.valid_action_mask())[0]))
+        with NativeSearchPool(games, c_puct=1.5, seed=11) as pool:
+            policy = np.zeros((pool.size, pool.action_space_size), dtype=np.float32)
+            pool.initialize_roots(policy)
+            pool.set_root_wdls(np.tile(np.array([0.4, 0.2, 0.4]), (pool.size, 1)))
+            pool.add_simulations_all(16)
+            evaluations = 0
+            while pool.remaining_simulations > 0:
+                observations, players, tokens = pool.select_leaves(capacity=8)
+                if tokens.size == 0:
+                    break
+                assert observations.shape[0] == tokens.size
+                assert np.all(players >= 0)
+                leaf_policy = np.zeros((tokens.size, pool.action_space_size), dtype=np.float32)
+                leaf_wdl = np.tile(np.array([0.5, 0.0, 0.5]), (tokens.size, 1))
+                pool.evaluate_leaves(tokens, leaf_policy, leaf_wdl)
+                evaluations += int(tokens.size)
+                assert evaluations <= 64
+            assert pool.remaining_simulations == 0
+            visits = pool.root_visits(0)
+            assert int(visits.sum()) == 16
+    finally:
+        for game in games:
+            game.close()
+
