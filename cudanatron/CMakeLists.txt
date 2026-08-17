@@ -16,6 +16,7 @@ add_library(cudanatron
     src/observation.cu
     src/chance.cu
     src/mcts.cpp
+    src/batch.cu
 )
 add_library(cudanatron::cudanatron ALIAS cudanatron)
 

@@ -393,3 +393,65 @@ def test_search_pool_selects_and_evaluates_leaf_batches():
         for game in games:
             game.close()
 
+
+def _batch_observation_dtype(action_space_size: int, observation_size: int) -> np.dtype:
+    pad = (4 - (action_space_size % 4)) % 4
+    fields = [("action_mask", np.uint8, (action_space_size,))]
+    if pad:
+        fields.append(("_pad", np.uint8, (pad,)))
+    fields.append(("observation", np.float32, (observation_size,)))
+    return np.dtype(fields)
+
+
+def test_cuda_batch_reset_matches_native_game_observation():
+    from catanrl.envs.cudanatron import NativeGameBatch
+
+    num_envs = 4
+    num_players = 2
+    with NativeGame(num_players=num_players, map_type="MINI", seed=21, map_seed=21) as probe:
+        action_n = probe.action_space_size
+        obs_n = probe.observation_size()
+        expected = probe.observation(base_player=0)
+
+    dtype = _batch_observation_dtype(action_n, obs_n)
+    rows = num_envs * num_players
+    observations = np.zeros((rows, dtype.itemsize), dtype=np.uint8)
+    actions = np.zeros(rows, dtype=np.int32)
+    rewards = np.zeros(rows, dtype=np.float32)
+    terminals = np.zeros(rows, dtype=np.bool_)
+    truncations = np.zeros(rows, dtype=np.bool_)
+    masks = np.ones(rows, dtype=np.bool_)
+    batch = NativeGameBatch(
+        num_envs=num_envs,
+        num_players=num_players,
+        map_type="MINI",
+        discard_limit=7,
+        vps_to_win=10,
+        reward_function="shaped",
+        turns_limit=1000,
+        observations=observations,
+        obs_dtype=dtype,
+        actions=actions,
+        rewards=rewards,
+        terminals=terminals,
+        truncations=truncations,
+        masks=masks,
+    )
+    try:
+        seeds = np.full(num_envs, 21, dtype=np.uint64)
+        batch.reset_all(seeds, seeds)
+        offset = dtype.fields["observation"][1]
+        got = np.frombuffer(observations[0], dtype=np.float32, offset=offset, count=obs_n)
+        np.testing.assert_allclose(got, expected, rtol=0, atol=1e-6)
+
+        for env_index in range(num_envs):
+            row = env_index * num_players
+            valid = np.flatnonzero(observations[row, :action_n])
+            assert valid.size > 0
+            actions[row] = int(valid[0])
+        batch.step()
+        assert bool(masks[0])
+    finally:
+        batch.close()
+
+

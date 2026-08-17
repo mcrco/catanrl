@@ -1,5 +1,6 @@
 """Python bindings for the CUDA Catanatron engine."""
 
+from .batch_binding import NativeGameBatch
 from .binding import (
     NativeGame,
     NativePlayerState,
@@ -11,6 +12,7 @@ from .features import full_native_features, native_board_tensor, native_numeric_
 
 __all__ = [
     "NativeGame",
+    "NativeGameBatch",
     "NativePlayerState",
     "NativeSearchMetrics",
     "NativeSearchPool",

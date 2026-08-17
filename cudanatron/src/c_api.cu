@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "cudanatron/action_space.hpp"
+#include "cudanatron/batch.hpp"
 #include "cudanatron/game.hpp"
 #include "cudanatron/map.hpp"
 #include "cudanatron/mcts.hpp"
@@ -40,6 +41,11 @@ using cudanatron::WDL;
 using cudanatron::fill_observation_layout;
 using cudanatron::full_observation_size;
 using cudanatron::write_full_observation;
+using cudanatron::write_legal_mask;
+using cudanatron::BatchBuffers;
+using cudanatron::BatchConfig;
+using cudanatron::GameBatch;
+using cudanatron::RewardFunction;
 
 struct cudanatron_game {
     GameConfig config{};
@@ -52,6 +58,10 @@ struct cudanatron_game {
 
 struct cudanatron_search_pool {
     std::unique_ptr<SearchPool> pool;
+};
+
+struct cudanatron_batch {
+    std::unique_ptr<GameBatch> batch;
 };
 
 namespace {
@@ -908,6 +918,190 @@ int32_t cudanatron_search_pool_advance_to_game(
         set_error(error);
         return -1;
     }
+}
+
+cudanatron_batch* cudanatron_batch_create(
+    int32_t num_envs,
+    int32_t num_players,
+    int32_t map_type,
+    int32_t discard_limit,
+    int32_t friendly_robber,
+    int32_t victory_points_to_win,
+    int32_t number_placement,
+    int32_t reward_function,
+    int32_t turns_limit,
+    int32_t board_width,
+    int32_t board_height,
+    const cudanatron_node_position* node_positions,
+    size_t node_position_count,
+    const cudanatron_edge_position* edge_positions,
+    size_t edge_position_count,
+    const cudanatron_tile_position* tile_positions,
+    size_t tile_position_count) {
+    try {
+        if (node_positions == nullptr || edge_positions == nullptr ||
+            tile_positions == nullptr) {
+            throw std::invalid_argument("batch observation layout pointers are null");
+        }
+        PackedMap template_map{};
+        require_ok(
+            build_packed_map(
+                &template_map,
+                parse_map_type(map_type),
+                0,
+                parse_number_placement(number_placement)),
+            "batch template map");
+        ObservationLayout layout{};
+        std::vector<NodePosition> nodes(node_position_count);
+        for (size_t i = 0; i < node_position_count; ++i) {
+            nodes[i] = NodePosition{
+                node_positions[i].node, node_positions[i].x, node_positions[i].y};
+        }
+        std::vector<EdgePosition> edges(edge_position_count);
+        for (size_t i = 0; i < edge_position_count; ++i) {
+            edges[i] = EdgePosition{
+                edge_positions[i].a,
+                edge_positions[i].b,
+                edge_positions[i].x,
+                edge_positions[i].y};
+        }
+        std::vector<TilePosition> tiles(tile_position_count);
+        for (size_t i = 0; i < tile_position_count; ++i) {
+            tiles[i] = TilePosition{
+                tile_positions[i].x,
+                tile_positions[i].y,
+                tile_positions[i].z,
+                tile_positions[i].board_x,
+                tile_positions[i].board_y};
+        }
+        require_ok(
+            fill_observation_layout(
+                &layout,
+                board_width,
+                board_height,
+                nodes.data(),
+                static_cast<int>(nodes.size()),
+                edges.data(),
+                static_cast<int>(edges.size()),
+                tiles.data(),
+                static_cast<int>(tiles.size()),
+                template_map),
+            "batch observation layout");
+        BatchConfig config{};
+        config.num_envs = num_envs;
+        config.num_players = num_players;
+        config.map_type = parse_map_type(map_type);
+        config.number_placement = parse_number_placement(number_placement);
+        config.discard_limit = discard_limit;
+        config.friendly_robber = friendly_robber != 0;
+        config.victory_points_to_win = victory_points_to_win;
+        config.reward_function = reward_function == 1 ? RewardFunction::win
+                                                     : RewardFunction::shaped;
+        config.turns_limit = turns_limit;
+        auto handle = std::make_unique<cudanatron_batch>();
+        handle->batch = std::make_unique<GameBatch>(config, layout);
+        return handle.release();
+    } catch (const std::exception& error) {
+        set_error(error);
+        return nullptr;
+    }
+}
+
+void cudanatron_batch_destroy(cudanatron_batch* handle) { delete handle; }
+
+int32_t cudanatron_batch_bind_buffers(
+    cudanatron_batch* handle,
+    uint8_t* observations,
+    size_t observation_row_stride,
+    size_t action_mask_offset,
+    size_t observation_offset,
+    int32_t* actions,
+    float* rewards,
+    uint8_t* terminals,
+    uint8_t* truncations,
+    uint8_t* masks) {
+    if (handle == nullptr || handle->batch == nullptr) {
+        last_error = "null batch";
+        return -1;
+    }
+    try {
+        BatchBuffers buffers{};
+        buffers.observations = observations;
+        buffers.observation_row_stride = observation_row_stride;
+        buffers.action_mask_offset = action_mask_offset;
+        buffers.observation_offset = observation_offset;
+        buffers.actions = actions;
+        buffers.rewards = rewards;
+        buffers.terminals = terminals;
+        buffers.truncations = truncations;
+        buffers.masks = masks;
+        handle->batch->bind(buffers);
+        return 0;
+    } catch (const std::exception& error) {
+        set_error(error);
+        return -1;
+    }
+}
+
+int32_t cudanatron_batch_reset_all(
+    cudanatron_batch* handle,
+    const uint64_t* map_seeds,
+    const uint64_t* game_seeds,
+    size_t seed_count) {
+    if (handle == nullptr || handle->batch == nullptr) {
+        last_error = "null batch";
+        return -1;
+    }
+    try {
+        handle->batch->reset_all(map_seeds, game_seeds, seed_count);
+        return 0;
+    } catch (const std::exception& error) {
+        set_error(error);
+        return -1;
+    }
+}
+
+int32_t cudanatron_batch_reset_at(
+    cudanatron_batch* handle,
+    int32_t env_index,
+    uint64_t map_seed,
+    uint64_t game_seed,
+    int32_t preserve_transition) {
+    if (handle == nullptr || handle->batch == nullptr) {
+        last_error = "null batch";
+        return -1;
+    }
+    try {
+        handle->batch->reset_at(env_index, map_seed, game_seed, preserve_transition != 0);
+        return 0;
+    } catch (const std::exception& error) {
+        set_error(error);
+        return -1;
+    }
+}
+
+int32_t cudanatron_batch_step(cudanatron_batch* handle) {
+    if (handle == nullptr || handle->batch == nullptr) {
+        last_error = "null batch";
+        return -1;
+    }
+    try {
+        handle->batch->step();
+        return 0;
+    } catch (const std::exception& error) {
+        set_error(error);
+        return -1;
+    }
+}
+
+int32_t cudanatron_batch_action_space_size(const cudanatron_batch* handle) {
+    return handle == nullptr || handle->batch == nullptr ? -1
+                                                         : handle->batch->action_space_size();
+}
+
+int32_t cudanatron_batch_observation_size(const cudanatron_batch* handle) {
+    return handle == nullptr || handle->batch == nullptr ? -1
+                                                         : handle->batch->observation_size();
 }
 
 }  // extern "C"

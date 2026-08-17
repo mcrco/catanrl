@@ -257,6 +257,51 @@ CUDANATRON_API int32_t cudanatron_search_pool_advance_to_game(
     size_t action_index,
     const cudanatron_game* observed_game);
 
+CUDANATRON_API cudanatron_batch* cudanatron_batch_create(
+    int32_t num_envs,
+    int32_t num_players,
+    int32_t map_type,
+    int32_t discard_limit,
+    int32_t friendly_robber,
+    int32_t victory_points_to_win,
+    int32_t number_placement,
+    int32_t reward_function,
+    int32_t turns_limit,
+    int32_t board_width,
+    int32_t board_height,
+    const cudanatron_node_position* node_positions,
+    size_t node_position_count,
+    const cudanatron_edge_position* edge_positions,
+    size_t edge_position_count,
+    const cudanatron_tile_position* tile_positions,
+    size_t tile_position_count);
+CUDANATRON_API void cudanatron_batch_destroy(cudanatron_batch* handle);
+CUDANATRON_API int32_t cudanatron_batch_bind_buffers(
+    cudanatron_batch* handle,
+    uint8_t* observations,
+    size_t observation_row_stride,
+    size_t action_mask_offset,
+    size_t observation_offset,
+    int32_t* actions,
+    float* rewards,
+    uint8_t* terminals,
+    uint8_t* truncations,
+    uint8_t* masks);
+CUDANATRON_API int32_t cudanatron_batch_reset_all(
+    cudanatron_batch* handle,
+    const uint64_t* map_seeds,
+    const uint64_t* game_seeds,
+    size_t seed_count);
+CUDANATRON_API int32_t cudanatron_batch_reset_at(
+    cudanatron_batch* handle,
+    int32_t env_index,
+    uint64_t map_seed,
+    uint64_t game_seed,
+    int32_t preserve_transition);
+CUDANATRON_API int32_t cudanatron_batch_step(cudanatron_batch* handle);
+CUDANATRON_API int32_t cudanatron_batch_action_space_size(const cudanatron_batch* handle);
+CUDANATRON_API int32_t cudanatron_batch_observation_size(const cudanatron_batch* handle);
+
 #ifdef __cplusplus
 }
 #endif

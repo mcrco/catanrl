@@ -17,7 +17,7 @@ dice, development-card draws, and robber steals must produce identical states.
 ## Layout
 
 - `include/cudanatron/` packed types and APIs
-- `src/` map builder, rules, action space, CUDA batch, search pool
+- `src/` map builder, rules, action space, observations, chance, search pool, CUDA batch
 - `tests/` native engine tests
 
 ## Build
