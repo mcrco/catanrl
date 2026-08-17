@@ -102,6 +102,16 @@ case "${CATANRL_PARITY_WANDB:-0}" in
     ;;
 esac
 
+resume_args=()
+case "${CATANRL_PARITY_RESUME:-0}" in
+  0) ;;
+  1) resume_args=(--resume) ;;
+  *)
+    echo "CATANRL_PARITY_RESUME must be 0 or 1" >&2
+    exit 2
+    ;;
+esac
+
 env -u VIRTUAL_ENV uv run python scripts/verify_canopy_contract.py \
   --experiment "$source_experiment" \
   --which "$load_which" \
@@ -112,6 +122,7 @@ env -u VIRTUAL_ENV PYTHONUNBUFFERED=1 uv run python -m catanrl.experiments.train
   --teacher-update latest \
   --load-from-experiment "$source_experiment" \
   --load-from-which "$load_which" \
+  "${resume_args[@]}" \
   "${value_init_args[@]}" \
   --self-play-backend cppanatron \
   --ismcts-determinizations 1 \
