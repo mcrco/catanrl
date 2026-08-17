@@ -50,11 +50,13 @@ case "$value_init" in
 esac
 
 # Sixteen native worker processes exhausted this 32 GiB host before one batch
-# completed. Four processes with four independent games each preserve the 16
-# concurrent search streams and full inference batches while avoiding 6+ GiB of
-# duplicated Python/PyTorch process footprint relative to the 8x2 layout.
+# completed. Keep four processes to avoid duplicating Python/PyTorch state, but
+# run eight independent games in each process. This gives future runs 32 search
+# streams, allowing larger central inference batches without the memory cost of
+# adding model-holding processes. Both values remain environment-overridable so
+# we can back off if the first 4x8 benchmark exposes host-memory pressure.
 parity_workers=${CATANRL_PARITY_WORKERS:-4}
-parity_games_per_worker=${CATANRL_PARITY_GAMES_PER_WORKER:-4}
+parity_games_per_worker=${CATANRL_PARITY_GAMES_PER_WORKER:-8}
 # Canopy's Nexus-v3 preset collects 150k fresh decision samples per iteration.
 # Native Catan self-play currently yields about 250 trainable decisions per game,
 # so 600 games matches that data budget without changing game or reward semantics.
