@@ -104,6 +104,71 @@ def test_native_mcts_search_is_deterministic_and_visits_legal_actions():
         game.close()
 
 
+def test_native_mcts_batched_leaf_api_matches_independent_scalar_searches():
+    games = [
+        NativeGame(2, "MINI", seed=101 + index, map_seed=211 + index, vps_to_win=6)
+        for index in range(3)
+    ]
+    scalar_games = [
+        NativeGame(2, "MINI", seed=101 + index, map_seed=211 + index, vps_to_win=6)
+        for index in range(3)
+    ]
+    searches = [
+        NativeMCTSSearch(game, "MINI", seed=307 + index) for index, game in enumerate(games)
+    ]
+    scalar_searches = [
+        NativeMCTSSearch(game, "MINI", seed=307 + index) for index, game in enumerate(scalar_games)
+    ]
+    logits = np.stack(
+        [
+            np.linspace(-0.5 + index, 0.5 + index, game.action_space_size, dtype=np.float32)
+            for index, game in enumerate(games)
+        ]
+    )
+    wdls = np.asarray(
+        [[0.6, 0.1, 0.3], [0.2, 0.5, 0.3], [0.3, 0.2, 0.5]],
+        dtype=np.float64,
+    )
+    try:
+        for index, search in enumerate(searches):
+            search.initialize_root(logits[index])
+        for index, search in enumerate(scalar_searches):
+            search.initialize_root(logits[index])
+
+        for _ in range(32):
+            observations, players, active = NativeMCTSSearch.select_leaf_batch(searches)
+            active_indices = np.flatnonzero(active)
+            assert np.all(players[active_indices] >= 0)
+            assert np.isfinite(observations[active_indices]).all()
+            if active_indices.size:
+                NativeMCTSSearch.evaluate_leaf_batch(
+                    [searches[int(index)] for index in active_indices],
+                    logits[active_indices],
+                    wdls[active_indices, 0] - wdls[active_indices, 2],
+                    wdls[active_indices],
+                )
+
+            for index, search in enumerate(scalar_searches):
+                leaf = search.select_leaf()
+                assert (leaf is not None) == bool(active[index])
+                if leaf is not None:
+                    search.evaluate_leaf(
+                        logits[index],
+                        float(wdls[index, 0] - wdls[index, 2]),
+                        wdls[index],
+                    )
+
+        for batched, scalar in zip(searches, scalar_searches):
+            np.testing.assert_array_equal(batched.root_visits(), scalar.root_visits())
+            np.testing.assert_allclose(batched.root_wdl(), scalar.root_wdl())
+            assert batched.metrics() == scalar.metrics()
+    finally:
+        for search in searches + scalar_searches:
+            search.close()
+        for game in games + scalar_games:
+            game.close()
+
+
 def test_native_mcts_rejects_wrong_policy_shape():
     game = NativeGame(2, "MINI", seed=5, map_seed=7)
     try:

@@ -22,13 +22,19 @@ from catanrl.features.catanatron_utils import (
     get_observation_indices_from_full,
 )
 from catanrl.players.nn_mcts_player import (
+    _CoalescingNNMCTSInferenceBackend,
     _NNMCTSInferenceBackend,
     _RemoteNNMCTSInferenceBackend,
 )
 from catanrl.utils.catanatron_action_space import canopy_action_count_increment
 from catanrl.utils.seeding import derive_map_and_game_seeds, derive_seed
 
-from .native_search import PolicyTarget, run_native_search_policy, step_game_and_reconcile_search
+from .native_search import (
+    NativeMCTSSearchBatcher,
+    PolicyTarget,
+    run_native_search_policy,
+    step_game_and_reconcile_search,
+)
 from .parallel_self_play import (
     SelfPlayExperience,
     _assign_episode_seeds,
@@ -201,6 +207,7 @@ def _native_search_policy(
     c_visit: float = 50.0,
     c_scale: float = 1.0,
     search_selection: str = "puct",
+    search_batcher: NativeMCTSSearchBatcher | None = None,
 ) -> tuple[np.ndarray, int, np.ndarray, float, np.ndarray]:
     result = run_native_search_policy(
         game=game,
@@ -224,6 +231,7 @@ def _native_search_policy(
         c_visit=c_visit,
         c_scale=c_scale,
         search_selection=search_selection,
+        search_batcher=search_batcher,
     )
     return (
         result.policy,
@@ -239,6 +247,7 @@ def _play_native_self_play_game(
     episode_seed: int,
     args_dict: dict,
     inference_backend: _NNMCTSInferenceBackend,
+    search_batcher: NativeMCTSSearchBatcher | None = None,
 ) -> tuple[
     list[_NativeSelfPlaySample],
     int | None,
@@ -347,6 +356,7 @@ def _play_native_self_play_game(
                     c_visit=float(args_dict.get("c_visit", 50.0)),
                     c_scale=float(args_dict.get("c_scale", 1.0)),
                     search_selection=args_dict.get("search_selection", "puct"),
+                    search_batcher=search_batcher,
                 )
                 action = _choose_trajectory_action(
                     mode=trajectory_action_selection,
@@ -395,18 +405,30 @@ def _native_training_worker_main(
     episode_seeds: Sequence[int],
     args_dict: dict,
 ) -> None:
-    inference_backend = _RemoteNNMCTSInferenceBackend(
+    game_concurrency = int(args_dict.get("games_per_worker", 1))
+    remote_inference_backend = _RemoteNNMCTSInferenceBackend(
         worker_id=worker_id,
         request_queue=request_queue,
         response_queue=response_queue,
         response_timeout_s=float(args_dict["inference_response_timeout_s"]),
     )
+    inference_backend = _CoalescingNNMCTSInferenceBackend(
+        remote_inference_backend,
+        max_batch_size=game_concurrency,
+        max_wait_ms=float(args_dict.get("inference_wait_ms", 2.0)),
+    )
+    search_batcher = NativeMCTSSearchBatcher(
+        max_batch_size=game_concurrency,
+        max_wait_ms=float(args_dict.get("inference_wait_ms", 2.0)),
+    )
+    search_batcher.start()
     try:
         for experiences, stats in _iter_native_training_game_results(
             episode_seeds=episode_seeds,
             args_dict=args_dict,
             inference_backend=inference_backend,
-            game_concurrency=int(args_dict.get("games_per_worker", 1)),
+            game_concurrency=game_concurrency,
+            search_batcher=search_batcher,
         ):
             _put_training_result_chunks(
                 result_queue=result_queue,
@@ -427,6 +449,7 @@ def _native_training_worker_main(
     except BaseException:
         result_queue.put({"worker_id": worker_id, "error": traceback.format_exc()})
     finally:
+        search_batcher.close()
         inference_backend.close()
 
 
@@ -447,12 +470,14 @@ def _build_native_training_game_result(
     episode_seed: int,
     args_dict: dict,
     inference_backend: _NNMCTSInferenceBackend,
+    search_batcher: NativeMCTSSearchBatcher | None = None,
 ) -> tuple[list[NativeTrainingExperience], dict[str, int]]:
     """Convert one independently seeded native game into replay records."""
     samples, winner = _play_native_self_play_game(
         episode_seed=episode_seed,
         args_dict=args_dict,
         inference_backend=inference_backend,
+        search_batcher=search_batcher,
     )
     stats: Counter[str] = Counter(games=1)
     if winner is not None:
@@ -492,6 +517,7 @@ def _iter_native_training_game_results(
     args_dict: dict,
     inference_backend: _NNMCTSInferenceBackend,
     game_concurrency: int,
+    search_batcher: NativeMCTSSearchBatcher | None = None,
 ) -> Iterator[tuple[list[NativeTrainingExperience], dict[str, int]]]:
     """Yield completed games while multiplexing native searches in one process.
 
@@ -508,6 +534,7 @@ def _iter_native_training_game_results(
                 episode_seed=episode_seed,
                 args_dict=args_dict,
                 inference_backend=inference_backend,
+                search_batcher=search_batcher,
             )
         return
 
@@ -521,6 +548,7 @@ def _iter_native_training_game_results(
             episode_seed=episode_seed,
             args_dict=args_dict,
             inference_backend=inference_backend,
+            search_batcher=search_batcher,
         )
         for episode_seed in episode_seeds
     ]
@@ -664,6 +692,7 @@ def generate_native_self_play_data(
         "search_selection": search_selection,
         "trajectory_action_selection": trajectory_action_selection,
         "explore_actions": explore_actions,
+        "inference_wait_ms": inference_wait_ms,
         "inference_response_timeout_s": inference_response_timeout_s,
         "result_chunk_size": result_chunk_size,
         "aux_value_horizons": normalized_aux_value_horizons,

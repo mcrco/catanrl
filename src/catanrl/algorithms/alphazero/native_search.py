@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import time
+import queue
+import threading
+from concurrent.futures import Future
 from dataclasses import dataclass
 from typing import Literal
 
@@ -51,6 +54,136 @@ class NativeSearchResult:
     full_state: np.ndarray
     wdl: np.ndarray
     diagnostics: NativeSearchDiagnostics
+
+
+@dataclass
+class _NativeSelectRequest:
+    search: NativeMCTSSearch
+    future: Future[tuple[np.ndarray, int] | None]
+
+
+@dataclass
+class _NativeEvaluateRequest:
+    search: NativeMCTSSearch
+    policy_logits: np.ndarray
+    value: float
+    wdl: np.ndarray | None
+    future: Future[None]
+
+
+class NativeMCTSSearchBatcher(threading.Thread):
+    """Coalesce independent tree operations into bulk cppanatron calls."""
+
+    def __init__(self, *, max_batch_size: int, max_wait_ms: float) -> None:
+        super().__init__(name="cppanatron-multi-search-batcher", daemon=True)
+        self.max_batch_size = max(1, int(max_batch_size))
+        self.max_wait_ms = max(0.0, float(max_wait_ms))
+        self.requests: queue.Queue[_NativeSelectRequest | _NativeEvaluateRequest | None] = (
+            queue.Queue()
+        )
+        self._closed = False
+
+    def select_leaf(self, search: NativeMCTSSearch) -> tuple[np.ndarray, int] | None:
+        if self._closed:
+            raise RuntimeError("Native MCTS search batcher is closed")
+        future: Future[tuple[np.ndarray, int] | None] = Future()
+        self.requests.put(_NativeSelectRequest(search=search, future=future))
+        return future.result()
+
+    def evaluate_leaf(
+        self,
+        search: NativeMCTSSearch,
+        policy_logits: np.ndarray,
+        value: float,
+        wdl: np.ndarray | None,
+    ) -> None:
+        if self._closed:
+            raise RuntimeError("Native MCTS search batcher is closed")
+        future: Future[None] = Future()
+        self.requests.put(
+            _NativeEvaluateRequest(
+                search=search,
+                policy_logits=policy_logits,
+                value=float(value),
+                wdl=wdl,
+                future=future,
+            )
+        )
+        future.result()
+
+    def run(self) -> None:
+        while True:
+            first = self.requests.get()
+            if first is None:
+                return
+            batch: list[_NativeSelectRequest | _NativeEvaluateRequest] = [first]
+            deadline = time.perf_counter() + self.max_wait_ms / 1000.0
+            while len(batch) < self.max_batch_size:
+                remaining = deadline - time.perf_counter()
+                if remaining <= 0.0:
+                    break
+                try:
+                    request = self.requests.get(timeout=remaining)
+                except queue.Empty:
+                    break
+                if request is None:
+                    self.requests.put(None)
+                    break
+                batch.append(request)
+
+            selects = [request for request in batch if isinstance(request, _NativeSelectRequest)]
+            evaluations = [
+                request for request in batch if isinstance(request, _NativeEvaluateRequest)
+            ]
+            if selects:
+                self._run_selects(selects)
+            if evaluations:
+                self._run_evaluations(evaluations)
+
+    @staticmethod
+    def _run_selects(requests: list[_NativeSelectRequest]) -> None:
+        try:
+            observations, players, active = NativeMCTSSearch.select_leaf_batch(
+                [request.search for request in requests]
+            )
+            for index, request in enumerate(requests):
+                request.future.set_result(
+                    (observations[index].copy(), int(players[index])) if active[index] else None
+                )
+        except BaseException as error:
+            for request in requests:
+                request.future.set_exception(error)
+
+    @staticmethod
+    def _run_evaluations(requests: list[_NativeEvaluateRequest]) -> None:
+        scalar = [request for request in requests if request.wdl is None]
+        categorical = [request for request in requests if request.wdl is not None]
+        for group in (scalar, categorical):
+            if not group:
+                continue
+            try:
+                NativeMCTSSearch.evaluate_leaf_batch(
+                    [request.search for request in group],
+                    np.stack([request.policy_logits for request in group]),
+                    np.asarray([request.value for request in group], dtype=np.float64),
+                    (
+                        None
+                        if group[0].wdl is None
+                        else np.stack([request.wdl for request in group])  # type: ignore[arg-type]
+                    ),
+                )
+                for request in group:
+                    request.future.set_result(None)
+            except BaseException as error:
+                for request in group:
+                    request.future.set_exception(error)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self.requests.put(None)
+        self.join(timeout=10.0)
 
 
 def _native_observations_match(left: np.ndarray, right: np.ndarray) -> bool:
@@ -246,6 +379,7 @@ def run_native_search_policy(
     c_visit: float = 50.0,
     c_scale: float = 1.0,
     search_selection: str = "puct",
+    search_batcher: NativeMCTSSearchBatcher | None = None,
 ) -> NativeSearchResult:
     """Run one search and report how much it changed the root network prediction."""
     if num_simulations < 1:
@@ -309,17 +443,32 @@ def run_native_search_policy(
                 dirichlet_frac,
             )
         for _ in range(num_simulations):
-            leaf = search.select_leaf()
+            leaf = (
+                search.select_leaf()
+                if search_batcher is None
+                else search_batcher.select_leaf(search)
+            )
             if leaf is None:
                 continue
             full_leaf_state, _player = leaf
             evaluation = evaluate(full_leaf_state)
             neural_evaluations += 1
-            search.evaluate_leaf(
-                evaluation.policy_logits,
-                float(evaluation.value) * value_scale,
-                (None if evaluation.wdl is None else _scaled_wdl(evaluation.wdl, value_scale)),
+            scaled_wdl = (
+                None if evaluation.wdl is None else _scaled_wdl(evaluation.wdl, value_scale)
             )
+            if search_batcher is None:
+                search.evaluate_leaf(
+                    evaluation.policy_logits,
+                    float(evaluation.value) * value_scale,
+                    scaled_wdl,
+                )
+            else:
+                search_batcher.evaluate_leaf(
+                    search,
+                    evaluation.policy_logits,
+                    float(evaluation.value) * value_scale,
+                    scaled_wdl,
+                )
         visits = search.root_visits().astype(np.float64)
         action_values = search.root_action_values()
         search_metrics = search.metrics()
@@ -400,6 +549,7 @@ def run_native_search_policy(
 __all__ = [
     "NativeSearchDiagnostics",
     "NativeSearchResult",
+    "NativeMCTSSearchBatcher",
     "PolicyTarget",
     "run_native_search_policy",
     "step_game_and_reconcile_search",

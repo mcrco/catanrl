@@ -36,7 +36,7 @@ from catanrl.features.catanatron_utils import (
     get_observation_indices_from_full,
 )
 from catanrl.models import PolicyNetworkWrapper, PolicyValueNetworkWrapper, ValueNetworkWrapper
-from catanrl.models.inference_utils import forward_policy_value, forward_policy_value_wdl
+from catanrl.models.inference_utils import forward_policy_value_wdl
 from catanrl.utils.catanatron_action_space import get_action_space_size, to_action_space
 
 EPSILON = 1e-8
@@ -138,11 +138,26 @@ class _LeafEvaluation:
 
 
 @dataclass
+class _LeafEvaluationBatch:
+    policy_logits: np.ndarray
+    values: np.ndarray
+    wdls: np.ndarray | None = None
+
+
+@dataclass
 class _RemoteLeafEvaluationRequest:
     request_id: int
     worker_id: int
     actor_features: np.ndarray
     critic_features: np.ndarray
+    is_batch: bool = False
+
+
+@dataclass
+class _CoalescedLeafEvaluationRequest:
+    actor_features: np.ndarray
+    critic_features: np.ndarray
+    future: Future[_LeafEvaluation]
 
 
 class _NNMCTSInferenceBackend:
@@ -152,6 +167,27 @@ class _NNMCTSInferenceBackend:
         critic_features: np.ndarray,
     ) -> _LeafEvaluation:
         raise NotImplementedError
+
+    def evaluate_batch(
+        self,
+        actor_features: np.ndarray,
+        critic_features: np.ndarray,
+    ) -> _LeafEvaluationBatch:
+        actors = np.asarray(actor_features)
+        critics = np.asarray(critic_features)
+        if actors.ndim != 2 or critics.ndim != 2 or actors.shape[0] != critics.shape[0]:
+            raise ValueError("Batched actor and critic features must have matching rows")
+        results = [self.evaluate_leaf(actor, critic) for actor, critic in zip(actors, critics)]
+        wdls = None
+        if results and results[0].wdl is not None:
+            if any(result.wdl is None for result in results):
+                raise RuntimeError("Inference backend mixed scalar and WDL results")
+            wdls = np.stack([result.wdl for result in results])  # type: ignore[arg-type]
+        return _LeafEvaluationBatch(
+            policy_logits=np.stack([result.policy_logits for result in results]),
+            values=np.asarray([result.value for result in results], dtype=np.float64),
+            wdls=wdls,
+        )
 
     def close(self) -> None:
         return
@@ -194,6 +230,38 @@ class _LocalNNMCTSInferenceBackend(_NNMCTSInferenceBackend):
             )
         return _LeafEvaluation(policy_logits=policy_logits, value=value, wdl=wdl)
 
+    def evaluate_batch(
+        self,
+        actor_features: np.ndarray,
+        critic_features: np.ndarray,
+    ) -> _LeafEvaluationBatch:
+        actors = np.ascontiguousarray(actor_features, dtype=np.float32)
+        critics = np.ascontiguousarray(critic_features, dtype=np.float32)
+        if actors.ndim != 2 or critics.ndim != 2 or actors.shape[0] != critics.shape[0]:
+            raise ValueError("Batched actor and critic features must have matching rows")
+        with torch.inference_mode():
+            actor_tensor = torch.from_numpy(actors).to(self.device)
+            critic_tensor = torch.from_numpy(critics).to(self.device)
+            logits, value_tensor, wdl_tensor = forward_policy_value_wdl(
+                self.policy_model,
+                self.critic_model,
+                actor_tensor,
+                self.model_type,
+                critic_states=critic_tensor,
+            )
+            policy_logits = logits.to("cpu").numpy().astype(np.float32, copy=False)
+            values = np.clip(value_tensor.reshape(-1).cpu().numpy(), -1.0, 1.0)
+            wdls = (
+                None
+                if wdl_tensor is None
+                else wdl_tensor.reshape(-1, 3).to("cpu").numpy().astype(np.float64)
+            )
+        return _LeafEvaluationBatch(
+            policy_logits=policy_logits,
+            values=np.asarray(values, dtype=np.float64),
+            wdls=wdls,
+        )
+
 
 class _RemoteNNMCTSInferenceBackend(_NNMCTSInferenceBackend):
     def __init__(
@@ -212,7 +280,7 @@ class _RemoteNNMCTSInferenceBackend(_NNMCTSInferenceBackend):
         self._closed = False
         self._next_request_id = 0
         self._request_lock = threading.Lock()
-        self._pending: dict[int, Future[_LeafEvaluation]] = {}
+        self._pending: dict[int, Future[_LeafEvaluation | _LeafEvaluationBatch]] = {}
         self._listener = threading.Thread(
             target=self._listen,
             name=f"nn-mcts-remote-inference-{worker_id}",
@@ -225,20 +293,53 @@ class _RemoteNNMCTSInferenceBackend(_NNMCTSInferenceBackend):
         actor_features: np.ndarray,
         critic_features: np.ndarray,
     ) -> _LeafEvaluation:
+        result = self._submit(
+            actor_features.astype(np.float32, copy=False),
+            critic_features.astype(np.float32, copy=False),
+            is_batch=False,
+        )
+        if not isinstance(result, _LeafEvaluation):
+            raise RuntimeError("Remote inference returned a batch for a scalar request")
+        return result
+
+    def evaluate_batch(
+        self,
+        actor_features: np.ndarray,
+        critic_features: np.ndarray,
+    ) -> _LeafEvaluationBatch:
+        actors = np.ascontiguousarray(actor_features, dtype=np.float32)
+        critics = np.ascontiguousarray(critic_features, dtype=np.float32)
+        if actors.ndim != 2 or critics.ndim != 2 or actors.shape[0] != critics.shape[0]:
+            raise ValueError("Batched actor and critic features must have matching rows")
+        if actors.shape[0] < 1:
+            raise ValueError("Remote inference batch cannot be empty")
+        result = self._submit(actors, critics, is_batch=True)
+        if not isinstance(result, _LeafEvaluationBatch):
+            raise RuntimeError("Remote inference returned a scalar for a batched request")
+        return result
+
+    def _submit(
+        self,
+        actor_features: np.ndarray,
+        critic_features: np.ndarray,
+        *,
+        is_batch: bool,
+    ) -> _LeafEvaluation | _LeafEvaluationBatch:
         if self._closed:
             raise RuntimeError("Remote NN MCTS inference backend is closed.")
 
         with self._request_lock:
             request_id = self._next_request_id
             self._next_request_id += 1
-            future: Future[_LeafEvaluation] = Future()
+            future: Future[_LeafEvaluation | _LeafEvaluationBatch] = Future()
             self._pending[request_id] = future
 
         request = _RemoteLeafEvaluationRequest(
             request_id=request_id,
             worker_id=self.worker_id,
-            actor_features=actor_features.astype(np.float32, copy=False),
-            critic_features=critic_features.astype(np.float32, copy=False),
+            actor_features=actor_features,
+            critic_features=critic_features,
+            is_batch=is_batch,
         )
         timeout_s = self.response_timeout_s
         try:
@@ -288,13 +389,110 @@ class _RemoteNNMCTSInferenceBackend(_NNMCTSInferenceBackend):
             if error is not None:
                 future.set_exception(RuntimeError(str(error)))
             else:
-                future.set_result(
-                    _LeafEvaluation(
-                        policy_logits=message["policy_logits"],
-                        value=float(message["value"]),
-                        wdl=message.get("wdl"),
+                if bool(message.get("is_batch", False)):
+                    future.set_result(
+                        _LeafEvaluationBatch(
+                            policy_logits=message["policy_logits"],
+                            values=message["values"],
+                            wdls=message.get("wdls"),
+                        )
                     )
+                else:
+                    future.set_result(
+                        _LeafEvaluation(
+                            policy_logits=message["policy_logits"],
+                            value=float(message["value"]),
+                            wdl=message.get("wdl"),
+                        )
+                    )
+
+
+class _CoalescingNNMCTSInferenceBackend(_NNMCTSInferenceBackend):
+    """Combine concurrent game-thread leaves before crossing a process queue."""
+
+    def __init__(
+        self,
+        backend: _NNMCTSInferenceBackend,
+        *,
+        max_batch_size: int,
+        max_wait_ms: float,
+    ) -> None:
+        self.backend = backend
+        self.max_batch_size = max(1, int(max_batch_size))
+        self.max_wait_ms = max(0.0, float(max_wait_ms))
+        self.requests: queue.Queue[_CoalescedLeafEvaluationRequest | None] = queue.Queue()
+        self._closed = False
+        self._thread = threading.Thread(
+            target=self._run,
+            name="nn-mcts-worker-inference-batcher",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def evaluate_leaf(
+        self,
+        actor_features: np.ndarray,
+        critic_features: np.ndarray,
+    ) -> _LeafEvaluation:
+        if self._closed:
+            raise RuntimeError("Coalescing NN MCTS inference backend is closed.")
+        future: Future[_LeafEvaluation] = Future()
+        self.requests.put(
+            _CoalescedLeafEvaluationRequest(
+                actor_features=np.asarray(actor_features, dtype=np.float32),
+                critic_features=np.asarray(critic_features, dtype=np.float32),
+                future=future,
+            )
+        )
+        return future.result()
+
+    def _run(self) -> None:
+        while True:
+            first = self.requests.get()
+            if first is None:
+                return
+            batch = [first]
+            deadline = time.perf_counter() + self.max_wait_ms / 1000.0
+            while len(batch) < self.max_batch_size:
+                remaining = deadline - time.perf_counter()
+                if remaining <= 0.0:
+                    break
+                try:
+                    request = self.requests.get(timeout=remaining)
+                except queue.Empty:
+                    break
+                if request is None:
+                    self.requests.put(None)
+                    break
+                batch.append(request)
+            try:
+                result = self.backend.evaluate_batch(
+                    np.stack([request.actor_features for request in batch]),
+                    np.stack([request.critic_features for request in batch]),
                 )
+                if result.policy_logits.shape[0] != len(batch) or result.values.shape != (
+                    len(batch),
+                ):
+                    raise RuntimeError("Batched inference returned an incorrect row count")
+                for index, request in enumerate(batch):
+                    request.future.set_result(
+                        _LeafEvaluation(
+                            policy_logits=result.policy_logits[index],
+                            value=float(result.values[index]),
+                            wdl=None if result.wdls is None else result.wdls[index],
+                        )
+                    )
+            except BaseException as error:
+                for request in batch:
+                    request.future.set_exception(error)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self.requests.put(None)
+        self._thread.join(timeout=10.0)
+        self.backend.close()
 
 
 class _SyncRemoteNNMCTSInferenceBackend(_NNMCTSInferenceBackend):
@@ -404,6 +602,9 @@ class _CentralNNMCTSInferenceServer(threading.Thread):
         self._fatal_error: str | None = None
 
     def run(self) -> None:
+        def request_size(request: _RemoteLeafEvaluationRequest) -> int:
+            return int(request.actor_features.shape[0]) if request.is_batch else 1
+
         try:
             while not self._stop_event.is_set():
                 try:
@@ -415,8 +616,9 @@ class _CentralNNMCTSInferenceServer(threading.Thread):
                     break
 
                 batch = [first]
+                batch_samples = request_size(first)
                 deadline = time.perf_counter() + (self.max_wait_ms / 1000.0)
-                while len(batch) < self.max_batch_size:
+                while batch_samples < self.max_batch_size:
                     remaining = deadline - time.perf_counter()
                     if remaining <= 0:
                         break
@@ -431,6 +633,7 @@ class _CentralNNMCTSInferenceServer(threading.Thread):
                             pass
                         break
                     batch.append(item)
+                    batch_samples += request_size(item)
 
                 self._evaluate_batch(batch)
         except BaseException:
@@ -454,15 +657,25 @@ class _CentralNNMCTSInferenceServer(threading.Thread):
 
     def _evaluate_batch(self, batch: list[_RemoteLeafEvaluationRequest]) -> None:
         try:
-            actor_features = np.stack([request.actor_features for request in batch], axis=0)
-            with torch.no_grad():
+            actor_parts = [
+                request.actor_features
+                if request.is_batch
+                else request.actor_features.reshape(1, -1)
+                for request in batch
+            ]
+            critic_parts = [
+                request.critic_features
+                if request.is_batch
+                else request.critic_features.reshape(1, -1)
+                for request in batch
+            ]
+            actor_features = np.concatenate(actor_parts, axis=0)
+            request_sizes = [part.shape[0] for part in actor_parts]
+            with torch.inference_mode():
                 actor_tensor = torch.from_numpy(actor_features).to(self.device)
                 critic_tensor = None
                 if not self.uses_shared_network:
-                    critic_features = np.stack(
-                        [request.critic_features for request in batch],
-                        axis=0,
-                    )
+                    critic_features = np.concatenate(critic_parts, axis=0)
                     critic_tensor = torch.from_numpy(critic_features).to(self.device)
                 logits, values, wdl = forward_policy_value_wdl(
                     self.policy_model,
@@ -472,26 +685,47 @@ class _CentralNNMCTSInferenceServer(threading.Thread):
                     critic_states=critic_tensor,
                 )
                 policy_logits = logits.detach().cpu().numpy()
-                values_np = values.detach().cpu().numpy()
+                values_np = values.detach().reshape(-1).cpu().numpy()
                 wdl_np = None if wdl is None else wdl.detach().cpu().numpy()
-            self.total_evaluations += len(batch)
+            self.total_evaluations += actor_features.shape[0]
             self.total_batches += 1
 
-            for index, (request, logits_np, value) in enumerate(
-                zip(batch, policy_logits, values_np)
-            ):
-                self.response_queues[request.worker_id].put(
-                    {
-                        "request_id": request.request_id,
-                        "policy_logits": logits_np.astype(np.float32, copy=False),
-                        "value": float(np.clip(float(value), -1.0, 1.0)),
-                        "wdl": (
-                            None
-                            if wdl_np is None
-                            else wdl_np[index].astype(np.float64, copy=False)
-                        ),
-                    }
-                )
+            offset = 0
+            for request, size in zip(batch, request_sizes):
+                end = offset + size
+                if request.is_batch:
+                    self.response_queues[request.worker_id].put(
+                        {
+                            "request_id": request.request_id,
+                            "is_batch": True,
+                            "policy_logits": policy_logits[offset:end].astype(
+                                np.float32, copy=False
+                            ),
+                            "values": np.clip(values_np[offset:end], -1.0, 1.0).astype(
+                                np.float64, copy=False
+                            ),
+                            "wdls": (
+                                None
+                                if wdl_np is None
+                                else wdl_np[offset:end].astype(np.float64, copy=False)
+                            ),
+                        }
+                    )
+                else:
+                    self.response_queues[request.worker_id].put(
+                        {
+                            "request_id": request.request_id,
+                            "is_batch": False,
+                            "policy_logits": policy_logits[offset].astype(np.float32, copy=False),
+                            "value": float(np.clip(float(values_np[offset]), -1.0, 1.0)),
+                            "wdl": (
+                                None
+                                if wdl_np is None
+                                else wdl_np[offset].astype(np.float64, copy=False)
+                            ),
+                        }
+                    )
+                offset = end
         except Exception as exc:
             for request in batch:
                 self.response_queues[request.worker_id].put(

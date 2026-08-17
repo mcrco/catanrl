@@ -16,7 +16,10 @@ from catanrl.models.heads import FlatPolicyHead, WDLValueHead
 from catanrl.models.wrappers import PolicyValueNetworkWrapper
 from catanrl.players.nn_mcts_player import (
     _CentralNNMCTSInferenceServer,
+    _CoalescingNNMCTSInferenceBackend,
+    _LeafEvaluationBatch,
     _LocalNNMCTSInferenceBackend,
+    _NNMCTSInferenceBackend,
     _RemoteLeafEvaluationRequest,
     _RemoteNNMCTSInferenceBackend,
 )
@@ -50,8 +53,8 @@ def test_native_self_play_multiplexes_games_inside_each_worker(
     maximum_active = 0
     started = 0
 
-    def fake_game_result(*, episode_seed, args_dict, inference_backend):
-        del args_dict, inference_backend
+    def fake_game_result(*, episode_seed, args_dict, inference_backend, search_batcher=None):
+        del args_dict, inference_backend, search_batcher
         nonlocal active, maximum_active, started
         with lock:
             active += 1
@@ -172,13 +175,9 @@ def test_remote_inference_backend_correlates_parallel_leaf_requests():
 
     try:
         actor_inputs = [
-            np.array([float(i), float(i + 1), float(i + 2)], dtype=np.float32)
-            for i in range(4)
+            np.array([float(i), float(i + 1), float(i + 2)], dtype=np.float32) for i in range(4)
         ]
-        critic_inputs = [
-            np.array([float(i), float(i * 2)], dtype=np.float32)
-            for i in range(4)
-        ]
+        critic_inputs = [np.array([float(i), float(i * 2)], dtype=np.float32) for i in range(4)]
 
         with ThreadPoolExecutor(max_workers=4) as executor:
             results = list(
@@ -195,6 +194,88 @@ def test_remote_inference_backend_correlates_parallel_leaf_requests():
     for i, result in enumerate(results):
         np.testing.assert_allclose(result.policy_logits, actor_inputs[i] + 10.0)
         np.testing.assert_allclose(result.value, critic_inputs[i].sum())
+
+
+def test_remote_inference_backend_transports_one_multirow_request():
+    ctx = mp.get_context("spawn")
+    request_queue = ctx.Queue()
+    response_queue = ctx.Queue()
+    backend = _RemoteNNMCTSInferenceBackend(
+        worker_id=0,
+        request_queue=request_queue,
+        response_queue=response_queue,
+    )
+
+    def responder():
+        request = request_queue.get()
+        assert request.is_batch is True
+        response_queue.put(
+            {
+                "request_id": request.request_id,
+                "is_batch": True,
+                "policy_logits": request.actor_features + 7.0,
+                "values": request.critic_features.sum(axis=1),
+                "wdls": np.tile([0.5, 0.2, 0.3], (request.actor_features.shape[0], 1)),
+            }
+        )
+
+    thread = threading.Thread(target=responder)
+    thread.start()
+    actors = np.arange(12, dtype=np.float32).reshape(4, 3)
+    critics = np.arange(8, dtype=np.float32).reshape(4, 2)
+    try:
+        result = backend.evaluate_batch(actors, critics)
+    finally:
+        backend.close()
+        response_queue.put(None)
+        thread.join(timeout=5.0)
+
+    np.testing.assert_allclose(result.policy_logits, actors + 7.0)
+    np.testing.assert_allclose(result.values, critics.sum(axis=1))
+    assert result.wdls is not None
+    np.testing.assert_allclose(result.wdls, np.tile([0.5, 0.2, 0.3], (4, 1)))
+
+
+def test_worker_coalescer_sends_one_batch_for_concurrent_game_threads():
+    class RecordingBackend(_NNMCTSInferenceBackend):
+        def __init__(self):
+            self.batch_sizes: list[int] = []
+
+        def evaluate_leaf(self, actor_features, critic_features):  # pragma: no cover
+            raise AssertionError("coalescer must use evaluate_batch")
+
+        def evaluate_batch(self, actor_features, critic_features):
+            self.batch_sizes.append(actor_features.shape[0])
+            return _LeafEvaluationBatch(
+                policy_logits=actor_features + 1.0,
+                values=critic_features.sum(axis=1),
+            )
+
+    recording = RecordingBackend()
+    backend = _CoalescingNNMCTSInferenceBackend(
+        recording,
+        max_batch_size=4,
+        max_wait_ms=100.0,
+    )
+    barrier = threading.Barrier(4)
+
+    def evaluate(index: int):
+        barrier.wait()
+        return backend.evaluate_leaf(
+            np.full(3, index, dtype=np.float32),
+            np.full(2, index, dtype=np.float32),
+        )
+
+    try:
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            results = list(executor.map(evaluate, range(4)))
+    finally:
+        backend.close()
+
+    assert recording.batch_sizes == [4]
+    for index, result in enumerate(results):
+        np.testing.assert_allclose(result.policy_logits, index + 1.0)
+        assert result.value == pytest.approx(index * 2.0)
 
 
 def test_remote_inference_backend_times_out_instead_of_waiting_forever():
@@ -267,7 +348,7 @@ def test_training_results_are_streamed_in_bounded_chunks():
 def test_central_inference_server_batches_mixed_worker_requests():
     ctx = mp.get_context("spawn")
     request_queue = ctx.Queue()
-    response_queues = [ctx.Queue(), ctx.Queue()]
+    response_queues = [ctx.Queue(), ctx.Queue(), ctx.Queue()]
     server = _CentralNNMCTSInferenceServer(
         policy_model=_PolicyModel(),
         critic_model=_CriticModel(),
@@ -294,12 +375,20 @@ def test_central_inference_server_batches_mixed_worker_requests():
                 actor_features=np.array([4.0, 5.0, 6.0], dtype=np.float32),
                 critic_features=np.array([1.0, 2.0], dtype=np.float32),
             ),
+            _RemoteLeafEvaluationRequest(
+                request_id=30,
+                worker_id=2,
+                actor_features=np.array([[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]], dtype=np.float32),
+                critic_features=np.array([[3.0, 4.0], [5.0, 6.0]], dtype=np.float32),
+                is_batch=True,
+            ),
         ]
         for request in requests:
             request_queue.put(request)
 
         response_0 = response_queues[0].get(timeout=5.0)
         response_1 = response_queues[1].get(timeout=5.0)
+        response_2 = response_queues[2].get(timeout=5.0)
     finally:
         server.stop()
 
@@ -309,7 +398,14 @@ def test_central_inference_server_batches_mixed_worker_requests():
     assert response_1["request_id"] == 20
     np.testing.assert_allclose(response_1["policy_logits"], np.array([15.0, -1.0, 6.0]))
     np.testing.assert_allclose(response_1["value"], 0.3)
-    assert server.stats() == (2, 1)
+    assert response_2["request_id"] == 30
+    assert response_2["is_batch"] is True
+    np.testing.assert_allclose(
+        response_2["policy_logits"],
+        np.array([[24.0, -1.0, 9.0], [33.0, -1.0, 12.0]]),
+    )
+    np.testing.assert_allclose(response_2["values"], [0.7, 1.0])
+    assert server.stats() == (4, 1)
 
 
 def test_central_inference_server_transports_shared_wdl_probabilities():

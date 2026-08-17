@@ -169,6 +169,16 @@ class NativeMCTSSearch:
             ctypes.POINTER(ctypes.c_int32),
         ]
         library.cppanatron_search_select_leaf.restype = ctypes.c_int32
+        if hasattr(library, "cppanatron_search_select_leaf_batch"):
+            library.cppanatron_search_select_leaf_batch.argtypes = [
+                ctypes.POINTER(handle),
+                ctypes.c_size_t,
+                float_pointer,
+                ctypes.c_size_t,
+                ctypes.c_size_t,
+                ctypes.POINTER(ctypes.c_int32),
+                ctypes.POINTER(ctypes.c_int32),
+            ]
         library.cppanatron_search_evaluate_leaf.argtypes = [
             handle,
             float_pointer,
@@ -179,6 +189,25 @@ class NativeMCTSSearch:
             library.cppanatron_search_evaluate_leaf_wdl.argtypes = [
                 handle,
                 float_pointer,
+                ctypes.c_size_t,
+                double_pointer,
+                ctypes.c_size_t,
+            ]
+        if hasattr(library, "cppanatron_search_evaluate_leaf_batch"):
+            library.cppanatron_search_evaluate_leaf_batch.argtypes = [
+                ctypes.POINTER(handle),
+                ctypes.c_size_t,
+                float_pointer,
+                ctypes.c_size_t,
+                ctypes.c_size_t,
+                double_pointer,
+            ]
+        if hasattr(library, "cppanatron_search_evaluate_leaf_wdl_batch"):
+            library.cppanatron_search_evaluate_leaf_wdl_batch.argtypes = [
+                ctypes.POINTER(handle),
+                ctypes.c_size_t,
+                float_pointer,
+                ctypes.c_size_t,
                 ctypes.c_size_t,
                 double_pointer,
                 ctypes.c_size_t,
@@ -318,6 +347,43 @@ class NativeMCTSSearch:
             return None
         return self._leaf_observation.copy(), int(player.value)
 
+    @staticmethod
+    def select_leaf_batch(
+        searches: list[NativeMCTSSearch],
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Select one leaf per independent tree with one native call."""
+
+        if not searches:
+            raise ValueError("At least one native search is required")
+        first = searches[0]
+        function = getattr(first._library, "cppanatron_search_select_leaf_batch", None)
+        if function is None:
+            raise RuntimeError("cppanatron library does not support batched leaf selection")
+        observation_size = first.observation_size
+        for search in searches:
+            if search._handle is None:
+                raise RuntimeError("Cannot batch a closed native search")
+            if search.observation_size != observation_size:
+                raise ValueError("Batched native searches must share an observation size")
+        handles = (ctypes.c_void_p * len(searches))(
+            *(ctypes.c_void_p(search._handle) for search in searches)
+        )
+        observations = np.zeros((len(searches), observation_size), dtype=np.float32)
+        players = np.full(len(searches), -1, dtype=np.int32)
+        statuses = np.zeros(len(searches), dtype=np.int32)
+        first._check_result(
+            function(
+                handles,
+                len(searches),
+                observations.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+                observations.shape[1],
+                observation_size,
+                players.ctypes.data_as(ctypes.POINTER(ctypes.c_int32)),
+                statuses.ctypes.data_as(ctypes.POINTER(ctypes.c_int32)),
+            )
+        )
+        return observations, players, statuses.astype(np.bool_, copy=False)
+
     def evaluate_leaf(
         self,
         policy_logits: np.ndarray,
@@ -344,6 +410,79 @@ class NativeMCTSSearch:
                 logits.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
                 logits.size,
                 float(value),
+            )
+        )
+
+    @staticmethod
+    def evaluate_leaf_batch(
+        searches: list[NativeMCTSSearch],
+        policy_logits: np.ndarray,
+        values: np.ndarray,
+        wdls: np.ndarray | None = None,
+    ) -> None:
+        """Expand and back up one pending leaf in each independent tree."""
+
+        if not searches:
+            raise ValueError("At least one native search is required")
+        first = searches[0]
+        for search in searches:
+            if search._handle is None:
+                raise RuntimeError("Cannot batch a closed native search")
+            if search.action_space_size != first.action_space_size:
+                raise ValueError("Batched native searches must share an action space")
+        logits = np.ascontiguousarray(policy_logits, dtype=np.float32)
+        value_array = np.ascontiguousarray(values, dtype=np.float64)
+        expected_policy_shape = (len(searches), first.action_space_size)
+        if logits.shape != expected_policy_shape:
+            raise ValueError(
+                f"Expected policy logits with shape {expected_policy_shape}, got {logits.shape}"
+            )
+        if value_array.shape != (len(searches),):
+            raise ValueError(
+                f"Expected values with shape ({len(searches)},), got {value_array.shape}"
+            )
+        handles = (ctypes.c_void_p * len(searches))(
+            *(ctypes.c_void_p(search._handle) for search in searches)
+        )
+        if wdls is None:
+            function = getattr(first._library, "cppanatron_search_evaluate_leaf_batch", None)
+            if function is None:
+                raise RuntimeError("cppanatron library does not support batched leaf evaluation")
+            first._check_result(
+                function(
+                    handles,
+                    len(searches),
+                    logits.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+                    logits.shape[1],
+                    logits.shape[1],
+                    value_array.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+                )
+            )
+            return
+
+        wdl_array = np.ascontiguousarray(wdls, dtype=np.float64)
+        if wdl_array.shape != (len(searches), 3):
+            raise ValueError(
+                f"Expected WDL probabilities with shape ({len(searches)}, 3), got {wdl_array.shape}"
+            )
+        if not np.isfinite(wdl_array).all() or bool((wdl_array < 0.0).any()):
+            raise ValueError("WDL probabilities must be finite and non-negative")
+        totals = wdl_array.sum(axis=1, keepdims=True)
+        if bool((totals <= 0.0).any()):
+            raise ValueError("Each WDL row must have positive mass")
+        wdl_array = np.ascontiguousarray(wdl_array / totals)
+        function = getattr(first._library, "cppanatron_search_evaluate_leaf_wdl_batch", None)
+        if function is None:
+            raise RuntimeError("cppanatron library does not support batched WDL evaluation")
+        first._check_result(
+            function(
+                handles,
+                len(searches),
+                logits.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+                logits.shape[1],
+                logits.shape[1],
+                wdl_array.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+                wdl_array.shape[1],
             )
         )
 
