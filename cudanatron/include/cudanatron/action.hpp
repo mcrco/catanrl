@@ -39,7 +39,8 @@ struct Replay {
 struct FlatAction {
     ActionType type{ActionType::end_turn};
     std::int16_t node{-1};
-    std::int16_t edge{-1};
+    std::int16_t edge_a{-1};
+    std::int16_t edge_b{-1};
     std::int8_t resource{-1};
     std::int8_t resource_b{-1};
     std::uint8_t yop_count{0};

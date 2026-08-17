@@ -71,6 +71,7 @@ struct PackedGame {
     std::uint8_t acceptees{0};
     std::int8_t road_color{-1};
     std::int8_t road_length{0};
+    std::int8_t board_road_lengths[kMaxPlayers]{};
     std::uint64_t board_buildable{};
     std::uint64_t components[kMaxPlayers][kMaxComponents]{};
     std::uint8_t num_components[kMaxPlayers]{};

@@ -35,4 +35,7 @@ void write_legal_mask(
     std::uint8_t* mask,
     int mask_size);
 
+// Sort key matching `str((ActionType, value))` in Catanatron / catanrl.
+void write_flat_action_key(const FlatAction& action, char* buffer, int buffer_size);
+
 }  // namespace cudanatron

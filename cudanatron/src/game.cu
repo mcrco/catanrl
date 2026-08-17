@@ -17,19 +17,6 @@ CUDANATRON_HD std::uint64_t bit_clear(std::uint64_t mask, int index) {
     return mask & ~(1ULL << index);
 }
 
-CUDANATRON_HD int popcount64(std::uint64_t value) {
-#if defined(__CUDA_ARCH__)
-    return __popcll(value);
-#else
-    int count = 0;
-    while (value != 0) {
-        value &= value - 1;
-        ++count;
-    }
-    return count;
-#endif
-}
-
 CUDANATRON_HD bool can_afford(const PackedPlayer& player, const int* cost) {
     for (int i = 0; i < kResourceCount; ++i) {
         if (player.resources[i] < cost[i]) {
@@ -193,10 +180,19 @@ CUDANATRON_HD int longest_acyclic_path(
     return best;
 }
 
-CUDANATRON_HD void maintain_longest_road_award(
+CUDANATRON_HD void sync_player_road_lengths(PackedGame* game) {
+    for (int player = 0; player < game->num_players; ++player) {
+        game->players[player].longest_road_length = game->board_road_lengths[player];
+    }
+}
+
+CUDANATRON_HD void maintain_longest_road(
     PackedGame* game,
     int previous_owner,
     int next_owner) {
+    // Catanatron copies board.road_lengths into player_state only here, not
+    // during initial placement.
+    sync_player_road_lengths(game);
     if (next_owner < 0 || previous_owner == next_owner) {
         return;
     }
@@ -218,10 +214,7 @@ CUDANATRON_HD int max_road_owner(const PackedGame& game) {
     int best_player = -1;
     int best_length = -1;
     for (int player = 0; player < game.num_players; ++player) {
-        if (game.players[player].road_count == 0) {
-            continue;
-        }
-        const int length = game.players[player].longest_road_length;
+        const int length = game.board_road_lengths[player];
         if (length > best_length) {
             best_length = length;
             best_player = player;
@@ -242,7 +235,7 @@ CUDANATRON_HD void recompute_player_road_length(
             best = length;
         }
     }
-    game->players[player].longest_road_length = static_cast<std::int8_t>(best);
+    game->board_road_lengths[player] = static_cast<std::int8_t>(best);
 }
 
 CUDANATRON_HD void pay(PackedGame* game, int player, const int* cost) {
@@ -426,7 +419,7 @@ CUDANATRON_HD Status build_settlement(
             const int winner = max_road_owner(*game);
             game->road_color = static_cast<std::int8_t>(winner);
             game->road_length =
-                winner < 0 ? 0 : game->players[winner].longest_road_length;
+                winner < 0 ? 0 : game->board_road_lengths[winner];
         }
     }
 
@@ -435,7 +428,9 @@ CUDANATRON_HD Status build_settlement(
         game->board_buildable =
             bit_clear(game->board_buildable, map.node_neighbors[node][i]);
     }
-    maintain_longest_road_award(game, previous_owner, game->road_color);
+    if (!initial) {
+        maintain_longest_road(game, previous_owner, game->road_color);
+    }
     return Status::ok;
 }
 
@@ -480,15 +475,16 @@ CUDANATRON_HD Status build_road(const PackedMap& map, PackedGame* game, int play
 
     const int candidate =
         longest_acyclic_path(map, *game, game->components[player][chosen], player);
-    PackedPlayer& state = game->players[player];
-    if (candidate > state.longest_road_length) {
-        state.longest_road_length = static_cast<std::int8_t>(candidate);
+    if (candidate > game->board_road_lengths[player]) {
+        game->board_road_lengths[player] = static_cast<std::int8_t>(candidate);
     }
     if (candidate >= 5 && candidate > game->road_length) {
         game->road_color = static_cast<std::int8_t>(player);
         game->road_length = static_cast<std::int8_t>(candidate);
     }
-    maintain_longest_road_award(game, previous_owner, game->road_color);
+    if (!game->is_initial_build_phase) {
+        maintain_longest_road(game, previous_owner, game->road_color);
+    }
     return Status::ok;
 }
 

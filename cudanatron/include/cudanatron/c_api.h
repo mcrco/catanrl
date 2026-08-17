@@ -142,6 +142,11 @@ CUDANATRON_API int32_t cudanatron_game_tiles(
     const cudanatron_game* handle,
     cudanatron_tile* output,
     size_t capacity);
+CUDANATRON_API int32_t cudanatron_game_action_key(
+    const cudanatron_game* handle,
+    int32_t index,
+    char* buffer,
+    size_t buffer_size);
 
 #ifdef __cplusplus
 }

@@ -34,6 +34,18 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     )
 endif()
 
+add_library(cudanatron_c SHARED src/c_api.cu)
+target_link_libraries(cudanatron_c PRIVATE cudanatron::cudanatron)
+set_target_properties(cudanatron_c PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON
+    CUDA_RESOLVE_DEVICE_SYMBOLS ON
+    POSITION_INDEPENDENT_CODE ON
+    CXX_VISIBILITY_PRESET hidden
+    CUDA_VISIBILITY_PRESET hidden
+    OUTPUT_NAME cudanatron
+)
+target_include_directories(cudanatron_c PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
 if(CUDANATRON_BUILD_TESTS)
     enable_testing()
     add_executable(cudanatron_tests tests/test_engine.cpp)

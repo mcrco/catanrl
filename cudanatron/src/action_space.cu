@@ -1,6 +1,7 @@
 #include "cudanatron/action_space.hpp"
 
 #include <algorithm>
+#include <cstring>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -81,7 +82,7 @@ std::string value_repr(const FlatAction& action) {
             return std::to_string(action.node);
         case ActionType::build_road: {
             std::ostringstream stream;
-            stream << "(" << action.edge << ", " << action.resource << ")";
+            stream << "(" << action.edge_a << ", " << action.edge_b << ")";
             return stream.str();
         }
         case ActionType::play_year_of_plenty: {
@@ -128,7 +129,11 @@ std::string value_repr(const FlatAction& action) {
 }
 
 std::string flat_key(const FlatAction& action) {
-    return std::string(action_type_name(action.type)) + "|" + value_repr(action);
+    // CatanRL sorts `(ActionType, value)` by str((action_type, value)).
+    // ActionType.__repr__ is `AT.{name}`, and tuple str uses repr of each
+    // element, so the key is `(AT.BUILD_ROAD, (6, 7))`.
+    return std::string("(AT.") + action_type_name(action.type) + ", " +
+           value_repr(action) + ")";
 }
 
 FlatAction packed_to_flat(
@@ -143,8 +148,8 @@ FlatAction packed_to_flat(
             flat.node = action.node;
             break;
         case ActionType::build_road:
-            flat.edge = map.edge_a[action.edge];
-            flat.resource = static_cast<std::int8_t>(map.edge_b[action.edge]);
+            flat.edge_a = map.edge_a[action.edge];
+            flat.edge_b = map.edge_b[action.edge];
             break;
         case ActionType::discard_resource:
         case ActionType::play_monopoly:
@@ -182,9 +187,10 @@ FlatAction packed_to_flat(
 }
 
 bool same_flat(const FlatAction& lhs, const FlatAction& rhs) {
-    return lhs.type == rhs.type && lhs.node == rhs.node && lhs.edge == rhs.edge &&
-           lhs.resource == rhs.resource && lhs.resource_b == rhs.resource_b &&
-           lhs.yop_count == rhs.yop_count && lhs.maritime_rate == rhs.maritime_rate &&
+    return lhs.type == rhs.type && lhs.node == rhs.node && lhs.edge_a == rhs.edge_a &&
+           lhs.edge_b == rhs.edge_b && lhs.resource == rhs.resource &&
+           lhs.resource_b == rhs.resource_b && lhs.yop_count == rhs.yop_count &&
+           lhs.maritime_rate == rhs.maritime_rate &&
            lhs.maritime_offer == rhs.maritime_offer && lhs.maritime_ask == rhs.maritime_ask &&
            lhs.robber_x == rhs.robber_x && lhs.robber_y == rhs.robber_y &&
            lhs.robber_z == rhs.robber_z && lhs.robber_slot == rhs.robber_slot;
@@ -214,8 +220,8 @@ Status build_flat_action_space(
     for (int e = 0; e < map.num_edges; ++e) {
         FlatAction action{};
         action.type = ActionType::build_road;
-        action.edge = map.edge_a[e];
-        action.resource = static_cast<std::int8_t>(map.edge_b[e]);
+        action.edge_a = map.edge_a[e];
+        action.edge_b = map.edge_b[e];
         actions.push_back(action);
     }
     for (int node = 0; node < map.num_nodes; ++node) {
@@ -327,7 +333,7 @@ PackedAction decode_flat_action(
             break;
         case ActionType::build_road:
             action.edge = static_cast<std::int16_t>(
-                find_edge(map, flat.edge, flat.resource));
+                find_edge(map, flat.edge_a, flat.edge_b));
             break;
         case ActionType::discard_resource:
         case ActionType::play_monopoly:
@@ -385,6 +391,16 @@ void write_legal_mask(
             mask[index] = 1;
         }
     }
+}
+
+void write_flat_action_key(const FlatAction& action, char* buffer, int buffer_size) {
+    if (buffer == nullptr || buffer_size <= 0) {
+        return;
+    }
+    const std::string key = flat_key(action);
+    const int n = std::min(buffer_size - 1, static_cast<int>(key.size()));
+    std::memcpy(buffer, key.data(), static_cast<std::size_t>(n));
+    buffer[n] = '\0';
 }
 
 }  // namespace cudanatron
