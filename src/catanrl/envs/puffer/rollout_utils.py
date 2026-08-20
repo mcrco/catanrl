@@ -13,9 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import numpy.typing as npt
 
-
-BOARD_WIDTH = 21
-BOARD_HEIGHT = 11
+from catanrl.features.board_tensor import flatten_board
 
 
 def _flatten_actor_components(numeric: np.ndarray, board: np.ndarray) -> np.ndarray:
@@ -25,21 +23,7 @@ def _flatten_actor_components(numeric: np.ndarray, board: np.ndarray) -> np.ndar
     board shape (W, H, C). If board arrives as channels-first (C, W, H), convert it.
     """
     numeric_flat = np.asarray(numeric, dtype=np.float32).reshape(-1)
-    board_arr = np.asarray(board, dtype=np.float32)
-    if board_arr.ndim != 3:
-        raise ValueError(f"Expected 3D board tensor, got shape {board_arr.shape}")
-
-    if board_arr.shape[0] == BOARD_WIDTH and board_arr.shape[1] == BOARD_HEIGHT:
-        board_wh_last = board_arr
-    elif board_arr.shape[1] == BOARD_WIDTH and board_arr.shape[2] == BOARD_HEIGHT:
-        board_wh_last = np.transpose(board_arr, (1, 2, 0))
-    else:
-        raise ValueError(
-            "Unrecognized board tensor layout; expected (W,H,C) or (C,W,H), "
-            f"got {board_arr.shape}"
-        )
-
-    board_flat = board_wh_last.reshape(-1)
+    board_flat = flatten_board(np.asarray(board, dtype=np.float32))
     return np.concatenate([numeric_flat, board_flat], axis=0)
 
 

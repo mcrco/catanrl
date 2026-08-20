@@ -3,6 +3,8 @@ import torch.nn as nn
 from dataclasses import dataclass, field
 from typing import List, Union, Tuple
 
+from catanrl.features.board_tensor import BOARD_HEIGHT, BOARD_WIDTH, unflatten_board_nchw
+
 from .utils import orthogonal_init
 
 
@@ -15,8 +17,8 @@ class MLPBackboneConfig:
 @dataclass
 class CrossDimensionalBackboneConfig:
     """Based on this paper: https://arxiv.org/pdf/2008.07079."""
-    board_height: int = 11
-    board_width: int = 21
+    board_height: int = BOARD_HEIGHT
+    board_width: int = BOARD_WIDTH
     board_channels: int = 20
     numeric_dim: int = 56
     cnn_channels: List[int] = field(default_factory=lambda: [32, 64, 64])
@@ -148,11 +150,12 @@ class CrossDimensionalBackbone(nn.Module):
         numeric_features = x[:, :self.numeric_dim]
         board_flat = x[:, self.numeric_dim:]
 
-        # Reshape board to (batch, H, W, C) then permute to (batch, C, H, W) for Conv2d
-        board_tensor = board_flat.reshape(
-            -1, self.board_height, self.board_width, self.board_channels
+        board_tensor = unflatten_board_nchw(
+            board_flat,
+            channels=self.board_channels,
+            width=self.board_width,
+            height=self.board_height,
         )
-        board_tensor = board_tensor.permute(0, 3, 1, 2)
 
         # CNN branch
         cnn_out = self.cnn(board_tensor)
@@ -256,11 +259,12 @@ class ResidualCrossDimensionalBackbone(nn.Module):
         numeric_features = x[:, :self.numeric_dim]
         board_flat = x[:, self.numeric_dim:]
 
-        # Reshape board to (batch, H, W, C) then permute to (batch, C, H, W) for Conv2d
-        board_tensor = board_flat.reshape(
-            -1, self.board_height, self.board_width, self.board_channels
+        board_tensor = unflatten_board_nchw(
+            board_flat,
+            channels=self.board_channels,
+            width=self.board_width,
+            height=self.board_height,
         )
-        board_tensor = board_tensor.permute(0, 3, 1, 2)
 
         # Process CNN branch
         x_spatial = board_tensor
