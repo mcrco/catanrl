@@ -35,6 +35,7 @@ from catanrl.utils.catanatron_action_space import (
     get_end_turn_index,
     to_action_space,
 )
+from catanrl.utils.catanatron_game import force_player_order
 from catanrl.utils.catanatron_map import NumberPlacement, build_catan_map
 from catanrl.utils.seeding import derive_map_and_game_seeds, derive_seed
 
@@ -227,6 +228,7 @@ class ParallelCatanatronPufferEnv(PufferEnv):
             catan_map=catan_map,
             vps_to_win=self.vps_to_win,
         )
+        force_player_order(self.game, players)
         self.agents = self.possible_agents[:]
         self.reward_function.after_reset(self)
 
