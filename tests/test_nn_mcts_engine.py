@@ -10,7 +10,7 @@ from catanatron.models.player import RandomPlayer
 
 from catanrl.features.catanatron_utils import COLOR_ORDER
 from catanrl.players import NNMCTSPlayer
-from catanrl.players.nn_mcts_player import _Node, _visit_distribution
+from catanrl.players.nn_mcts_player import _Node, _action_q, _visit_distribution
 from catanrl.utils.catanatron_action_space import to_action_space
 from catanrl.utils.catanatron_game import force_player_order
 from catanrl.utils.catanatron_map import build_catan_map
@@ -142,3 +142,49 @@ def test_dirichlet_noise_perturbs_root_priors_only():
     assert set(before) == set(after)
     assert abs(sum(after.values()) - 1.0) < 1e-5
     assert any(abs(after[a] - before[a]) > 1e-9 for a in before)
+
+
+def _child_with_value(parent: _Node, visits: int, value_sum: float) -> _Node:
+    child = _Node(game=parent.game.copy(), parent=parent)
+    child.visits = visits
+    child.value_sum = value_sum
+    return child
+
+
+def test_action_q_renormalizes_over_visited_chance_outcomes():
+    player = build_mock_player()
+    parent = _Node(game=_build_game(player).copy(), parent=None)
+
+    chance_children = [
+        (_child_with_value(parent, visits=1, value_sum=1.0), 0.5),
+        (_child_with_value(parent, visits=0, value_sum=0.0), 0.5),
+    ]
+    det_children = [(_child_with_value(parent, visits=1, value_sum=1.0), 1.0)]
+
+    assert _action_q(parent.to_play, chance_children) == 1.0
+    assert _action_q(parent.to_play, det_children) == 1.0
+
+
+def test_action_q_uses_full_expectation_once_all_outcomes_are_visited():
+    player = build_mock_player()
+    parent = _Node(game=_build_game(player).copy(), parent=None)
+    children = [
+        (_child_with_value(parent, visits=1, value_sum=1.0), 0.8),
+        (_child_with_value(parent, visits=1, value_sum=-1.0), 0.2),
+    ]
+
+    np.testing.assert_allclose(
+        _action_q(parent.to_play, children),
+        0.8 * 1.0 + 0.2 * -1.0,
+    )
+
+
+def test_action_q_is_zero_when_no_outcomes_are_visited():
+    player = build_mock_player()
+    parent = _Node(game=_build_game(player).copy(), parent=None)
+    children = [
+        (_child_with_value(parent, visits=0, value_sum=0.0), 0.5),
+        (_child_with_value(parent, visits=0, value_sum=0.0), 0.5),
+    ]
+
+    assert _action_q(parent.to_play, children) == 0.0
