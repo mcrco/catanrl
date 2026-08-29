@@ -47,6 +47,17 @@ def _vps_to_win(env: Any) -> int:
     return int(env.config.vps_to_win)
 
 
+def effective_production_for_player(game: Game, color: Color) -> float:
+    """Sum this player's expected pips, ignoring opponents.
+
+    ``build_production_features`` returns P0..Pn resource keys, with P0 always
+    the perspective ``color``. Summing the whole dict would credit every
+    player's production to whoever is being scored.
+    """
+    features = build_production_features(True)(game, color)
+    return sum(value for key, value in features.items() if key.startswith("EFFECTIVE_P0_"))
+
+
 class ShapedReward(RewardFunction):
     def __init__(
         self,
@@ -57,25 +68,26 @@ class ShapedReward(RewardFunction):
         self._multi_agent = env is not None and hasattr(env, "colors_order")
         if self._multi_agent:
             self.prev_vps: Dict[Color, int] = {color: 0 for color in env.colors_order}
-            self.prev_production: Dict[Color, int] = {
-                color: 0 for color in env.colors_order
+            self.prev_production: Dict[Color, float] = {
+                color: 0.0 for color in env.colors_order
             }
         else:
             self.prev_vps = 0
-            self.prev_production = 0
+            self.prev_production = 0.0
 
     def reward(self, env: Any, game: Game, color: Color) -> float:
         """
         Reward is given for:
         - Winning the game (forces cumulative reward to 1)
-        - Gaining/losing VP (VP gained / vps_to_win), although losing VP is not
-          necessarily determined by current action.
+        - Gaining/losing VP for this player (VP gained / vps_to_win), although
+          losing VP is not necessarily determined by current action.
+        - Gaining/losing this player's effective production.
         """
         winning_color = game.winning_color()
         if winning_color is not None and color == winning_color:
             return self.config["win_weight"]
 
-        production = sum(build_production_features(True)(game, color).values())
+        production = effective_production_for_player(game, color)
         vps = _vps_to_win(env)
         if self._multi_agent:
             vp_diff = get_actual_victory_points(game.state, color) - self.prev_vps[color]
@@ -90,7 +102,7 @@ class ShapedReward(RewardFunction):
         )
 
     def after_step(self, env: Any, game: Game, color: Color) -> None:
-        production = sum(build_production_features(True)(game, color).values())
+        production = effective_production_for_player(game, color)
         vps = get_actual_victory_points(game.state, color)
         if self._multi_agent:
             self.prev_vps[color] = vps
@@ -103,7 +115,7 @@ class ShapedReward(RewardFunction):
         if self._multi_agent:
             for color in env.colors_order:
                 self.prev_vps[color] = 0
-                self.prev_production[color] = 0
+                self.prev_production[color] = 0.0
         else:
             self.prev_vps = 0
-            self.prev_production = 0
+            self.prev_production = 0.0
