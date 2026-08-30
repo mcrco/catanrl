@@ -35,7 +35,12 @@ from catanrl.experiment_store import (
 )
 from catanrl.features.catanatron_utils import COLOR_ORDER
 from catanrl.models.wrappers import PolicyNetworkWrapper
-from catanrl.experiments.common_args import DEFAULT_EVAL_SEED, DEFAULT_WANDB_PROJECT
+from catanrl.experiments.common_args import (
+    DEFAULT_EVAL_SEED,
+    DEFAULT_WANDB_PROJECT,
+    add_number_placement_argument,
+    apply_number_placement,
+)
 from catanrl.players import BeliefAveragedPolicyPlayer, NNPolicyPlayer
 from catanrl.utils.seeding import derive_seed
 
@@ -50,6 +55,7 @@ def main():
     parser.add_argument(
         "--map-type", type=str, default="BASE", choices=["BASE", "MINI", "TOURNAMENT"]
     )
+    add_number_placement_argument(parser)
     parser.add_argument(
         "--opponent-configs",
         type=str,
@@ -126,6 +132,7 @@ def main():
     observation_level: str = "full"
 
     experiment_model = None
+    experiment_number_placement = None
     if args.experiment is not None:
         exp = load_experiment(args.experiment)
         args.model_type = exp.model_type or args.model_type
@@ -138,10 +145,19 @@ def main():
                 f"--opponent-configs implies {num_players} players but experiment "
                 f"'{args.experiment}' was trained for {exp.num_players}."
             )
+        experiment_number_placement = exp.number_placement
         experiment_model = cast(
             PolicyNetworkWrapper,
             exp.build_policy(which=args.which, device=device),
         )
+
+    try:
+        apply_number_placement(
+            args,
+            experiment_number_placement=experiment_number_placement,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
 
     if observation_level != "full" and not args.allow_non_full:
         parser.error(
@@ -154,7 +170,10 @@ def main():
     print("Belief-Averaged Policy Evaluation vs ValueFunctionPlayer")
     print(f"{'=' * 60}")
     print(f"Device: {device}")
-    print(f"Map type: {args.map_type} | Players: {num_players}")
+    print(
+        f"Map type: {args.map_type} | Number placement: {args.number_placement} | "
+        f"Players: {num_players}"
+    )
     print(f"Backbone: {args.backbone_type} | Model type: {args.model_type}")
     print(f"Training observation level: {observation_level}")
     print(f"Action selection: {'sample' if args.sample else 'argmax'}")
@@ -222,6 +241,7 @@ def main():
                     show_tqdm=True,
                     nn_seat=seat_mode,
                     game_records=paired_games if variant == "belief" else None,
+                    number_placement=args.number_placement,
                 )
             )
         return seat_results
@@ -255,6 +275,7 @@ def main():
             base_seed=args.seed,
             scenario={
                 "map_type": args.map_type,
+                "number_placement": args.number_placement,
                 "opponents": ",".join(args.opponent_configs),
                 "deployment": "belief-averaged",
                 "num_games_per_seat": args.num_games,

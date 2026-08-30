@@ -12,7 +12,12 @@ from tqdm import tqdm
 from catanrl.eval.search_training import PolicyEvalResult, evaluate_candidate_vs_champion
 from catanrl.eval.vectorized_rollout import run_policy_h2h_eval_vectorized
 from catanrl.experiment_store import Experiment, load_experiment
-from catanrl.experiments.common_args import DEFAULT_EVAL_SEED, DEFAULT_WANDB_PROJECT
+from catanrl.experiments.common_args import (
+    DEFAULT_EVAL_SEED,
+    DEFAULT_WANDB_PROJECT,
+    add_number_placement_argument,
+    apply_number_placement,
+)
 from catanrl.features.catanatron_utils import ActorObservationLevel
 from catanrl.models import PolicyNetworkWrapper
 
@@ -189,6 +194,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Games with experiment A in each fixed seat.",
     )
     parser.add_argument("--num-envs", type=int, default=8, help="Parallel game environments.")
+    add_number_placement_argument(parser)
     parser.add_argument("--seed", type=int, default=DEFAULT_EVAL_SEED)
     parser.add_argument(
         "--device", default=None, help="cuda or cpu; defaults to CUDA if available."
@@ -228,6 +234,13 @@ def main() -> None:
     experiment_a = load_experiment(args.experiment_a)
     experiment_b = load_experiment(args.experiment_b)
     validate_compatible_experiments(experiment_a, experiment_b)
+    try:
+        apply_number_placement(
+            args,
+            experiment_number_placement=experiment_a.number_placement,
+        )
+    except ValueError as exc:
+        raise SystemExit(f"Error: {exc}") from exc
 
     policy_a = cast(
         PolicyNetworkWrapper,
@@ -252,6 +265,7 @@ def main() -> None:
     print(f"B: {experiment_b.metadata.name} ({args.which_b})")
     print(f"Observation levels: A={observation_level_a} | B={observation_level_b}")
     print(f"Device: {device} | Games per seat: {args.games_per_seat}")
+    print(f"Number placement: {args.number_placement}")
     print(f"Action selection: {'sample' if args.sample_actions else 'argmax'}")
 
     if args.deployable:
@@ -273,6 +287,7 @@ def main() -> None:
             vps_to_win=game.vps_to_win or 15,
             discard_limit=game.discard_limit or 9,
             show_tqdm=True,
+            number_placement=args.number_placement,
         )
         metrics = summarize_deployable_result(result)
     else:
@@ -305,6 +320,7 @@ def main() -> None:
                     champion_actor_observation_level=observation_level_b,
                     seed=args.seed,
                     progress_callback=update_progress,
+                    number_placement=args.number_placement,
                 )
         metrics = summarize_seat_results(seat_results)
     rows = build_policy_rows(

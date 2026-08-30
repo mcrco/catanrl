@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 import argparse
+from typing import cast
 
-from ..utils.catanatron_map import NUMBER_PLACEMENT_CHOICES
+from ..utils.catanatron_map import (
+    DEFAULT_NUMBER_PLACEMENT,
+    NUMBER_PLACEMENT_CHOICES,
+    NumberPlacement,
+)
 
 DEFAULT_MAX_GRAD_NORM = 1.0
 DEFAULT_METRIC_WINDOW = 200
@@ -21,10 +26,69 @@ def add_number_placement_argument(parser: argparse.ArgumentParser) -> None:
         help=(
             "Number-token placement for generated boards. 'official_spiral' uses the "
             "official token sequence while still shuffling terrain and ports; 'random' "
-            "also shuffles number tokens. New runs default to official_spiral; resumed "
-            "runs inherit their saved setting"
+            "also shuffles number tokens. New runs and evals default to official_spiral; "
+            "resumed runs and --experiment evals inherit their saved setting unless "
+            "this flag is passed"
         ),
     )
+
+
+def resolve_number_placement(
+    args: argparse.Namespace,
+    *,
+    resume_active: bool = False,
+    saved_number_placement: str | None = None,
+    experiment_number_placement: str | None = None,
+) -> NumberPlacement:
+    """Resolve board token placement for a new run, resume, or eval.
+
+    ``--number-placement`` uses ``argparse.SUPPRESS``, so omitting the flag is
+    distinguishable from passing it. New runs default to official spiral. Resumes
+    keep the saved experiment value and reject a conflicting flag. Eval scripts
+    inherit from ``--experiment`` when the flag is omitted. Any placement is
+    accepted for any map type; TOURNAMENT boards are fully fixed and ignore
+    the setting (see ``catanrl.utils.catanatron_map``).
+    """
+    requested = getattr(args, "number_placement", None)
+    if resume_active:
+        if saved_number_placement is None:
+            raise ValueError(
+                "--resume requires a saved number_placement on the source experiment."
+            )
+        if requested is not None and requested != saved_number_placement:
+            raise ValueError(
+                "--resume cannot change number placement from "
+                f"{saved_number_placement!r} to {requested!r}. "
+                "Start a new warm-start run to change the board distribution."
+            )
+        placement = saved_number_placement
+    elif requested is not None:
+        placement = requested
+    elif experiment_number_placement is not None:
+        placement = experiment_number_placement
+    else:
+        placement = DEFAULT_NUMBER_PLACEMENT
+    if placement not in NUMBER_PLACEMENT_CHOICES:
+        raise ValueError(f"Unknown number placement {placement!r}.")
+    return cast(NumberPlacement, placement)
+
+
+def apply_number_placement(
+    args: argparse.Namespace,
+    *,
+    resume_active: bool = False,
+    saved_number_placement: str | None = None,
+    experiment_number_placement: str | None = None,
+) -> NumberPlacement:
+    """Resolve placement and store it on ``args.number_placement``."""
+    placement = resolve_number_placement(
+        args,
+        resume_active=resume_active,
+        saved_number_placement=saved_number_placement,
+        experiment_number_placement=experiment_number_placement,
+    )
+    args.number_placement = placement
+    return placement
 
 
 def add_device_argument(parser: argparse.ArgumentParser) -> None:

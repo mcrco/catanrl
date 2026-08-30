@@ -26,7 +26,7 @@ from catanrl.utils.catanatron_game import (
     build_players_for_seat,
     force_player_order,
 )
-from catanrl.utils.catanatron_map import build_catan_map
+from catanrl.utils.catanatron_map import NumberPlacement, build_catan_map
 from catanrl.utils.seeding import derive_map_and_game_seeds, derive_seed
 
 
@@ -117,7 +117,9 @@ def _worker_main(
             game = Game(
                 players=players,
                 catan_map=build_catan_map(
-                    args_dict["map_type"], seed=map_seed, number_placement="random"
+                    args_dict["map_type"],
+                    seed=map_seed,
+                    number_placement=args_dict.get("number_placement", "official_spiral"),
                 ),
                 seed=game_seed,
                 discard_limit=int(args_dict["discard_limit"]),
@@ -191,6 +193,7 @@ def run_parallel_mcts_eval(
     discard_limit: int,
     device: str | torch.device,
     show_tqdm: bool = True,
+    number_placement: NumberPlacement = "official_spiral",
 ) -> ParallelMCTSEvalResult:
     """Evaluate MCTS games in worker processes sharing one inference server."""
     if num_games <= 0:
@@ -217,6 +220,7 @@ def run_parallel_mcts_eval(
         "nn_seat": nn_seat,
         "vps_to_win": vps_to_win,
         "discard_limit": discard_limit,
+        "number_placement": number_placement,
     }
     aggregate = ParallelMCTSEvalResult()
 

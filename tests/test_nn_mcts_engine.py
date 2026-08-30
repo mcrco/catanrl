@@ -24,7 +24,7 @@ def _build_game(player: NNMCTSPlayer, seed: int = 0) -> Game:
     players = [player] + [RandomPlayer(color) for color in COLOR_ORDER[1:NUM_PLAYERS]]
     game = Game(
         players=players,
-        catan_map=build_catan_map(MAP_TYPE, seed=seed, number_placement="random"),
+        catan_map=build_catan_map(MAP_TYPE, seed=seed),
         seed=seed,
     )
     force_player_order(game, players)

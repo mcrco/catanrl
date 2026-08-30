@@ -132,7 +132,7 @@ class GameConfig:
     map_type: str
     vps_to_win: Optional[int] = None
     discard_limit: Optional[int] = None
-    number_placement: str = "random"
+    number_placement: str = "official_spiral"
 
 
 @dataclass
@@ -198,10 +198,13 @@ class ExperimentMetadata:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "ExperimentMetadata":
+        game_data = dict(data["game"])
+        # Pre-10088f8 experiments omitted this key and trained on shuffled tokens.
+        game_data.setdefault("number_placement", "random")
         return cls(
             name=data["name"],
             algorithm=data.get("algorithm", "unknown"),
-            game=GameConfig(**data["game"]),
+            game=GameConfig(**game_data),
             networks={
                 name: NetworkSpec.from_dict(spec)
                 for name, spec in data.get("networks", {}).items()

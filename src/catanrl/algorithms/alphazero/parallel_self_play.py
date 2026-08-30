@@ -40,7 +40,7 @@ from catanrl.players.nn_mcts_player import (
 )
 from catanrl.utils.catanatron_action_space import MapType, get_action_space_size, to_action_space
 from catanrl.utils.catanatron_game import force_player_order
-from catanrl.utils.catanatron_map import build_catan_map
+from catanrl.utils.catanatron_map import NumberPlacement, build_catan_map
 from catanrl.utils.seeding import derive_map_and_game_seeds, derive_seed
 
 
@@ -286,6 +286,7 @@ def _training_worker_main(
         map_type = args_dict["map_type"]
         vps_to_win = int(args_dict["vps_to_win"])
         discard_limit = int(args_dict["discard_limit"])
+        number_placement = args_dict.get("number_placement", "official_spiral")
 
         experiences: list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]] = []
         stats: Counter[str] = Counter()
@@ -301,7 +302,9 @@ def _training_worker_main(
 
             game = Game(
                 players=players,
-                catan_map=build_catan_map(map_type, seed=map_seed, number_placement="random"),
+                catan_map=build_catan_map(
+                    map_type, seed=map_seed, number_placement=number_placement
+                ),
                 seed=game_seed,
                 discard_limit=discard_limit,
                 vps_to_win=vps_to_win,
@@ -372,6 +375,7 @@ def generate_self_play_data(
     discard_limit: int,
     seed: int,
     device: str | torch.device,
+    number_placement: NumberPlacement = "official_spiral",
     show_tqdm: bool = True,
 ) -> tuple[list[SelfPlayExperience], dict[str, int]]:
     """Generate AlphaZero self-play training data across worker processes.
@@ -404,6 +408,7 @@ def generate_self_play_data(
         "noise_turns": noise_turns,
         "vps_to_win": vps_to_win,
         "discard_limit": discard_limit,
+        "number_placement": number_placement,
     }
     worker_args = [(assignment, args_dict) for assignment in assignments]
 

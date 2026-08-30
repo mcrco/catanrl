@@ -14,10 +14,12 @@ from .common_args import (
     add_device_argument,
     add_experiment_name_argument,
     add_fresh_eval_arguments,
+    add_number_placement_argument,
     add_reward_function_argument,
     add_save_every_updates_argument,
     add_train_epochs_argument,
     add_wandb_arguments,
+    apply_number_placement,
 )
 from ..algorithms.ppo.sarl_ppo import train
 from ..experiment_store import (
@@ -125,6 +127,7 @@ def main():
                 (default: random)""",
     )
     add_reward_function_argument(parser)
+    add_number_placement_argument(parser)
     add_experiment_name_argument(parser)
     add_wandb_arguments(parser)
     add_device_argument(parser)
@@ -195,6 +198,13 @@ def main():
 
     try:
         resume = prepare_resume(args, warm_start)
+        apply_number_placement(
+            args,
+            resume_active=resume.active,
+            saved_number_placement=(
+                warm_start.experiment.number_placement if resume.active else None
+            ),
+        )
     except ValueError as exc:
         print(f"Error: {exc}")
         return
@@ -277,6 +287,7 @@ def main():
         "max_grad_norm": args.max_grad_norm,
         "target_kl": args.target_kl,
         "device": args.device,
+        "number_placement": args.number_placement,
     }
 
     wandb_config = None
@@ -327,6 +338,7 @@ def main():
         device=args.device,
         wandb_config=wandb_config,
         map_type=arch.map_type,
+        number_placement=args.number_placement,
         actor_observation_level=arch.actor_observation_level,
         critic_observation_level=arch.critic_observation_level,
         vps_to_win=arch.vps_to_win,
@@ -369,6 +381,7 @@ def main():
         game=GameConfig(
             num_players=num_players,
             map_type=arch.map_type,
+            number_placement=args.number_placement,
             vps_to_win=arch.vps_to_win,
             discard_limit=arch.discard_limit,
         ),

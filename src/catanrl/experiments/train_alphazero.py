@@ -55,8 +55,10 @@ from catanrl.experiments.common_args import (
     DEFAULT_MAX_GRAD_NORM,
     add_device_argument,
     add_experiment_name_argument,
+    add_number_placement_argument,
     add_save_every_updates_argument,
     add_wandb_arguments,
+    apply_number_placement,
 )
 from catanrl.experiments.network_config import validate_ismcts_observation_levels
 from catanrl.features.catanatron_utils import ActorObservationLevel, CriticObservationLevel
@@ -173,6 +175,7 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     add_experiment_name_argument(parser)
     add_device_argument(parser)
     parser.add_argument("--seed", type=int, default=42)
+    add_number_placement_argument(parser)
     add_wandb_arguments(parser)
     parser.add_argument("--wandb-entity", type=str, default=None)
 
@@ -399,6 +402,7 @@ def _evaluate_student(trainer: AlphaZeroTrainer, config: AlphaZeroConfig, args) 
         vps_to_win=config.vps_to_win,
         discard_limit=config.discard_limit,
         show_tqdm=False,
+        number_placement=config.number_placement,
     )
 
 
@@ -418,6 +422,7 @@ def _evaluate_h2h(trainer: AlphaZeroTrainer, config: AlphaZeroConfig, args) -> P
         vps_to_win=config.vps_to_win,
         discard_limit=config.discard_limit,
         show_tqdm=False,
+        number_placement=config.number_placement,
     )
 
 
@@ -654,6 +659,13 @@ def main() -> None:
             critic_observation_level=arch.critic_observation_level,
         )
         resume = prepare_resume(args, setup.warm_start)
+        apply_number_placement(
+            args,
+            resume_active=resume.active,
+            saved_number_placement=(
+                setup.warm_start.experiment.number_placement if resume.active else None
+            ),
+        )
     except (FileNotFoundError, ValueError) as exc:
         raise SystemExit(f"Error: {exc}") from exc
 
@@ -685,6 +697,7 @@ def main() -> None:
         model_type=arch.model_type,
         vps_to_win=arch.vps_to_win,
         discard_limit=arch.discard_limit,
+        number_placement=args.number_placement,
         simulations=args.simulations,
         c_puct=args.c_puct,
         prunning=args.prunning,
@@ -749,6 +762,7 @@ def main() -> None:
             game=GameConfig(
                 num_players=config.num_players,
                 map_type=config.map_type,
+                number_placement=config.number_placement,
                 vps_to_win=config.vps_to_win,
                 discard_limit=config.discard_limit,
             ),

@@ -14,7 +14,7 @@ comparable across model sizes on the same state set:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Literal, Optional, Sequence
+from typing import Dict, List, Literal, Sequence
 
 import numpy as np
 import torch
@@ -30,7 +30,7 @@ from ..features.catanatron_utils import (
 )
 from ..models.wrappers import PolicyNetworkWrapper, PolicyValueNetworkWrapper
 from ..utils.catanatron_action_space import to_action_space
-from ..utils.catanatron_map import build_catan_map
+from ..utils.catanatron_map import NumberPlacement, build_catan_map
 from ..utils.seeding import derive_map_and_game_seeds, derive_seed
 from .vectorized_rollout import _get_policy_logits
 
@@ -70,6 +70,7 @@ class FrozenImitationEvalSet:
         num_games: int,
         max_decision_points: int,
         seed: int,
+        number_placement: NumberPlacement = "official_spiral",
         show_progress: bool = False,
     ) -> "FrozenImitationEvalSet":
         decision_points = _generate_decision_points(
@@ -81,6 +82,7 @@ class FrozenImitationEvalSet:
             max_decision_points=max_decision_points,
             seed=seed,
             show_progress=show_progress,
+            number_placement=number_placement,
         )
         return cls(
             decision_points=decision_points,
@@ -179,6 +181,7 @@ def _generate_decision_points(
     max_decision_points: int,
     seed: int,
     show_progress: bool,
+    number_placement: NumberPlacement = "official_spiral",
 ) -> List[DecisionPoint]:
     if num_players != 2:
         raise ValueError("Frozen imitation eval assumes 2-player F-vs-F games.")
@@ -204,7 +207,9 @@ def _generate_decision_points(
         map_seed, game_seed = derive_map_and_game_seeds(episode_seed)
         game = Game(
             players=players,
-            catan_map=build_catan_map(map_type, seed=map_seed, number_placement="random"),
+            catan_map=build_catan_map(
+                map_type, seed=map_seed, number_placement=number_placement
+            ),
             seed=game_seed,
             discard_limit=discard_limit,
             vps_to_win=vps_to_win,

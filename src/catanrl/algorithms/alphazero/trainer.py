@@ -27,6 +27,7 @@ import torch.nn.functional as F
 from ...features.catanatron_utils import ActorObservationLevel, COLOR_ORDER, CriticObservationLevel
 from ...models.inference_utils import forward_policy_value
 from ...models.wrappers import PolicyNetworkWrapper, PolicyValueNetworkWrapper, ValueNetworkWrapper
+from ...utils.catanatron_map import NumberPlacement
 from .parallel_self_play import SelfPlayExperience, generate_self_play_data
 
 TrainingMode = Literal["distill", "iterate"]
@@ -47,6 +48,7 @@ class AlphaZeroConfig:
     model_type: str = "flat"
     vps_to_win: int = 15
     discard_limit: int = 9
+    number_placement: NumberPlacement = "official_spiral"
 
     # Search teacher.
     simulations: int = 64
@@ -316,6 +318,7 @@ class AlphaZeroTrainer:
             dirichlet_frac=self.config.dirichlet_frac,
             vps_to_win=self.config.vps_to_win,
             discard_limit=self.config.discard_limit,
+            number_placement=self.config.number_placement,
             seed=base_seed,
             device=self.device,
         )

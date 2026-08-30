@@ -17,6 +17,7 @@ from catanrl.experiments.common_args import (
     add_save_every_updates_argument,
     add_train_epochs_argument,
     add_wandb_arguments,
+    apply_number_placement,
 )
 from catanrl.algorithms.ppo.marl_ppo_central_critic import train
 from catanrl.experiment_store import (
@@ -182,27 +183,16 @@ def main():
 
     try:
         resume = prepare_resume(args, warm_start)
+        apply_number_placement(
+            args,
+            resume_active=resume.active,
+            saved_number_placement=(
+                warm_start.experiment.number_placement if resume.active else None
+            ),
+        )
     except ValueError as exc:
         print(f"Error: {exc}")
         return
-
-    requested_number_placement = getattr(args, "number_placement", None)
-    if resume.active:
-        assert warm_start is not None
-        saved_number_placement = warm_start.experiment.number_placement
-        if (
-            requested_number_placement is not None
-            and requested_number_placement != saved_number_placement
-        ):
-            print(
-                "Error: --resume cannot change number placement from "
-                f"{saved_number_placement!r} to {requested_number_placement!r}. "
-                "Start a new warm-start run to change the board distribution."
-            )
-            return
-        args.number_placement = saved_number_placement
-    else:
-        args.number_placement = requested_number_placement or "official_spiral"
 
     if resume.active:
         if args.critic_warm_start != "full":

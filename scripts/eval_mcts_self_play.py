@@ -31,7 +31,12 @@ from catanrl.experiment_store import (
     backbone_hidden_dims,
     load_experiment,
 )
-from catanrl.experiments.common_args import DEFAULT_EVAL_SEED, DEFAULT_WANDB_PROJECT
+from catanrl.experiments.common_args import (
+    DEFAULT_EVAL_SEED,
+    DEFAULT_WANDB_PROJECT,
+    add_number_placement_argument,
+    apply_number_placement,
+)
 from catanrl.eval.reporting import log_wandb_eval_results, wilson_interval
 from catanrl.experiments.network_config import resolve_observation_network_args
 from catanrl.features.catanatron_utils import (
@@ -57,7 +62,7 @@ from catanrl.players.nn_mcts_player import (
 )
 from catanrl.utils.catanatron_action_space import get_action_space_size
 from catanrl.utils.catanatron_game import color_label, force_player_order
-from catanrl.utils.catanatron_map import build_catan_map
+from catanrl.utils.catanatron_map import NumberPlacement, build_catan_map
 from catanrl.utils.seeding import derive_map_and_game_seeds, derive_seed
 
 BOARD_WIDTH = 21
@@ -281,6 +286,7 @@ def run_self_play_eval(
     vps_to_win: int,
     discard_limit: int,
     show_tqdm: bool = True,
+    number_placement: NumberPlacement = "official_spiral",
 ) -> tuple[dict[Color, PlayerStats], list[int]]:
     stats = {player.color: PlayerStats() for player in players}
     turns: list[int] = []
@@ -295,7 +301,9 @@ def run_self_play_eval(
 
         game = Game(
             players=players,
-            catan_map=build_catan_map(map_type, seed=map_seed, number_placement="random"),
+            catan_map=build_catan_map(
+                map_type, seed=map_seed, number_placement=number_placement
+            ),
             seed=game_seed,
             discard_limit=discard_limit,
             vps_to_win=vps_to_win,
@@ -321,6 +329,7 @@ def _run_self_play_episode_indices(
     seed: int,
     vps_to_win: int,
     discard_limit: int,
+    number_placement: NumberPlacement = "official_spiral",
 ) -> tuple[dict[Color, PlayerStats], list[int]]:
     stats = {player.color: PlayerStats() for player in players}
     turns: list[int] = []
@@ -336,7 +345,9 @@ def _run_self_play_episode_indices(
 
         game = Game(
             players=players,
-            catan_map=build_catan_map(map_type, seed=map_seed, number_placement="random"),
+            catan_map=build_catan_map(
+                map_type, seed=map_seed, number_placement=number_placement
+            ),
             seed=game_seed,
             discard_limit=discard_limit,
             vps_to_win=vps_to_win,
@@ -394,6 +405,7 @@ def _self_play_worker_main(
             seed=int(args_dict["seed"]),
             vps_to_win=int(args_dict["vps_to_win"]),
             discard_limit=int(args_dict["discard_limit"]),
+            number_placement=args_dict.get("number_placement", "official_spiral"),
         )
         result_queue.put(
             {
@@ -436,6 +448,7 @@ def run_parallel_self_play_eval(
     device: torch.device,
     ismcts_determinizations: int = 1,
     show_tqdm: bool = True,
+    number_placement: NumberPlacement = "official_spiral",
 ) -> tuple[dict[Color, PlayerStats], list[int]]:
     if num_games <= 0:
         return _deserialize_player_stats(_empty_serialized_stats(num_players), num_players), []
@@ -479,6 +492,7 @@ def run_parallel_self_play_eval(
         "seed": seed,
         "vps_to_win": vps_to_win,
         "discard_limit": discard_limit,
+        "number_placement": number_placement,
     }
 
     processes = [
@@ -601,6 +615,7 @@ def main():
         choices=["BASE", "MINI", "TOURNAMENT"],
         help="Catan map type",
     )
+    add_number_placement_argument(parser)
     parser.add_argument(
         "--actor-observation-level",
         type=str,
@@ -789,6 +804,7 @@ def main():
     # Experiment path: rebuild policy + critic from metadata.
     experiment_policy = None
     experiment_critic = None
+    experiment_number_placement = None
     if use_experiment:
         exp = load_experiment(args.experiment)
         args.model_type = exp.model_type or args.model_type
@@ -803,6 +819,7 @@ def main():
             args.critic_hidden_dims = backbone_hidden_dims(critic_spec.backbone)
             if critic_spec.observation_level is not None:
                 args.critic_observation_level = critic_spec.observation_level
+        experiment_number_placement = exp.number_placement
         if exp.policy_spec.kind == KIND_POLICY_VALUE:
             experiment_policy = exp.build_policy(
                 which=args.which, device=device, as_policy_only=False
@@ -812,11 +829,22 @@ def main():
             experiment_policy = exp.build_policy(which=args.which, device=device)
             experiment_critic = exp.build_critic(which=args.which, device=device)
 
+    try:
+        apply_number_placement(
+            args,
+            experiment_number_placement=experiment_number_placement,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
+
     print(f"\n{'=' * 60}")
     print("Neural MCTS Self-Play Evaluation")
     print(f"{'=' * 60}")
     print(f"Device: {device}")
-    print(f"Map type: {args.map_type} | Players: {args.num_players}")
+    print(
+        f"Map type: {args.map_type} | Number placement: {args.number_placement} | "
+        f"Players: {args.num_players}"
+    )
     print(f"Backbone: {args.backbone_type} | Model type: {args.model_type}")
     print(
         f"Actor observation: {args.actor_observation_level} | "
@@ -906,6 +934,7 @@ def main():
             vps_to_win=args.vps_to_win,
             discard_limit=args.discard_limit,
             show_tqdm=True,
+            number_placement=args.number_placement,
         )
     else:
         stats, turns = run_parallel_self_play_eval(
@@ -931,6 +960,7 @@ def main():
             num_game_workers=args.num_game_workers,
             device=device,
             show_tqdm=True,
+            number_placement=args.number_placement,
         )
 
     print(f"\n{'=' * 60}")
