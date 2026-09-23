@@ -19,6 +19,7 @@ from catanrl.features.catanatron_utils import (
     get_full_numeric_feature_names,
 )
 from catanrl.utils.catanatron_action_space import get_action_space_size
+from catanrl.utils.catanatron_map import DEFAULT_NUMBER_PLACEMENT, NumberPlacement
 from catanrl.utils.seeding import derive_map_and_game_seeds, derive_seed
 
 from .batch_binding import NativeGameBatch
@@ -41,6 +42,9 @@ class NativeVectorCppanatronPufferEnv(PufferEnv):
         )
         self.actor_observation_level: ActorObservationLevel = self.config.get(
             "actor_observation_level", "private"
+        )
+        self.number_placement: NumberPlacement = self.config.get(
+            "number_placement", DEFAULT_NUMBER_PLACEMENT
         )
         if self.num_envs <= 0:
             raise ValueError("num_envs must be positive")
@@ -88,6 +92,7 @@ class NativeVectorCppanatronPufferEnv(PufferEnv):
             map_type=self.map_type,
             discard_limit=self.discard_limit,
             vps_to_win=self.vps_to_win,
+            number_placement=self.number_placement,
             reward_function=self.reward_function,
             turns_limit=TURNS_LIMIT,
             observations=self.observations,
@@ -168,6 +173,7 @@ def make_cppanatron_native_marl_vectorized_envs(
     reward_function: Literal["shaped", "win"],
     num_envs: int,
     actor_observation_level: ActorObservationLevel = "private",
+    number_placement: NumberPlacement = DEFAULT_NUMBER_PLACEMENT,
 ):
     return NativeVectorCppanatronPufferEnv(
         config={
@@ -179,6 +185,7 @@ def make_cppanatron_native_marl_vectorized_envs(
             "shared_critic": shared_critic,
             "reward_function": reward_function,
             "actor_observation_level": actor_observation_level,
+            "number_placement": number_placement,
         }
     )
 

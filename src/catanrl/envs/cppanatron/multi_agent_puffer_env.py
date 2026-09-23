@@ -30,6 +30,7 @@ from catanrl.utils.catanatron_action_space import (
     get_action_space_size,
     get_end_turn_index,
 )
+from catanrl.utils.catanatron_map import DEFAULT_NUMBER_PLACEMENT, NumberPlacement
 from catanrl.utils.seeding import derive_map_and_game_seeds, derive_seed
 
 from .binding import NativeGame
@@ -52,6 +53,9 @@ class ParallelCppanatronPufferEnv(PufferEnv):
         )
         self.actor_observation_level: ActorObservationLevel = self.config.get(
             "actor_observation_level", "private"
+        )
+        self.number_placement: NumberPlacement = self.config.get(
+            "number_placement", DEFAULT_NUMBER_PLACEMENT
         )
         if not 2 <= self.num_players <= 4:
             raise ValueError("cppanatron supports between two and four players")
@@ -198,7 +202,7 @@ class ParallelCppanatronPufferEnv(PufferEnv):
                 self.map_type,
                 seed=game_seed,
                 map_seed=map_seed,
-                number_placement="random",
+                number_placement=self.number_placement,
                 discard_limit=self.discard_limit,
                 vps_to_win=self.vps_to_win,
             )
@@ -306,6 +310,7 @@ def _make_cppanatron_marl_env(
     shared_critic: bool,
     reward_function: Literal["shaped", "win"],
     actor_observation_level: ActorObservationLevel = "private",
+    number_placement: NumberPlacement = DEFAULT_NUMBER_PLACEMENT,
 ) -> Callable[..., ParallelCppanatronPufferEnv]:
     config = {
         "num_players": num_players,
@@ -315,6 +320,7 @@ def _make_cppanatron_marl_env(
         "shared_critic": shared_critic,
         "reward_function": reward_function,
         "actor_observation_level": actor_observation_level,
+        "number_placement": number_placement,
     }
     return lambda **kwargs: ParallelCppanatronPufferEnv(
         config=config,
@@ -331,6 +337,7 @@ def make_cppanatron_marl_vectorized_envs(
     reward_function: Literal["shaped", "win"],
     num_envs: int,
     actor_observation_level: ActorObservationLevel = "private",
+    number_placement: NumberPlacement = DEFAULT_NUMBER_PLACEMENT,
 ):
     return puffer_vector.make(
         _make_cppanatron_marl_env(
@@ -341,6 +348,7 @@ def make_cppanatron_marl_vectorized_envs(
             shared_critic=shared_critic,
             reward_function=reward_function,
             actor_observation_level=actor_observation_level,
+            number_placement=number_placement,
         ),
         num_envs=num_envs,
         backend=puffer_vector.Multiprocessing,

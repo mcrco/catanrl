@@ -25,6 +25,7 @@ from catanrl.features.catanatron_utils import (
     get_observation_indices_from_full,
 )
 from catanrl.players.nn_mcts_player import _RemoteNNMCTSInferenceBackend
+from catanrl.utils.catanatron_map import DEFAULT_NUMBER_PLACEMENT, NumberPlacement
 from catanrl.utils.seeding import derive_map_and_game_seeds, derive_seed
 
 MapType = Literal["BASE", "MINI", "TOURNAMENT"]
@@ -349,7 +350,7 @@ def _play_budget_game(
         args_dict["map_type"],
         seed=game_seed,
         map_seed=map_seed,
-        number_placement="random",
+        number_placement=args_dict["number_placement"],
         discard_limit=int(args_dict["discard_limit"]),
         vps_to_win=int(args_dict["vps_to_win"]),
     )
@@ -509,7 +510,7 @@ def _probe_worker_main(
                 args_dict["map_type"],
                 seed=game_seed,
                 map_seed=map_seed,
-                number_placement="random",
+                number_placement=args_dict["number_placement"],
                 discard_limit=int(args_dict["discard_limit"]),
                 vps_to_win=int(args_dict["vps_to_win"]),
             )
@@ -587,6 +588,7 @@ def _common_args(
     vps_to_win: int,
     discard_limit: int,
     turns_limit: int,
+    number_placement: NumberPlacement = DEFAULT_NUMBER_PLACEMENT,
     probe_stride: int = 1,
     value_scale: float = 1.0,
     tree_reuse: bool = False,
@@ -601,6 +603,7 @@ def _common_args(
         "vps_to_win": vps_to_win,
         "discard_limit": discard_limit,
         "turns_limit": turns_limit,
+        "number_placement": number_placement,
         "probe_stride": probe_stride,
         "value_scale": value_scale,
         "tree_reuse": tree_reuse,
@@ -627,6 +630,7 @@ def run_native_budget_games(
     vps_to_win: int,
     discard_limit: int,
     device: str | torch.device,
+    number_placement: NumberPlacement = DEFAULT_NUMBER_PLACEMENT,
     turns_limit: int = TURNS_LIMIT,
     show_tqdm: bool = True,
     value_scale: float = 1.0,
@@ -654,6 +658,7 @@ def run_native_budget_games(
         vps_to_win=vps_to_win,
         discard_limit=discard_limit,
         turns_limit=turns_limit,
+        number_placement=number_placement,
         value_scale=value_scale,
         tree_reuse=tree_reuse,
         canonical_pruning=canonical_pruning,
@@ -707,6 +712,7 @@ def run_native_budget_position_probes(
     vps_to_win: int,
     discard_limit: int,
     device: str | torch.device,
+    number_placement: NumberPlacement = DEFAULT_NUMBER_PLACEMENT,
     turns_limit: int = TURNS_LIMIT,
     show_tqdm: bool = True,
     value_scale: float = 1.0,
@@ -731,6 +737,7 @@ def run_native_budget_position_probes(
         vps_to_win=vps_to_win,
         discard_limit=discard_limit,
         turns_limit=turns_limit,
+        number_placement=number_placement,
         probe_stride=probe_stride,
         value_scale=value_scale,
         canonical_pruning=canonical_pruning,

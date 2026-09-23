@@ -26,6 +26,7 @@ def _make_env(
     num_envs: int,
     num_players: int,
     map_type: str,
+    number_placement: str = "official_spiral",
 ) -> NativeVectorCppanatronPufferEnv:
     return NativeVectorCppanatronPufferEnv(
         {
@@ -36,27 +37,31 @@ def _make_env(
             "discard_limit": 7,
             "shared_critic": True,
             "reward_function": "shaped",
+            "number_placement": number_placement,
         }
     )
 
 
+@pytest.mark.parametrize("number_placement", ["official_spiral", "random"])
 @pytest.mark.parametrize("map_type", ["MINI", "BASE", "TOURNAMENT"])
 @pytest.mark.parametrize("num_players", [2, 3, 4])
 def test_native_vector_reset_matches_scalar_features_and_masks(
     map_type: str,
     num_players: int,
+    number_placement: str,
 ):
     env = _make_env(
         num_envs=1,
         num_players=num_players,
         map_type=map_type,
+        number_placement=number_placement,
     )
     game = NativeGame(
         num_players,
         map_type,
         seed=67_890,
         map_seed=12_345,
-        number_placement="random",
+        number_placement=number_placement,
         vps_to_win=6,
     )
     try:
@@ -100,7 +105,7 @@ def test_native_vector_steps_match_scalar_state_and_shaped_rewards():
             "MINI",
             seed=int(game_seeds[index]),
             map_seed=int(map_seeds[index]),
-            number_placement="random",
+            number_placement="official_spiral",
             vps_to_win=6,
         )
         for index in range(num_envs)

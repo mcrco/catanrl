@@ -16,12 +16,14 @@ from catanatron.models.enums import (
 )
 from catanatron.models.map import (
     BASE_MAP_TEMPLATE,
+    BASE_NUMBERS_IN_SPIRAL_ORDER,
     MINI_MAP_TEMPLATE,
     CatanMap,
     build_map,
     initialize_tiles,
 )
 from catanatron.models.player import Color, RandomPlayer
+from catanatron.models.spiral import spiral_land_coordinates
 from catanatron.models.tiles import LandTile, Port, Water
 from catanatron.players.value import ValueFunctionPlayer, base_fn
 
@@ -142,12 +144,36 @@ def test_native_binding_selects_number_placement():
 
 
 @pytest.mark.parametrize("map_type", ["MINI", "BASE"])
+@pytest.mark.parametrize("seed", [0, 1, 42, 1234])
+def test_native_official_spiral_numbers_follow_python_spiral(map_type, seed):
+    """Terrain is shuffled by each engine's own RNG, but official-spiral numbers
+    must follow Python's spiral walk over whatever terrain the native map drew."""
+    with NativeGame(
+        num_players=2, map_type=map_type, seed=seed, number_placement="official_spiral"
+    ) as native_game:
+        native_tiles = {(x, y, z): rest for x, y, z, *rest in native_game.tiles()}
+
+    python_shape = build_map(map_type).tiles
+    start = (2, -2, 0) if map_type == "BASE" else (1, -1, 0)
+    expected = iter(BASE_NUMBERS_IN_SPIRAL_ORDER)
+    for coordinate in spiral_land_coordinates(python_shape, start):
+        _id, kind, resource, number, _direction, _nodes = native_tiles[coordinate]
+        assert kind == 0
+        if resource == -1:
+            assert number == -1
+        else:
+            assert number == next(expected)
+
+
+@pytest.mark.parametrize("map_type", ["MINI", "BASE"])
 @pytest.mark.parametrize("seed", [0, 1, 42])
 def test_native_random_maps_match_python_template_contract(map_type, seed):
     random.seed(seed)
     python_map = build_map(map_type, number_placement="random")
 
-    with NativeGame(num_players=2, map_type=map_type, seed=seed) as native_game:
+    with NativeGame(
+        num_players=2, map_type=map_type, seed=seed, number_placement="random"
+    ) as native_game:
         native_tiles = {
             (tile[0], tile[1], tile[2]): tile[3:] for tile in native_game.tiles()
         }

@@ -26,6 +26,7 @@ from catanrl.features.catanatron_utils import (
     ActorObservationLevel,
     get_actor_indices_from_full,
 )
+from catanrl.utils.catanatron_map import DEFAULT_NUMBER_PLACEMENT, NumberPlacement
 from catanrl.utils.seeding import derive_map_and_game_seeds, derive_seed
 
 from .binding import NativeGame
@@ -69,6 +70,9 @@ class SingleAgentCppanatronPufferEnv(PufferEnv):
         self.expert_config: str | None = self.config.get("expert_config")
         self.reward_function = str(self.config.get("reward_function", "shaped"))
         self.nn_seat = str(self.config.get("nn_seat", "random"))
+        self.number_placement: NumberPlacement = self.config.get(
+            "number_placement", DEFAULT_NUMBER_PLACEMENT
+        )
         self.actor_observation_level: ActorObservationLevel = self.config.get(
             "actor_observation_level", "private"
         )
@@ -262,7 +266,7 @@ class SingleAgentCppanatronPufferEnv(PufferEnv):
                 self.map_type,
                 seed=game_seed,
                 map_seed=map_seed,
-                number_placement="random",
+                number_placement=self.number_placement,
                 discard_limit=self.discard_limit,
                 vps_to_win=self.vps_to_win,
             )
@@ -363,6 +367,7 @@ def _make_cppanatron_puffer_env(
     discard_limit: int = 9,
     expert_config: str | None = None,
     actor_observation_level: ActorObservationLevel = "private",
+    number_placement: NumberPlacement = DEFAULT_NUMBER_PLACEMENT,
 ) -> Callable[..., SingleAgentCppanatronPufferEnv]:
     def _config() -> Dict[str, Any]:
         return {
@@ -374,6 +379,7 @@ def _make_cppanatron_puffer_env(
             "expert_config": expert_config,
             "actor_observation_level": actor_observation_level,
             "nn_seat": nn_seat,
+            "number_placement": number_placement,
         }
 
     return lambda **kwargs: SingleAgentCppanatronPufferEnv(
@@ -391,6 +397,7 @@ def make_cppanatron_vectorized_envs(
     discard_limit: int = 9,
     expert_config: str | None = None,
     actor_observation_level: ActorObservationLevel = "private",
+    number_placement: NumberPlacement = DEFAULT_NUMBER_PLACEMENT,
 ):
     return puffer_vector.make(
         _make_cppanatron_puffer_env(
@@ -402,6 +409,7 @@ def make_cppanatron_vectorized_envs(
             discard_limit,
             expert_config,
             actor_observation_level,
+            number_placement,
         ),
         num_envs=num_envs,
         backend=puffer_vector.Multiprocessing,

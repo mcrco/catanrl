@@ -24,6 +24,7 @@ from catanrl.players.nn_mcts_player import (
     _NNMCTSInferenceBackend,
     _RemoteNNMCTSInferenceBackend,
 )
+from catanrl.utils.catanatron_map import DEFAULT_NUMBER_PLACEMENT, NumberPlacement
 from catanrl.utils.seeding import derive_map_and_game_seeds, derive_seed
 
 from .parallel_self_play import (
@@ -153,7 +154,7 @@ def _play_native_self_play_game(
         map_type,
         seed=game_seed,
         map_seed=map_seed,
-        number_placement="random",
+        number_placement=args_dict.get("number_placement", DEFAULT_NUMBER_PLACEMENT),
         discard_limit=int(args_dict["discard_limit"]),
         vps_to_win=int(args_dict["vps_to_win"]),
     )
@@ -337,6 +338,7 @@ def generate_native_self_play_data(
     discard_limit: int,
     seed: int,
     device: str | torch.device,
+    number_placement: NumberPlacement = DEFAULT_NUMBER_PLACEMENT,
     show_tqdm: bool = True,
     turns_limit: int = TURNS_LIMIT,
     value_scale: float = 1.0,
@@ -388,6 +390,7 @@ def generate_native_self_play_data(
         "dirichlet_frac": dirichlet_frac,
         "vps_to_win": vps_to_win,
         "discard_limit": discard_limit,
+        "number_placement": number_placement,
         "turns_limit": turns_limit,
         "value_scale": value_scale,
         "tree_reuse": tree_reuse,

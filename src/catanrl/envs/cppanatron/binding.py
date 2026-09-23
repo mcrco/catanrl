@@ -265,7 +265,7 @@ class NativeGame:
         map_type: MapType = "BASE",
         seed: int = 0,
         map_seed: int | None = None,
-        number_placement: NumberPlacement = "random",
+        number_placement: NumberPlacement = "official_spiral",
         discard_limit: int = 7,
         friendly_robber: bool = False,
         vps_to_win: int = 10,

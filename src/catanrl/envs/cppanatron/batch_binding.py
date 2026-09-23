@@ -11,7 +11,7 @@ from catanatron.gym.board_tensor_features import (
     get_tile_coordinate_map,
 )
 
-from .binding import MapType, _load_library
+from .binding import MapType, NativeGame, NumberPlacement, _load_library
 
 
 class _NodePosition(ctypes.Structure):
@@ -78,6 +78,7 @@ class NativeGameBatch:
         map_type: MapType,
         discard_limit: int,
         vps_to_win: int,
+        number_placement: NumberPlacement,
         reward_function: Literal["shaped", "win"],
         turns_limit: int,
         observations: np.ndarray,
@@ -99,7 +100,7 @@ class NativeGameBatch:
             discard_limit,
             0,
             vps_to_win,
-            1,
+            NativeGame._NUMBER_PLACEMENTS[number_placement],
             self._REWARD_FUNCTIONS[reward_function],
             turns_limit,
             WIDTH,

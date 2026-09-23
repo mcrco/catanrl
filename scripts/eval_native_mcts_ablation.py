@@ -189,6 +189,7 @@ def main() -> None:
         "map_type": experiment.map_type,
         "vps_to_win": vps_to_win,
         "discard_limit": discard_limit,
+        "number_placement": experiment.number_placement,
         "actor_observation_level": actor_level,
         "critic_observation_level": critic_level,
     }
@@ -238,6 +239,7 @@ def main() -> None:
                     seed=args.seed,
                     vps_to_win=vps_to_win,
                     discard_limit=discard_limit,
+                    number_placement=experiment.number_placement,
                     device=device,
                     turns_limit=args.turns_limit,
                     value_scale=float(ablation["value_scale"]),
@@ -262,6 +264,7 @@ def main() -> None:
                     seed=args.seed,
                     vps_to_win=vps_to_win,
                     discard_limit=discard_limit,
+                    number_placement=experiment.number_placement,
                     device=device,
                     turns_limit=args.turns_limit,
                     value_scale=float(ablation["value_scale"]),
