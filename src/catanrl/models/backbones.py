@@ -259,13 +259,12 @@ class CompactCrossDimensionalBackbone(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         numeric_features = x[:, : self.numeric_dim]
-        board_tensor = x[:, self.numeric_dim :].reshape(
-            -1,
-            self.board_height,
-            self.board_width,
-            self.board_channels,
+        board_tensor = unflatten_board_nchw(
+            x[:, self.numeric_dim :],
+            channels=self.board_channels,
+            width=self.board_width,
+            height=self.board_height,
         )
-        board_tensor = board_tensor.permute(0, 3, 1, 2)
         spatial_features = self.spatial_projection(self.cnn(board_tensor))
         numeric_features = self.numeric_mlp(numeric_features)
         return self.fusion(torch.cat((spatial_features, numeric_features), dim=-1))

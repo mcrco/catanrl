@@ -10,6 +10,12 @@ from catanrl.features.board_tensor import (
     flatten_board,
     unflatten_board_nchw,
 )
+from catanrl.models.backbones import (
+    CompactCrossDimensionalBackbone,
+    CrossDimensionalBackbone,
+    CrossDimensionalBackboneConfig,
+    ResidualCrossDimensionalBackbone,
+)
 
 
 def _marker_board(channels: int = 4) -> np.ndarray:
@@ -60,3 +66,30 @@ def test_unflatten_torch_matches_numpy():
 def test_flatten_rejects_unknown_layout():
     with pytest.raises(ValueError, match="Unrecognized board tensor layout"):
         flatten_board(np.zeros((BOARD_HEIGHT, BOARD_WIDTH, 4), dtype=np.float32))
+
+
+@pytest.mark.parametrize(
+    "backbone_class",
+    [CrossDimensionalBackbone, CompactCrossDimensionalBackbone, ResidualCrossDimensionalBackbone],
+)
+def test_xdim_backbones_feed_conv2d_canonical_nchw(backbone_class):
+    channels, numeric_dim = 4, 3
+    config = CrossDimensionalBackboneConfig(
+        board_channels=channels,
+        numeric_dim=numeric_dim,
+        cnn_channels=[8],
+        numeric_hidden_dims=[8],
+        fusion_hidden_dim=16,
+        output_dim=16,
+    )
+    backbone = backbone_class(config)
+    first_conv = next(m for m in backbone.modules() if isinstance(m, torch.nn.Conv2d))
+    seen = {}
+    first_conv.register_forward_pre_hook(lambda _module, inputs: seen.setdefault("x", inputs[0]))
+
+    board = _marker_board(channels)
+    x = torch.from_numpy(np.concatenate([np.zeros(numeric_dim, np.float32), flatten_board(board)]))
+    backbone(x.unsqueeze(0))
+
+    expected = unflatten_board_nchw(torch.from_numpy(flatten_board(board)), channels=channels)
+    torch.testing.assert_close(seen["x"], expected)
