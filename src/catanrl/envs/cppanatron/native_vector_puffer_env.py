@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from typing import Any, Dict, Literal, Optional
 
+import cppanatron as cpp
 import numpy as np
+from cppanatron.catanatron import observation_layout
 from gymnasium import spaces
 from pufferlib.emulation import emulate_action_space, emulate_observation_space
 from pufferlib.environment import PufferEnv
@@ -22,7 +24,6 @@ from catanrl.utils.catanatron_action_space import get_action_space_size
 from catanrl.utils.catanatron_map import DEFAULT_NUMBER_PLACEMENT, NumberPlacement
 from catanrl.utils.seeding import derive_map_and_game_seeds, derive_seed
 
-from .batch_binding import NativeGameBatch
 from .puffer_env import TURNS_LIMIT
 
 
@@ -86,17 +87,24 @@ class NativeVectorCppanatronPufferEnv(PufferEnv):
 
         self._seed_trackers = [EpisodeSeedTracker() for _ in range(self.num_envs)]
         self._initialized = False
-        self._batch = NativeGameBatch(
-            num_envs=self.num_envs,
-            num_players=self.num_players,
-            map_type=self.map_type,
+        self._batch = cpp.GameBatch(
+            self.num_envs,
+            self.num_players,
+            cpp.MapType[self.map_type],
+            observation_layout(),
+            number_placement=cpp.NumberPlacement[self.number_placement.upper()],
             discard_limit=self.discard_limit,
             vps_to_win=self.vps_to_win,
-            number_placement=self.number_placement,
-            reward_function=self.reward_function,
+            reward_function=cpp.RewardFunction[self.reward_function.upper()],
             turns_limit=TURNS_LIMIT,
+        )
+        # Puffer's emulated observation rows hold the mask and features side by side.
+        fields = self.obs_dtype.fields
+        assert fields is not None
+        self._batch.bind(
             observations=self.observations,
-            obs_dtype=self.obs_dtype,
+            action_mask_offset=fields["action_mask"][1],
+            observation_offset=fields["observation"][1],
             actions=self.actions,
             rewards=self.rewards,
             terminals=self.terminals,
@@ -161,7 +169,7 @@ class NativeVectorCppanatronPufferEnv(PufferEnv):
         )
 
     def close(self):
-        self._batch.close()
+        """The batch lives exactly as long as this env and its buffers."""
 
 
 def make_cppanatron_native_marl_vectorized_envs(

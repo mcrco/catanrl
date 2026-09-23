@@ -89,7 +89,7 @@ class _ValueOpponentGame:
     def __init__(self) -> None:
         self.calls = 0
 
-    def value_action(self) -> int:
+    def expert_action(self) -> int:
         self.calls += 1
         return 17
 
@@ -100,7 +100,6 @@ def test_native_value_opponent_uses_cpp_value_player_without_inference():
     action = _game_opponent_action(
         game,  # type: ignore[arg-type]
         "value",
-        "BASE",
         pytest.fail,  # type: ignore[arg-type]
         pytest.fail,  # type: ignore[arg-type]
         pytest.fail,  # type: ignore[arg-type]

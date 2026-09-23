@@ -15,6 +15,7 @@ dependencies = [
     "gymnasium==0.29.1",
     "scikit-learn>=1.7.2",
     "catanatron",
+    "cppanatron",
     "pufferlib>=2.0.6",
     "pyyaml>=6.0.0",
 ]
@@ -65,6 +66,7 @@ torchaudio = [
   { index = "pytorch-cu130", marker = "extra == 'cu130'" },
 ]
 catanatron = { path = "catanatron", editable = true }
+cppanatron = { path = "cppanatron", editable = true }
 
 [[tool.uv.index]]
 name = "pytorch-cu130"

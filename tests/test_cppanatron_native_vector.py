@@ -4,21 +4,10 @@ import numpy as np
 import pytest
 
 from catanrl.envs.cppanatron import (
-    NativeGame,
+    FlatGame,
     NativeVectorCppanatronPufferEnv,
-    find_cppanatron_library,
-    full_native_features,
     make_cppanatron_native_marl_vectorized_envs,
 )
-from catanrl.envs.cppanatron.puffer_env import _native_production_sum
-
-
-@pytest.fixture(scope="module", autouse=True)
-def _require_native_library():
-    try:
-        find_cppanatron_library()
-    except FileNotFoundError as exc:
-        pytest.skip(str(exc))
 
 
 def _make_env(
@@ -56,7 +45,7 @@ def test_native_vector_reset_matches_scalar_features_and_masks(
         map_type=map_type,
         number_placement=number_placement,
     )
-    game = NativeGame(
+    game = FlatGame(
         num_players,
         map_type,
         seed=67_890,
@@ -73,11 +62,11 @@ def test_native_vector_reset_matches_scalar_features_and_masks(
         for player in range(num_players):
             np.testing.assert_array_equal(
                 structured["observation"][player],
-                full_native_features(game, map_type, player),
+                game.observation(player),
             )
             expected_mask = np.zeros(env.action_space_size, dtype=np.int8)
             if player == game.current_player:
-                expected_mask = game.valid_action_mask().astype(np.int8, copy=False)
+                expected_mask = game.action_mask().astype(np.int8, copy=False)
             else:
                 expected_mask[-1] = 1
             np.testing.assert_array_equal(
@@ -85,7 +74,6 @@ def test_native_vector_reset_matches_scalar_features_and_masks(
                 expected_mask,
             )
     finally:
-        game.close()
         env.close()
 
 
@@ -100,7 +88,7 @@ def test_native_vector_steps_match_scalar_state_and_shaped_rewards():
         map_type="MINI",
     )
     games = [
-        NativeGame(
+        FlatGame(
             num_players,
             "MINI",
             seed=int(game_seeds[index]),
@@ -118,7 +106,7 @@ def test_native_vector_steps_match_scalar_state_and_shaped_rewards():
         for _ in range(64):
             actions = np.full(env.num_agents, env.action_space_size - 1, dtype=np.int32)
             for env_index, game in enumerate(games):
-                action = int(np.flatnonzero(game.valid_action_mask())[0])
+                action = int(np.flatnonzero(game.action_mask())[0])
                 actions[env_index * num_players + game.current_player] = action
                 game.step(action)
 
@@ -127,8 +115,8 @@ def test_native_vector_steps_match_scalar_state_and_shaped_rewards():
             for env_index, game in enumerate(games):
                 for player in range(num_players):
                     row = env_index * num_players + player
-                    state = game.player_state(player)
-                    production = _native_production_sum(game, player)
+                    state = game.player(player)
+                    production = game.production(player)
                     expected_reward = 0.01 * (
                         state.actual_victory_points - previous_vps[env_index, player]
                     ) / 6 + 0.0025 * (production - previous_production[env_index, player])
@@ -139,11 +127,9 @@ def test_native_vector_steps_match_scalar_state_and_shaped_rewards():
                     assert not truncations[row]
                     np.testing.assert_array_equal(
                         structured["observation"][row],
-                        full_native_features(game, "MINI", player),
+                        game.observation(player),
                     )
     finally:
-        for game in games:
-            game.close()
         env.close()
 
 

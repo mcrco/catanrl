@@ -33,9 +33,8 @@ from catanrl.utils.catanatron_action_space import (
 from catanrl.utils.catanatron_map import DEFAULT_NUMBER_PLACEMENT, NumberPlacement
 from catanrl.utils.seeding import derive_map_and_game_seeds, derive_seed
 
-from .binding import NativeGame
-from .features import full_native_features
-from .puffer_env import TURNS_LIMIT, _native_production_sum
+from .flat_game import FlatGame
+from .puffer_env import TURNS_LIMIT
 
 
 class ParallelCppanatronPufferEnv(PufferEnv):
@@ -109,7 +108,7 @@ class ParallelCppanatronPufferEnv(PufferEnv):
         super().__init__(buf=buf)
         self.obs_struct = self.observations.view(self.obs_dtype)
         self._seed_tracker = EpisodeSeedTracker()
-        self.game: NativeGame | None = None
+        self.game: FlatGame | None = None
         self.agents: List[str] = []
         self.initialized = False
         self._all_done = True
@@ -131,16 +130,12 @@ class ParallelCppanatronPufferEnv(PufferEnv):
 
     def _full_observation(self, player: int) -> np.ndarray:
         assert self.game is not None
-        return full_native_features(
-            self.game,
-            self.map_type,
-            base_player=player,
-        )
+        return self.game.observation(player)
 
     def _action_mask(self, player: int) -> np.ndarray:
         assert self.game is not None
         if self.agents and player == self.game.current_player:
-            return self.game.valid_action_mask().astype(np.int8, copy=False)
+            return self.game.action_mask().astype(np.int8, copy=False)
         mask = np.zeros(self.action_space_size, dtype=np.int8)
         mask[self.end_turn_idx] = 1
         return mask
@@ -177,8 +172,8 @@ class ParallelCppanatronPufferEnv(PufferEnv):
         if self.reward_function == "win":
             return -1.0 if self.game.winner is not None else 0.0
 
-        vps = self.game.player_state(player).actual_victory_points
-        production = _native_production_sum(self.game, player)
+        vps = self.game.player(player).actual_victory_points
+        production = self.game.production(player)
         reward = 0.01 * ((vps - self._prev_vps[player]) / self.vps_to_win)
         reward += 0.0025 * (production - self._prev_production[player])
         return float(reward)
@@ -186,8 +181,8 @@ class ParallelCppanatronPufferEnv(PufferEnv):
     def _update_reward_state(self) -> None:
         assert self.game is not None
         for player in range(self.num_players):
-            self._prev_vps[player] = self.game.player_state(player).actual_victory_points
-            self._prev_production[player] = _native_production_sum(self.game, player)
+            self._prev_vps[player] = self.game.player(player).actual_victory_points
+            self._prev_production[player] = self.game.production(player)
 
     def reset(self, seed=None):
         normalized_seed = normalize_reset_seed(seed)
@@ -196,18 +191,15 @@ class ParallelCppanatronPufferEnv(PufferEnv):
             episode_seed = int(np.random.SeedSequence().generate_state(1)[0])
         map_seed, game_seed = derive_map_and_game_seeds(episode_seed)
 
-        if self.game is None:
-            self.game = NativeGame(
-                self.num_players,
-                self.map_type,
-                seed=game_seed,
-                map_seed=map_seed,
-                number_placement=self.number_placement,
-                discard_limit=self.discard_limit,
-                vps_to_win=self.vps_to_win,
-            )
-        else:
-            self.game.reset(game_seed, map_seed=map_seed)
+        self.game = FlatGame(
+            self.num_players,
+            self.map_type,
+            seed=game_seed,
+            map_seed=map_seed,
+            number_placement=self.number_placement,
+            discard_limit=self.discard_limit,
+            vps_to_win=self.vps_to_win,
+        )
 
         self.agents = self.possible_agents[:]
         self._prev_vps.fill(0)
@@ -297,9 +289,7 @@ class ParallelCppanatronPufferEnv(PufferEnv):
         )
 
     def close(self):
-        if self.game is not None:
-            self.game.close()
-            self.game = None
+        self.game = None
 
 
 def _make_cppanatron_marl_env(

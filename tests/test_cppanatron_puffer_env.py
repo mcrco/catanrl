@@ -8,15 +8,16 @@ from catanrl.algorithms.imitation_learning.dagger import _resolve_env_factory
 from catanrl.algorithms.ppo.marl_ppo_central_critic import (
     _resolve_marl_env_factory,
 )
+import cppanatron as cpp
+
 from catanrl.envs.cppanatron import (
+    FlatGame,
     ParallelCppanatronPufferEnv,
     SingleAgentCppanatronPufferEnv,
-    find_cppanatron_library,
     make_cppanatron_marl_vectorized_envs,
     make_cppanatron_native_marl_vectorized_envs,
     make_cppanatron_vectorized_envs,
 )
-from catanrl.envs.cppanatron.puffer_env import _native_production_sum
 from catanrl.envs.puffer.common import (
     compute_multiagent_input_dim,
     compute_single_agent_dims,
@@ -27,14 +28,6 @@ from catanrl.envs.puffer.multi_agent_env import (
 from catanrl.envs.puffer.rollout_utils import decode_puffer_batch
 from catanrl.envs.puffer.single_agent_env import make_puffer_vectorized_envs
 from catanrl.features.catanatron_utils import get_actor_indices_from_full
-
-
-@pytest.fixture(scope="module", autouse=True)
-def _require_native_library():
-    try:
-        find_cppanatron_library()
-    except FileNotFoundError as exc:
-        pytest.skip(str(exc))
 
 
 def _make_env() -> SingleAgentCppanatronPufferEnv:
@@ -202,21 +195,12 @@ def test_native_puffer_rejects_unsupported_player_types():
         )
 
 
-def test_native_production_sum_is_scoped_to_player():
-    class FakeGame:
-        robber_coordinate = (99, 99, 99)
-
-        @staticmethod
-        def buildings():
-            return [(0, 0, 0), (1, 1, 1)]
-
-        @staticmethod
-        def tiles():
-            return [(0, 0, 0, 0, 0, 0, 6, 0, (0, 1, 2, 3, 4, 5))]
-
-    probability_six = 5.0 / 36.0
-    assert _native_production_sum(FakeGame(), 0) == probability_six
-    assert _native_production_sum(FakeGame(), 1) == 2.0 * probability_six
+def test_native_production_is_scoped_to_player():
+    game = FlatGame(2, "TOURNAMENT")
+    # TOURNAMENT node 1 touches ORE 6 and WHEAT 5 (and the desert).
+    game.game.execute(cpp.Action(cpp.Color.RED, cpp.ActionType.BUILD_SETTLEMENT, 1))
+    assert game.production(0) == pytest.approx((5 + 4) / 36)
+    assert game.production(1) == 0.0
 
 
 def test_native_random_seating_preserves_mixed_opponent_identities():

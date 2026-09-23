@@ -29,31 +29,9 @@ from catanrl.features.catanatron_utils import (
 from catanrl.utils.catanatron_map import DEFAULT_NUMBER_PLACEMENT, NumberPlacement
 from catanrl.utils.seeding import derive_map_and_game_seeds, derive_seed
 
-from .binding import NativeGame
-from .features import full_native_features
+from .flat_game import FlatGame
 
 TURNS_LIMIT = 1_000
-
-
-def _native_production_sum(game: NativeGame, player: int) -> float:
-    robber = game.robber_coordinate
-    buildings = {
-        node: building
-        for node, color, building in game.buildings()
-        if color == player
-    }
-    probability = {
-        number: (6 - abs(7 - number)) / 36.0 for number in range(2, 13)
-    }
-    total = 0.0
-    for x, y, z, _id, kind, resource, number, _direction, nodes in game.tiles():
-        if kind != 0 or resource < 0 or (x, y, z) == robber:
-            continue
-        for node in nodes:
-            building = buildings.get(node)
-            if building is not None:
-                total += probability[number] * (1 if building == 0 else 2)
-    return total
 
 
 class SingleAgentCppanatronPufferEnv(PufferEnv):
@@ -117,9 +95,7 @@ class SingleAgentCppanatronPufferEnv(PufferEnv):
             : self.actor_numeric_dim
         ]
 
-        probe = NativeGame(self.num_players, self.map_type, seed=0)
-        self.action_space_size = probe.action_space_size
-        probe.close()
+        self.action_space_size = FlatGame(self.num_players, self.map_type).action_space_size
         self.env_single_observation_space = build_shared_critic_observation_space(
             numeric_dim=self.actor_numeric_dim,
             board_tensor_shape=self.board_tensor_shape,
@@ -145,7 +121,7 @@ class SingleAgentCppanatronPufferEnv(PufferEnv):
         self.obs_struct = self.observations.view(self.obs_dtype)[0]
         self._seed_tracker = EpisodeSeedTracker()
         self._rng = np.random.default_rng()
-        self.game: NativeGame | None = None
+        self.game: FlatGame | None = None
         self.controlled_player = 0
         self._opponent_configs_by_player: list[str | None] = []
         self.initialized = False
@@ -173,9 +149,9 @@ class SingleAgentCppanatronPufferEnv(PufferEnv):
             raise RuntimeError("Requested an opponent action for the controlled player")
         config = configured_opponent.split(":", 1)[0].upper()
         if config in {"F", "VALUE", "VALUEFUNCTION"}:
-            return self.game.value_action()
+            return self.game.expert_action()
         if config in {"R", "RANDOM"}:
-            valid = np.flatnonzero(self.game.valid_action_mask())
+            valid = np.flatnonzero(self.game.action_mask())
             return int(self._rng.choice(valid))
         raise ValueError(f"Unsupported native opponent: {configured_opponent}")
 
@@ -190,22 +166,18 @@ class SingleAgentCppanatronPufferEnv(PufferEnv):
 
     def _full_observation(self) -> np.ndarray:
         assert self.game is not None
-        return full_native_features(
-            self.game,
-            self.map_type,
-            base_player=self.controlled_player,
-        )
+        return self.game.observation(self.controlled_player)
 
     def _get_observation(self) -> Dict[str, Any]:
         assert self.game is not None
         return {
             "observation": self._full_observation(),
-            "action_mask": self.game.valid_action_mask().astype(np.int8, copy=False),
+            "action_mask": self.game.action_mask().astype(np.int8, copy=False),
         }
 
     def _build_info(self) -> Dict[str, Any]:
         assert self.game is not None
-        valid_actions = np.flatnonzero(self.game.valid_action_mask()).tolist()
+        valid_actions = np.flatnonzero(self.game.action_mask()).tolist()
         is_terminal = (
             self.game.winner is not None or self.game.num_turns >= TURNS_LIMIT
         )
@@ -215,7 +187,7 @@ class SingleAgentCppanatronPufferEnv(PufferEnv):
         }
         if self.expert_config is not None:
             info["expert_action"] = (
-                int(valid_actions[0]) if is_terminal else self.game.value_action()
+                int(valid_actions[0]) if is_terminal else self.game.expert_action()
             )
         return info
 
@@ -227,8 +199,8 @@ class SingleAgentCppanatronPufferEnv(PufferEnv):
             return -1.0 if self.game.winner is not None else 0.0
         if self.reward_function != "shaped":
             raise ValueError(f"Unsupported native reward: {self.reward_function}")
-        vps = self.game.player_state(self.controlled_player).actual_victory_points
-        production = _native_production_sum(self.game, self.controlled_player)
+        vps = self.game.player(self.controlled_player).actual_victory_points
+        production = self.game.production(self.controlled_player)
         reward = 0.01 * ((vps - self._prev_vps) / self.vps_to_win)
         reward += 0.0025 * (production - self._prev_production)
         self._prev_vps = vps
@@ -260,18 +232,15 @@ class SingleAgentCppanatronPufferEnv(PufferEnv):
         ]
 
         map_seed, game_seed = derive_map_and_game_seeds(episode_seed)
-        if self.game is None:
-            self.game = NativeGame(
-                self.num_players,
-                self.map_type,
-                seed=game_seed,
-                map_seed=map_seed,
-                number_placement=self.number_placement,
-                discard_limit=self.discard_limit,
-                vps_to_win=self.vps_to_win,
-            )
-        else:
-            self.game.reset(game_seed, map_seed=map_seed)
+        self.game = FlatGame(
+            self.num_players,
+            self.map_type,
+            seed=game_seed,
+            map_seed=map_seed,
+            number_placement=self.number_placement,
+            discard_limit=self.discard_limit,
+            vps_to_win=self.vps_to_win,
+        )
         self._advance_until_controlled_decision()
         observation = self._get_observation()
         info = self._build_info()
@@ -353,9 +322,7 @@ class SingleAgentCppanatronPufferEnv(PufferEnv):
         )
 
     def close(self):
-        if self.game is not None:
-            self.game.close()
-            self.game = None
+        self.game = None
 
 
 def _make_cppanatron_puffer_env(

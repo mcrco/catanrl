@@ -6,15 +6,13 @@ import time
 from dataclasses import dataclass
 from typing import Literal
 
+import cppanatron as cpp
 import numpy as np
 
-from catanrl.envs.cppanatron import NativeGame, NativeMCTSSearch, full_native_features
+from catanrl.envs.cppanatron import FlatGame
 from catanrl.players.nn_mcts_player import _NNMCTSInferenceBackend, _visit_distribution
 
-MapType = Literal["BASE", "MINI", "TOURNAMENT"]
 PolicyTarget = Literal["visits", "completed-q"]
-_OBSERVATION_ATOL = 1e-7
-_OBSERVATION_RTOL = 1e-6
 
 
 @dataclass(frozen=True)
@@ -53,41 +51,31 @@ class NativeSearchResult:
 
 
 def _native_observations_match(left: np.ndarray, right: np.ndarray) -> bool:
-    """Compare native float features while rejecting semantic state drift."""
-    return left.shape == right.shape and bool(
-        np.allclose(
-            left,
-            right,
-            atol=_OBSERVATION_ATOL,
-            rtol=_OBSERVATION_RTOL,
-        )
-    )
+    """Search roots and games share one native observation writer, so equal
+    positions produce identical features and any difference is real drift."""
+    return left.shape == right.shape and bool(np.array_equal(left, right))
 
 
 def step_game_and_reconcile_search(
     *,
-    game: NativeGame,
-    map_type: MapType,
+    game: FlatGame,
     action: int,
-    search: NativeMCTSSearch | None,
-) -> NativeMCTSSearch | None:
+    search: cpp.MCTSSearch | None,
+) -> cpp.MCTSSearch | None:
     """Play an action and retain a subtree only when it exactly follows the game."""
-    retained = search is not None and search.advance(action)
-    if search is not None and not retained:
-        search.close()
+    if search is not None and not search.advance(action):
         search = None
 
     game.step(action)
 
     if search is not None:
-        root_observation, root_player = search.root_observation()
-        source_observation = full_native_features(game, map_type, game.current_player)
+        root_observation = np.empty(search.observation_size, dtype=np.float32)
+        root_player = search.root_observation(root_observation)
         if root_player != game.current_player or not _native_observations_match(
-            root_observation, source_observation
+            root_observation, game.observation(game.current_player)
         ):
             # A canonicalized path can invalidate an otherwise reusable child.
             # A fresh tree is exact and preferable to aborting a self-play batch.
-            search.close()
             search = None
     return search
 
@@ -172,8 +160,7 @@ def _completed_q_policy(
 
 def run_native_search_policy(
     *,
-    game: NativeGame,
-    map_type: MapType,
+    game: FlatGame,
     inference_backend: _NNMCTSInferenceBackend,
     actor_indices: np.ndarray,
     critic_indices: np.ndarray,
@@ -188,7 +175,7 @@ def run_native_search_policy(
     rng: np.random.Generator,
     value_scale: float = 1.0,
     canonical_pruning: bool = False,
-    search: NativeMCTSSearch | None = None,
+    search: cpp.MCTSSearch | None = None,
     policy_target: PolicyTarget = "visits",
     c_visit: float = 50.0,
     c_scale: float = 1.0,
@@ -206,57 +193,42 @@ def run_native_search_policy(
         raise ValueError("c_scale must be finite and non-negative")
 
     started = time.perf_counter()
-    owns_search = search is None
     if search is None:
-        search = NativeMCTSSearch(
-            game,
-            map_type,
-            c_puct=c_puct,
-            seed=search_seed,
-            canonical_pruning=canonical_pruning,
+        search = game.search(c_puct=c_puct, seed=search_seed, canonical_pruning=canonical_pruning)
+    search.reset_metrics()
+    full_state = np.empty(search.observation_size, dtype=np.float32)
+    root_player = search.root_observation(full_state)
+    if root_player != game.current_player:
+        raise RuntimeError("Native MCTS root player does not match its source game")
+    if not _native_observations_match(full_state, game.observation(game.current_player)):
+        raise RuntimeError("Native MCTS root diverged from its source game")
+    root_evaluation = inference_backend.evaluate_leaf(
+        full_state[actor_indices],
+        full_state[critic_indices],
+    )
+    neural_evaluations = 1
+    if not search.root_expanded:
+        search.initialize_root(root_evaluation.policy_logits)
+    if add_noise and dirichlet_frac > 0.0:
+        search.add_root_dirichlet_noise(dirichlet_alpha, dirichlet_frac)
+    leaf_state = np.empty_like(full_state)
+    for _ in range(num_simulations):
+        if search.select_leaf(leaf_state) is None:
+            continue
+        evaluation = inference_backend.evaluate_leaf(
+            leaf_state[actor_indices],
+            leaf_state[critic_indices],
         )
-    try:
-        search.reset_metrics()
-        full_state, root_player = search.root_observation()
-        if root_player != game.current_player:
-            raise RuntimeError("Native MCTS root player does not match its source game")
-        source_state = full_native_features(game, map_type, game.current_player)
-        if not _native_observations_match(full_state, source_state):
-            raise RuntimeError("Native MCTS root diverged from its source game")
-        root_evaluation = inference_backend.evaluate_leaf(
-            full_state[actor_indices],
-            full_state[critic_indices],
+        neural_evaluations += 1
+        search.evaluate_leaf(
+            evaluation.policy_logits,
+            float(evaluation.value) * value_scale,
         )
-        neural_evaluations = 1
-        if not search.root_expanded:
-            search.initialize_root(root_evaluation.policy_logits)
-        if add_noise and dirichlet_frac > 0.0:
-            search.add_root_dirichlet_noise(
-                dirichlet_alpha,
-                dirichlet_frac,
-            )
-        for _ in range(num_simulations):
-            leaf = search.select_leaf()
-            if leaf is None:
-                continue
-            full_leaf_state, _player = leaf
-            evaluation = inference_backend.evaluate_leaf(
-                full_leaf_state[actor_indices],
-                full_leaf_state[critic_indices],
-            )
-            neural_evaluations += 1
-            search.evaluate_leaf(
-                evaluation.policy_logits,
-                float(evaluation.value) * value_scale,
-            )
-        visits = search.root_visits().astype(np.float64)
-        action_values = search.root_action_values()
-        search_metrics = search.metrics()
-    finally:
-        if owns_search:
-            search.close()
+    visits = search.root_visits().astype(np.float64)
+    action_values = search.root_action_values()
+    search_metrics = search.metrics()
 
-    valid_indices = np.flatnonzero(game.valid_action_mask())
+    valid_indices = np.flatnonzero(game.action_mask())
     if valid_indices.size < 2:
         raise ValueError("Native MCTS diagnostics require at least two legal actions")
     valid_visits = visits[valid_indices]

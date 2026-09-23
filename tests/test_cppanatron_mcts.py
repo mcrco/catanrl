@@ -6,6 +6,8 @@ import torch
 from torch import nn
 from typing import cast
 
+import cppanatron as cpp
+
 from catanrl.algorithms.alphazero.native_search import (
     _completed_q_policy,
     _native_observations_match,
@@ -16,12 +18,7 @@ from catanrl.algorithms.alphazero.native_self_play import (
     _play_native_self_play_game,
     generate_native_self_play_data,
 )
-from catanrl.envs.cppanatron import (
-    NativeGame,
-    NativeMCTSSearch,
-    find_cppanatron_library,
-    full_native_features,
-)
+from catanrl.envs.cppanatron import FlatGame
 from catanrl.features.catanatron_utils import get_observation_indices_from_full
 from catanrl.models.heads import FlatPolicyHead
 from catanrl.models.wrappers import PolicyNetworkWrapper, ValueNetworkWrapper
@@ -29,54 +26,53 @@ from catanrl.utils.seeding import derive_map_and_game_seeds
 from nn_mcts_helpers import MockInferenceBackend
 
 
-@pytest.fixture(scope="module", autouse=True)
-def _require_native_library():
-    try:
-        find_cppanatron_library()
-    except FileNotFoundError as exc:
-        pytest.skip(str(exc))
+def _root_observation(search) -> tuple[np.ndarray, int]:
+    observation = np.empty(search.observation_size, dtype=np.float32)
+    return observation, search.root_observation(observation)
 
 
 def _run_search(seed: int):
-    game = NativeGame(
-        2,
-        "MINI",
-        seed=91,
-        map_seed=73,
-        number_placement="random",
-        vps_to_win=6,
-    )
+    game = FlatGame(2, "MINI", seed=91, map_seed=73, number_placement="random", vps_to_win=6)
     logits = np.linspace(-1.0, 1.0, game.action_space_size, dtype=np.float32)
     leaf_players: list[int] = []
-    try:
-        with NativeMCTSSearch(game, "MINI", c_puct=1.5, seed=seed) as search:
-            root_observation, root_player = search.root_observation()
-            assert root_player == game.current_player
-            np.testing.assert_array_equal(
-                root_observation,
-                full_native_features(game, "MINI", game.current_player),
-            )
-            search.initialize_root(logits)
-            search.add_root_dirichlet_noise(0.3, 0.25)
-            for _ in range(24):
-                leaf = search.select_leaf()
-                if leaf is None:
-                    continue
-                observation, player = leaf
-                assert observation.dtype == np.float32
-                assert observation.shape == (search.observation_size,)
-                assert np.isfinite(observation).all()
-                assert 0 <= player < game.num_players
-                leaf_players.append(player)
-                search.evaluate_leaf(logits, value=0.0)
-            visits = search.root_visits()
-            action_values = search.root_action_values()
-            assert action_values.shape == visits.shape
-            assert np.all(np.isfinite(action_values[visits > 0]))
-            assert np.all(np.isnan(action_values[visits == 0]))
-            return visits, np.asarray(leaf_players), search.metrics()
-    finally:
-        game.close()
+    search = game.search(c_puct=1.5, seed=seed)
+    root_observation, root_player = _root_observation(search)
+    assert root_player == game.current_player
+    np.testing.assert_array_equal(root_observation, game.observation(game.current_player))
+    search.initialize_root(logits)
+    search.add_root_dirichlet_noise(0.3, 0.25)
+    leaf = np.full(search.observation_size, np.nan, dtype=np.float32)
+    for _ in range(24):
+        player = search.select_leaf(leaf)
+        if player is None:
+            continue
+        assert np.isfinite(leaf).all()
+        assert 0 <= player < game.num_players
+        leaf_players.append(player)
+        search.evaluate_leaf(logits, value=0.0)
+    visits = search.root_visits()
+    action_values = search.root_action_values()
+    assert action_values.shape == visits.shape
+    assert np.all(np.isfinite(action_values[visits > 0]))
+    assert np.all(np.isnan(action_values[visits == 0]))
+    return visits, np.asarray(leaf_players), search.metrics()
+
+
+def _metrics_tuple(metrics) -> tuple:
+    return tuple(
+        getattr(metrics, name)
+        for name in (
+            "simulations",
+            "principal_variation_depth",
+            "maximum_depth",
+            "mean_depth",
+            "root_value",
+            "retained_root_visits",
+            "pruned_actions",
+            "coalesced_outcomes",
+            "tree_reused",
+        )
+    )
 
 
 def test_native_mcts_search_is_deterministic_and_visits_legal_actions():
@@ -85,136 +81,94 @@ def test_native_mcts_search_is_deterministic_and_visits_legal_actions():
 
     np.testing.assert_array_equal(first_visits, second_visits)
     np.testing.assert_array_equal(first_players, second_players)
-    assert first_metrics == second_metrics
+    assert _metrics_tuple(first_metrics) == _metrics_tuple(second_metrics)
     assert int(first_visits.sum()) == 24
     assert first_metrics.simulations == 24
     assert 1 <= first_metrics.principal_variation_depth <= first_metrics.maximum_depth
     assert 1.0 <= first_metrics.mean_depth <= first_metrics.maximum_depth
     assert first_metrics.root_value == pytest.approx(0.0)
 
-    game = NativeGame(2, "MINI", seed=91, map_seed=73, number_placement="random")
-    try:
-        legal = game.valid_action_mask()
-        assert np.all(first_visits[~legal] == 0)
-    finally:
-        game.close()
+    game = FlatGame(2, "MINI", seed=91, map_seed=73, number_placement="random")
+    assert np.all(first_visits[~game.action_mask()] == 0)
 
 
 def test_native_mcts_rejects_wrong_policy_shape():
-    game = NativeGame(2, "MINI", seed=5, map_seed=7)
-    try:
-        with NativeMCTSSearch(game, "MINI") as search:
-            with pytest.raises(ValueError, match="Expected policy logits"):
-                search.initialize_root(np.zeros(game.action_space_size - 1))
-    finally:
-        game.close()
+    game = FlatGame(2, "MINI", seed=5, map_seed=7)
+    with pytest.raises(ValueError, match="flat action space"):
+        game.search().initialize_root(np.zeros(game.action_space_size - 1, dtype=np.float32))
 
 
 def test_native_mcts_reuses_a_deterministic_played_subtree():
-    game = NativeGame(2, "MINI", seed=59, map_seed=61)
+    game = FlatGame(2, "MINI", seed=59, map_seed=61)
     logits = np.zeros(game.action_space_size, dtype=np.float32)
     backend = MockInferenceBackend(game.action_space_size, value=0.4)
     actor_indices = get_observation_indices_from_full(2, "MINI", "private")
     critic_indices = get_observation_indices_from_full(2, "MINI", "full")
-    try:
-        with NativeMCTSSearch(
-            game,
-            "MINI",
-            seed=67,
-            canonical_pruning=True,
-        ) as search:
-            search.initialize_root(logits)
-            for _ in range(12):
-                leaf = search.select_leaf()
-                if leaf is not None:
-                    search.evaluate_leaf(logits, 0.2)
-            action = int(np.argmax(search.root_visits()))
-            retained_search = step_game_and_reconcile_search(
-                game=game,
-                map_type="MINI",
-                action=action,
-                search=search,
-            )
-            assert retained_search is search
-            root_observation, root_player = search.root_observation()
-            assert root_player == game.current_player
-            np.testing.assert_array_equal(
-                root_observation,
-                full_native_features(game, "MINI", game.current_player),
-            )
+    search = game.search(seed=67, canonical_pruning=True)
+    search.initialize_root(logits)
+    leaf = np.empty(search.observation_size, dtype=np.float32)
+    for _ in range(12):
+        if search.select_leaf(leaf) is not None:
+            search.evaluate_leaf(logits, 0.2)
+    action = int(np.argmax(search.root_visits()))
+    retained_search = step_game_and_reconcile_search(game=game, action=action, search=search)
+    assert retained_search is search
+    root_observation, root_player = _root_observation(search)
+    assert root_player == game.current_player
+    np.testing.assert_array_equal(root_observation, game.observation(game.current_player))
 
-            result = run_native_search_policy(
-                game=game,
-                map_type="MINI",
-                inference_backend=backend,
-                actor_indices=actor_indices,
-                critic_indices=critic_indices,
-                num_simulations=4,
-                c_puct=1.5,
-                search_seed=71,
-                add_noise=False,
-                dirichlet_alpha=0.3,
-                dirichlet_frac=0.0,
-                action_temperature=0.0,
-                target_temperature=1.0,
-                rng=np.random.default_rng(73),
-                value_scale=0.5,
-                canonical_pruning=True,
-                search=search,
-            )
-            assert result.diagnostics.tree_reused == 1.0
-            assert result.diagnostics.retained_root_visits > 0
-            assert result.diagnostics.simulations == 4
-            assert result.diagnostics.backed_up_network_value == pytest.approx(0.2)
-    finally:
-        game.close()
+    result = run_native_search_policy(
+        game=game,
+        inference_backend=backend,
+        actor_indices=actor_indices,
+        critic_indices=critic_indices,
+        num_simulations=4,
+        c_puct=1.5,
+        search_seed=71,
+        add_noise=False,
+        dirichlet_alpha=0.3,
+        dirichlet_frac=0.0,
+        action_temperature=0.0,
+        target_temperature=1.0,
+        rng=np.random.default_rng(73),
+        value_scale=0.5,
+        canonical_pruning=True,
+        search=search,
+    )
+    assert result.diagnostics.tree_reused == 1.0
+    assert result.diagnostics.retained_root_visits > 0
+    assert result.diagnostics.simulations == 4
+    assert result.diagnostics.backed_up_network_value == pytest.approx(0.2)
 
 
 def test_reused_search_divergence_falls_back_to_fresh_tree() -> None:
-    game = NativeGame(2, "MINI", seed=79, map_seed=83)
+    game = FlatGame(2, "MINI", seed=79, map_seed=83)
 
     class _DivergedSearch:
-        closed = False
+        observation_size = game.observation(0).size
 
         def advance(self, _action: int) -> bool:
             return True
 
-        def root_observation(self) -> tuple[np.ndarray, int]:
-            observation = full_native_features(game, "MINI", game.current_player)
-            return np.zeros_like(observation), game.current_player
+        def root_observation(self, out: np.ndarray) -> int:
+            out[:] = 0.0
+            return game.current_player
 
-        def close(self) -> None:
-            self.closed = True
-
-    search = _DivergedSearch()
-    action = int(np.flatnonzero(game.valid_action_mask())[0])
-    try:
-        reconciled = step_game_and_reconcile_search(
-            game=game,
-            map_type="MINI",
-            action=action,
-            search=cast(NativeMCTSSearch, search),
-        )
-    finally:
-        game.close()
-
+    action = int(np.flatnonzero(game.action_mask())[0])
+    reconciled = step_game_and_reconcile_search(
+        game=game,
+        action=action,
+        search=cast(cpp.MCTSSearch, _DivergedSearch()),
+    )
     assert reconciled is None
-    assert search.closed
 
 
-def test_native_observation_contract_tolerates_only_float_roundoff() -> None:
-    reference = np.array([0.0, 1.0, 0.3055555522441864], dtype=np.float32)
-    copied = np.array([0.0, 1.0, 0.3055555820465088], dtype=np.float32)
-
-    assert not np.array_equal(reference, copied)
-    assert _native_observations_match(reference, copied)
-    assert not _native_observations_match(reference, copied + 1e-3)
-
-
-def test_base_native_search_accepts_known_game_copy_roundoff() -> None:
+def test_native_search_roots_observe_exactly_like_their_game() -> None:
+    # This position once differed by float roundoff when Python recomputed the
+    # features; both sides now come from the native writer.
     episode_seed = 6855958560543738072
     map_seed, game_seed = derive_map_and_game_seeds(episode_seed)
-    game = NativeGame(
+    game = FlatGame(
         2,
         "BASE",
         seed=game_seed,
@@ -223,20 +177,17 @@ def test_base_native_search_accepts_known_game_copy_roundoff() -> None:
         discard_limit=9,
         vps_to_win=15,
     )
-    try:
-        with NativeMCTSSearch(game, "BASE", seed=episode_seed) as search:
-            copied, player = search.root_observation()
-        reference = full_native_features(game, "BASE", game.current_player)
-    finally:
-        game.close()
+    copied, player = _root_observation(game.search(seed=episode_seed))
+    reference = game.observation(game.current_player)
 
     assert player == 0
-    assert not np.array_equal(copied, reference)
+    np.testing.assert_array_equal(copied, reference)
     assert _native_observations_match(copied, reference)
+    assert not _native_observations_match(copied, reference + 1e-6)
 
 
 def test_native_search_policy_reports_depth_and_policy_effect():
-    game = NativeGame(2, "MINI", seed=31, map_seed=37)
+    game = FlatGame(2, "MINI", seed=31, map_seed=37)
     action_space_size = game.action_space_size
     backend = MockInferenceBackend(
         action_space_size,
@@ -245,25 +196,21 @@ def test_native_search_policy_reports_depth_and_policy_effect():
     )
     actor_indices = get_observation_indices_from_full(2, "MINI", "private")
     critic_indices = get_observation_indices_from_full(2, "MINI", "full")
-    try:
-        result = run_native_search_policy(
-            game=game,
-            map_type="MINI",
-            inference_backend=backend,
-            actor_indices=actor_indices,
-            critic_indices=critic_indices,
-            num_simulations=16,
-            c_puct=1.5,
-            search_seed=41,
-            add_noise=False,
-            dirichlet_alpha=0.3,
-            dirichlet_frac=0.0,
-            action_temperature=0.0,
-            target_temperature=1.0,
-            rng=np.random.default_rng(43),
-        )
-    finally:
-        game.close()
+    result = run_native_search_policy(
+        game=game,
+        inference_backend=backend,
+        actor_indices=actor_indices,
+        critic_indices=critic_indices,
+        num_simulations=16,
+        c_puct=1.5,
+        search_seed=41,
+        add_noise=False,
+        dirichlet_alpha=0.3,
+        dirichlet_frac=0.0,
+        action_temperature=0.0,
+        target_temperature=1.0,
+        rng=np.random.default_rng(43),
+    )
 
     diagnostics = result.diagnostics
     assert diagnostics.simulations == 16

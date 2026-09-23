@@ -28,7 +28,7 @@ src/catanrl/
   experiment_store.py  # save/load self-describing experiments (see below)
   models/              # network components: backbones, heads, builders, wrappers
   envs/puffer/         # PufferLib env wrappers (single- and multi-agent), rewards, rollouts
-  envs/cppanatron/     # C ABI binding, feature adapter, and native PufferLib env
+  envs/cppanatron/     # FlatGame (flat-action view of cppanatron) and native PufferLib envs
   features/            # turn Catanatron game states into model observations
   beliefs/             # opponent hidden-info modeling (dev-card belief, determinization)
   players/             # bots that plug into Catanatron (policy, value, MCTS, alpha-beta)
@@ -51,13 +51,14 @@ Training entrypoints are exposed as console scripts (see `pyproject.toml`):
 
 ### cppanatron backend
 
-Initialize both engine submodules and build the native shared library:
+Initialize both engine submodules. `cppanatron` is an editable dependency, so
+`uv sync` builds its nanobind extension and rebuilds it whenever engine sources
+change:
 
 ```bash
 git submodule update --init --recursive
-cmake -S cppanatron -B cppanatron/build -DCMAKE_BUILD_TYPE=Release
-cmake --build cppanatron/build --parallel
-ctest --test-dir cppanatron/build --output-on-failure
+uv sync
+uv run pytest cppanatron/tests/python   # Rules and differential parity vs Catanatron.
 ```
 
 DAgger collection defaults to the Python engine. Select the C++ engine with
@@ -1015,9 +1016,6 @@ PUCT tree while retaining the existing PyTorch models, central batched
 inference server, replay buffer, optimizer, checkpoint, and promotion logic:
 
 ```bash
-cmake -S cppanatron -B cppanatron/build-make -G "Unix Makefiles"
-cmake --build cppanatron/build-make
-
 uv run train-alphazero \
   --mode iterate --config configs/models/xdim-flat-2p-full-sep.yaml \
   --self-play-backend cppanatron \

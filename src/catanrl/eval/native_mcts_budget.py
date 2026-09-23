@@ -16,7 +16,9 @@ from catanrl.algorithms.alphazero.native_search import (
     step_game_and_reconcile_search,
 )
 from catanrl.algorithms.alphazero.parallel_self_play import run_inference_server_workers
-from catanrl.envs.cppanatron import NativeGame, NativeMCTSSearch, full_native_features
+import cppanatron as cpp
+
+from catanrl.envs.cppanatron import FlatGame
 from catanrl.envs.cppanatron.puffer_env import TURNS_LIMIT
 from catanrl.eval.reporting import wilson_interval
 from catanrl.features.catanatron_utils import (
@@ -256,35 +258,32 @@ def _indices(args_dict: dict[str, Any]) -> tuple[np.ndarray, np.ndarray]:
 
 
 def _raw_policy_action(
-    game: NativeGame,
-    map_type: MapType,
+    game: FlatGame,
     actor_indices: np.ndarray,
     critic_indices: np.ndarray,
     inference_backend: _RemoteNNMCTSInferenceBackend,
 ) -> int:
-    full_state = full_native_features(game, map_type, game.current_player)
+    full_state = game.observation(game.current_player)
     evaluation = inference_backend.evaluate_leaf(
         full_state[actor_indices],
         full_state[critic_indices],
     )
-    valid_indices = np.flatnonzero(game.valid_action_mask())
+    valid_indices = np.flatnonzero(game.action_mask())
     return int(valid_indices[int(np.argmax(evaluation.policy_logits[valid_indices]))])
 
 
 def _game_opponent_action(
-    game: NativeGame,
+    game: FlatGame,
     opponent: GameOpponent,
-    map_type: MapType,
     actor_indices: np.ndarray,
     critic_indices: np.ndarray,
     inference_backend: _RemoteNNMCTSInferenceBackend,
 ) -> int:
     if opponent == "value":
-        return game.value_action()
+        return game.expert_action()
     if opponent == "raw":
         return _raw_policy_action(
             game,
-            map_type,
             actor_indices,
             critic_indices,
             inference_backend,
@@ -294,7 +293,7 @@ def _game_opponent_action(
 
 def _search(
     *,
-    game: NativeGame,
+    game: FlatGame,
     budget: int,
     decision_index: int,
     episode_seed: int,
@@ -302,11 +301,10 @@ def _search(
     actor_indices: np.ndarray,
     critic_indices: np.ndarray,
     inference_backend: _RemoteNNMCTSInferenceBackend,
-    search: NativeMCTSSearch | None = None,
+    search: cpp.MCTSSearch | None = None,
 ):
     return run_native_search_policy(
         game=game,
-        map_type=args_dict["map_type"],
         inference_backend=inference_backend,
         actor_indices=actor_indices,
         critic_indices=critic_indices,
@@ -345,7 +343,7 @@ def _play_budget_game(
     diagnostics = SearchDiagnosticsAccumulator()
     calibration_rows: list[tuple[float, int]] = []
     calibration = CriticCalibrationAccumulator()
-    game = NativeGame(
+    game = FlatGame(
         2,
         args_dict["map_type"],
         seed=game_seed,
@@ -355,88 +353,79 @@ def _play_budget_game(
         vps_to_win=int(args_dict["vps_to_win"]),
     )
     decision_index = 0
-    search: NativeMCTSSearch | None = None
-    try:
-        while game.winner is None and game.num_turns < int(args_dict["turns_limit"]):
-            valid_indices = np.flatnonzero(game.valid_action_mask())
-            if valid_indices.size == 0:
-                raise RuntimeError("Native budget game has no legal action")
-            if valid_indices.size == 1:
-                action = int(valid_indices[0])
-            elif game.current_player == mcts_seat:
-                if search is None and bool(args_dict.get("tree_reuse", False)):
-                    search = NativeMCTSSearch(
-                        game,
-                        args_dict["map_type"],
-                        c_puct=float(args_dict["c_puct"]),
-                        seed=derive_seed(
-                            episode_seed,
-                            "native_budget_search",
-                            decision_index,
-                        ),
-                        canonical_pruning=bool(args_dict.get("canonical_pruning", False)),
-                    )
-                search_result = _search(
-                    game=game,
-                    budget=budget,
-                    decision_index=decision_index,
-                    episode_seed=episode_seed,
-                    args_dict=args_dict,
-                    actor_indices=actor_indices,
-                    critic_indices=critic_indices,
-                    inference_backend=inference_backend,
-                    search=search,
+    search: cpp.MCTSSearch | None = None
+    while game.winner is None and game.num_turns < int(args_dict["turns_limit"]):
+        valid_indices = np.flatnonzero(game.action_mask())
+        if valid_indices.size == 0:
+            raise RuntimeError("Native budget game has no legal action")
+        if valid_indices.size == 1:
+            action = int(valid_indices[0])
+        elif game.current_player == mcts_seat:
+            if search is None and bool(args_dict.get("tree_reuse", False)):
+                search = game.search(
+                    c_puct=float(args_dict["c_puct"]),
+                    seed=derive_seed(
+                        episode_seed,
+                        "native_budget_search",
+                        decision_index,
+                    ),
+                    canonical_pruning=bool(args_dict.get("canonical_pruning", False)),
                 )
-                diagnostics.add(search_result.diagnostics)
-                calibration_rows.append(
-                    (search_result.diagnostics.network_value, game.current_player)
-                )
-                action = search_result.action
-            else:
-                action = _game_opponent_action(
-                    game,
-                    args_dict["game_opponent"],
-                    args_dict["map_type"],
-                    actor_indices,
-                    critic_indices,
-                    inference_backend,
-                )
-            search = step_game_and_reconcile_search(
+            search_result = _search(
                 game=game,
-                map_type=args_dict["map_type"],
-                action=action,
+                budget=budget,
+                decision_index=decision_index,
+                episode_seed=episode_seed,
+                args_dict=args_dict,
+                actor_indices=actor_indices,
+                critic_indices=critic_indices,
+                inference_backend=inference_backend,
                 search=search,
             )
-            decision_index += 1
-
-        winner = game.winner
-        for prediction, player in calibration_rows:
-            target = 0.0 if winner is None else (1.0 if winner == player else -1.0)
-            calibration.add(prediction, target)
-        mcts_vps = game.player_state(mcts_seat).actual_victory_points
-        return (
-            {
-                "budget": budget,
-                "seat": "first" if mcts_seat == 0 else "second",
-                "episode_seed": episode_seed,
-                "win": winner == mcts_seat,
-                "draw": winner is None,
-                "winner": winner,
-                "vps": mcts_vps,
-                "total_vps": sum(
-                    game.player_state(player).actual_victory_points for player in range(2)
-                ),
-                "turns": game.num_turns,
-                "actions": decision_index,
-                "opponent": args_dict["game_opponent"],
-            },
-            diagnostics,
-            calibration,
+            diagnostics.add(search_result.diagnostics)
+            calibration_rows.append(
+                (search_result.diagnostics.network_value, game.current_player)
+            )
+            action = search_result.action
+        else:
+            action = _game_opponent_action(
+                game,
+                args_dict["game_opponent"],
+                actor_indices,
+                critic_indices,
+                inference_backend,
+            )
+        search = step_game_and_reconcile_search(
+            game=game,
+            action=action,
+            search=search,
         )
-    finally:
-        if search is not None:
-            search.close()
-        game.close()
+        decision_index += 1
+
+    winner = game.winner
+    for prediction, player in calibration_rows:
+        target = 0.0 if winner is None else (1.0 if winner == player else -1.0)
+        calibration.add(prediction, target)
+    mcts_vps = game.player(mcts_seat).actual_victory_points
+    return (
+        {
+            "budget": budget,
+            "seat": "first" if mcts_seat == 0 else "second",
+            "episode_seed": episode_seed,
+            "win": winner == mcts_seat,
+            "draw": winner is None,
+            "winner": winner,
+            "vps": mcts_vps,
+            "total_vps": sum(
+                game.player(player).actual_victory_points for player in range(2)
+            ),
+            "turns": game.num_turns,
+            "actions": decision_index,
+            "opponent": args_dict["game_opponent"],
+        },
+        diagnostics,
+        calibration,
+    )
 
 
 def _game_worker_main(
@@ -505,7 +494,7 @@ def _probe_worker_main(
         actor_indices, critic_indices = _indices(args_dict)
         for game_index, episode_seed in indexed_episode_seeds:
             map_seed, game_seed = derive_map_and_game_seeds(episode_seed)
-            game = NativeGame(
+            game = FlatGame(
                 2,
                 args_dict["map_type"],
                 seed=game_seed,
@@ -516,49 +505,45 @@ def _probe_worker_main(
             )
             decision_index = 0
             probe_index = 0
-            try:
-                while game.winner is None and game.num_turns < int(args_dict["turns_limit"]):
-                    valid_indices = np.flatnonzero(game.valid_action_mask())
-                    if valid_indices.size == 0:
-                        raise RuntimeError("Native probe trajectory has no legal action")
-                    if valid_indices.size == 1:
-                        action = int(valid_indices[0])
-                    else:
-                        if probe_index % int(args_dict["probe_stride"]) == 0:
-                            for budget in budgets:
-                                search_result = _search(
-                                    game=game,
-                                    budget=int(budget),
-                                    decision_index=decision_index,
-                                    episode_seed=episode_seed,
-                                    args_dict=args_dict,
-                                    actor_indices=actor_indices,
-                                    critic_indices=critic_indices,
-                                    inference_backend=inference_backend,
-                                )
-                                position_records.append(
-                                    {
-                                        "game_index": game_index,
-                                        "episode_seed": episode_seed,
-                                        "decision_index": decision_index,
-                                        "turn": game.num_turns,
-                                        "player": game.current_player,
-                                        "budget": int(budget),
-                                        **asdict(search_result.diagnostics),
-                                    }
-                                )
-                        action = _raw_policy_action(
-                            game,
-                            args_dict["map_type"],
-                            actor_indices,
-                            critic_indices,
-                            inference_backend,
-                        )
-                        probe_index += 1
-                    game.step(action)
-                    decision_index += 1
-            finally:
-                game.close()
+            while game.winner is None and game.num_turns < int(args_dict["turns_limit"]):
+                valid_indices = np.flatnonzero(game.action_mask())
+                if valid_indices.size == 0:
+                    raise RuntimeError("Native probe trajectory has no legal action")
+                if valid_indices.size == 1:
+                    action = int(valid_indices[0])
+                else:
+                    if probe_index % int(args_dict["probe_stride"]) == 0:
+                        for budget in budgets:
+                            search_result = _search(
+                                game=game,
+                                budget=int(budget),
+                                decision_index=decision_index,
+                                episode_seed=episode_seed,
+                                args_dict=args_dict,
+                                actor_indices=actor_indices,
+                                critic_indices=critic_indices,
+                                inference_backend=inference_backend,
+                            )
+                            position_records.append(
+                                {
+                                    "game_index": game_index,
+                                    "episode_seed": episode_seed,
+                                    "decision_index": decision_index,
+                                    "turn": game.num_turns,
+                                    "player": game.current_player,
+                                    "budget": int(budget),
+                                    **asdict(search_result.diagnostics),
+                                }
+                            )
+                    action = _raw_policy_action(
+                        game,
+                        actor_indices,
+                        critic_indices,
+                        inference_backend,
+                    )
+                    probe_index += 1
+                game.step(action)
+                decision_index += 1
         result_queue.put(
             {
                 "worker_id": worker_id,

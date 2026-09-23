@@ -12,7 +12,9 @@ from typing import Literal
 import numpy as np
 import torch
 
-from catanrl.envs.cppanatron import NativeGame, NativeMCTSSearch
+import cppanatron as cpp
+
+from catanrl.envs.cppanatron import FlatGame
 from catanrl.envs.cppanatron.puffer_env import TURNS_LIMIT
 from catanrl.features.catanatron_utils import (
     ActorObservationLevel,
@@ -75,8 +77,7 @@ def _blend_terminal_search_value(
 
 def _native_search_policy(
     *,
-    game: NativeGame,
-    map_type: MapType,
+    game: FlatGame,
     inference_backend: _NNMCTSInferenceBackend,
     actor_indices: np.ndarray,
     critic_indices: np.ndarray,
@@ -91,14 +92,13 @@ def _native_search_policy(
     rng: np.random.Generator,
     value_scale: float = 1.0,
     canonical_pruning: bool = False,
-    search: NativeMCTSSearch | None = None,
+    search: cpp.MCTSSearch | None = None,
     policy_target: PolicyTarget = "visits",
     c_visit: float = 50.0,
     c_scale: float = 1.0,
 ) -> tuple[np.ndarray, int, np.ndarray, float]:
     result = run_native_search_policy(
         game=game,
-        map_type=map_type,
         inference_backend=inference_backend,
         actor_indices=actor_indices,
         critic_indices=critic_indices,
@@ -149,7 +149,7 @@ def _play_native_self_play_game(
     )
     map_seed, game_seed = derive_map_and_game_seeds(episode_seed)
     rng = np.random.default_rng(derive_seed(episode_seed, "native_self_play_actions"))
-    game = NativeGame(
+    game = FlatGame(
         num_players,
         map_type,
         seed=game_seed,
@@ -160,93 +160,84 @@ def _play_native_self_play_game(
     )
     samples: list[_NativeSelfPlaySample] = []
     move_number = 0
-    search: NativeMCTSSearch | None = None
+    search: cpp.MCTSSearch | None = None
     turns_limit = int(args_dict.get("turns_limit", TURNS_LIMIT))
-    try:
-        while game.winner is None and game.num_turns < turns_limit:
-            current_player = game.current_player
-            action_mask = game.valid_action_mask()
-            valid_actions = np.flatnonzero(action_mask)
-            if valid_actions.size == 0:
-                raise RuntimeError("Native self-play position has no legal action")
-            if valid_actions.size == 1:
-                action = int(valid_actions[0])
-            else:
-                temperature = (
-                    float(args_dict["temperature"])
-                    if move_number < int(args_dict["temperature_drop_move"])
-                    else float(args_dict["final_temperature"])
-                )
-                if search is None and bool(args_dict.get("tree_reuse", False)):
-                    search = NativeMCTSSearch(
-                        game,
-                        map_type,
-                        c_puct=float(args_dict["c_puct"]),
-                        seed=derive_seed(episode_seed, "native_mcts", move_number),
-                        canonical_pruning=bool(args_dict.get("canonical_pruning", False)),
-                    )
-                full_search_probability = float(args_dict.get("full_search_probability", 1.0))
-                full_search = full_search_probability >= 1.0 or (
-                    rng.random() < full_search_probability
-                )
-                num_simulations = (
-                    int(args_dict["num_simulations"])
-                    if full_search
-                    else int(args_dict.get("fast_simulations", args_dict["num_simulations"]))
-                )
-                policy, action, full_state, search_value = _native_search_policy(
-                    game=game,
-                    map_type=map_type,
-                    inference_backend=inference_backend,
-                    actor_indices=actor_indices,
-                    critic_indices=critic_indices,
-                    num_simulations=num_simulations,
-                    c_puct=float(args_dict["c_puct"]),
-                    search_seed=derive_seed(
-                        episode_seed,
-                        "native_mcts",
-                        move_number,
-                    ),
-                    add_noise=move_number < int(args_dict["noise_turns"]),
-                    dirichlet_alpha=float(args_dict["dirichlet_alpha"]),
-                    dirichlet_frac=float(args_dict["dirichlet_frac"]),
-                    action_temperature=max(temperature, 1e-3),
-                    target_temperature=(
-                        None
-                        if args_dict["target_temperature"] is None
-                        else float(args_dict["target_temperature"])
-                    ),
-                    rng=rng,
-                    value_scale=float(args_dict.get("value_scale", 1.0)),
-                    canonical_pruning=bool(args_dict.get("canonical_pruning", False)),
-                    search=search,
-                    policy_target=args_dict.get("policy_target", "visits"),
-                    c_visit=float(args_dict.get("c_visit", 50.0)),
-                    c_scale=float(args_dict.get("c_scale", 1.0)),
-                )
-                samples.append(
-                    _NativeSelfPlaySample(
-                        actor_state=full_state[actor_indices].copy(),
-                        critic_state=full_state[critic_indices].copy(),
-                        policy=policy,
-                        action_mask=action_mask.copy(),
-                        player=current_player,
-                        search_value=search_value,
-                        full_search=full_search,
-                    )
-                )
-            search = step_game_and_reconcile_search(
-                game=game,
-                map_type=map_type,
-                action=action,
-                search=search,
+    while game.winner is None and game.num_turns < turns_limit:
+        current_player = game.current_player
+        action_mask = game.action_mask()
+        valid_actions = np.flatnonzero(action_mask)
+        if valid_actions.size == 0:
+            raise RuntimeError("Native self-play position has no legal action")
+        if valid_actions.size == 1:
+            action = int(valid_actions[0])
+        else:
+            temperature = (
+                float(args_dict["temperature"])
+                if move_number < int(args_dict["temperature_drop_move"])
+                else float(args_dict["final_temperature"])
             )
-            move_number += 1
-        return samples, game.winner
-    finally:
-        if search is not None:
-            search.close()
-        game.close()
+            if search is None and bool(args_dict.get("tree_reuse", False)):
+                search = game.search(
+                    c_puct=float(args_dict["c_puct"]),
+                    seed=derive_seed(episode_seed, "native_mcts", move_number),
+                    canonical_pruning=bool(args_dict.get("canonical_pruning", False)),
+                )
+            full_search_probability = float(args_dict.get("full_search_probability", 1.0))
+            full_search = full_search_probability >= 1.0 or (
+                rng.random() < full_search_probability
+            )
+            num_simulations = (
+                int(args_dict["num_simulations"])
+                if full_search
+                else int(args_dict.get("fast_simulations", args_dict["num_simulations"]))
+            )
+            policy, action, full_state, search_value = _native_search_policy(
+                game=game,
+                inference_backend=inference_backend,
+                actor_indices=actor_indices,
+                critic_indices=critic_indices,
+                num_simulations=num_simulations,
+                c_puct=float(args_dict["c_puct"]),
+                search_seed=derive_seed(
+                    episode_seed,
+                    "native_mcts",
+                    move_number,
+                ),
+                add_noise=move_number < int(args_dict["noise_turns"]),
+                dirichlet_alpha=float(args_dict["dirichlet_alpha"]),
+                dirichlet_frac=float(args_dict["dirichlet_frac"]),
+                action_temperature=max(temperature, 1e-3),
+                target_temperature=(
+                    None
+                    if args_dict["target_temperature"] is None
+                    else float(args_dict["target_temperature"])
+                ),
+                rng=rng,
+                value_scale=float(args_dict.get("value_scale", 1.0)),
+                canonical_pruning=bool(args_dict.get("canonical_pruning", False)),
+                search=search,
+                policy_target=args_dict.get("policy_target", "visits"),
+                c_visit=float(args_dict.get("c_visit", 50.0)),
+                c_scale=float(args_dict.get("c_scale", 1.0)),
+            )
+            samples.append(
+                _NativeSelfPlaySample(
+                    actor_state=full_state[actor_indices].copy(),
+                    critic_state=full_state[critic_indices].copy(),
+                    policy=policy,
+                    action_mask=action_mask.copy(),
+                    player=current_player,
+                    search_value=search_value,
+                    full_search=full_search,
+                )
+            )
+        search = step_game_and_reconcile_search(
+            game=game,
+            action=action,
+            search=search,
+        )
+        move_number += 1
+    return samples, game.winner
 
 
 def _native_training_worker_main(
