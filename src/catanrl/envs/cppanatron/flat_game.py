@@ -8,8 +8,8 @@ full structured engine API.
 
 from __future__ import annotations
 
-import numpy as np
 import cppanatron as cpp
+import numpy as np
 from cppanatron.catanatron import observation_layout
 
 from catanrl.envs.puffer.common import MapType

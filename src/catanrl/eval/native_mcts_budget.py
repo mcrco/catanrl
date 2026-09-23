@@ -7,6 +7,7 @@ import traceback
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal, Sequence
 
+import cppanatron as cpp
 import numpy as np
 import torch
 
@@ -16,8 +17,6 @@ from catanrl.algorithms.alphazero.native_search import (
     step_game_and_reconcile_search,
 )
 from catanrl.algorithms.alphazero.parallel_self_play import run_inference_server_workers
-import cppanatron as cpp
-
 from catanrl.envs.cppanatron import FlatGame
 from catanrl.envs.cppanatron.puffer_env import TURNS_LIMIT
 from catanrl.eval.reporting import wilson_interval

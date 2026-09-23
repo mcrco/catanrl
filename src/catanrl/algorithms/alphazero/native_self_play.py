@@ -9,10 +9,9 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
 
+import cppanatron as cpp
 import numpy as np
 import torch
-
-import cppanatron as cpp
 
 from catanrl.envs.cppanatron import FlatGame
 from catanrl.envs.cppanatron.puffer_env import TURNS_LIMIT
