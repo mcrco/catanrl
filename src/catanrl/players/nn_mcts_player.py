@@ -128,6 +128,35 @@ class _Node:
         return (self.value_sum + self.virtual_value_sum) / visits
 
 
+def _action_q(
+    to_play: Color,
+    children: Sequence[tuple[_Node, float]],
+) -> float:
+    """Probability-weighted Q over visited chance outcomes only.
+
+    Unvisited outcomes are excluded rather than scored as 0, so chance
+    actions (robber steals, buy-dev-card) are not shrunk relative to
+    deterministic siblings. Each child's search_value is from that
+    child's to_play perspective and is re-oriented to ``to_play``.
+    """
+    visited = [
+        (child, probability)
+        for child, probability in children
+        if child.search_visits > 0
+    ]
+    visited_mass = sum(probability for _, probability in visited)
+    if visited_mass <= 0:
+        return 0.0
+    return (
+        sum(
+            probability
+            * (child.search_value if child.to_play == to_play else -child.search_value)
+            for child, probability in visited
+        )
+        / visited_mass
+    )
+
+
 @dataclass
 class _LeafEvaluation:
     policy_logits: np.ndarray
@@ -1002,17 +1031,7 @@ class NNMCTSPlayer(Player):
 
         for action, children in node.children.items():
             action_visits = sum(child.search_visits for child, _ in children)
-            if action_visits > 0:
-                # Each outcome child's search_value is from that child's to_play
-                # perspective; re-orient it to this node's perspective before
-                # averaging (negate when the player to move differs).
-                q_value = sum(
-                    probability
-                    * (child.search_value if child.to_play == node.to_play else -child.search_value)
-                    for child, probability in children
-                ) / sum(probability for _, probability in children)
-            else:
-                q_value = 0.0
+            q_value = _action_q(node.to_play, children)
 
             prior = node.action_priors.get(action, 0.0)
             u_value = self.c_puct * prior * math.sqrt(total_visits + 1.0) / (1.0 + action_visits)

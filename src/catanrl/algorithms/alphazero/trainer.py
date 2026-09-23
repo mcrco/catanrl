@@ -31,6 +31,7 @@ from ...models.heads import FlatPolicyHead, HierarchicalPolicyHead, WDLValueHead
 from ...models.wrappers import PolicyNetworkWrapper, PolicyValueNetworkWrapper, ValueNetworkWrapper
 from .native_self_play import generate_native_self_play_data
 from .native_search import PolicyTarget
+from ...utils.catanatron_map import NumberPlacement
 from .parallel_self_play import SelfPlayExperience, generate_self_play_data
 
 TrainingMode = Literal["distill", "iterate"]
@@ -52,6 +53,7 @@ class AlphaZeroConfig:
     vps_to_win: int = 15
     discard_limit: int = 9
     self_play_backend: Literal["python", "cppanatron"] = "python"
+    number_placement: NumberPlacement = "official_spiral"
 
     # Search teacher.
     simulations: int = 64
@@ -441,6 +443,7 @@ class AlphaZeroTrainer:
             dirichlet_frac=self.config.dirichlet_frac,
             vps_to_win=self.config.vps_to_win,
             discard_limit=self.config.discard_limit,
+            number_placement=self.config.number_placement,
             seed=base_seed,
             device=self.device,
         )

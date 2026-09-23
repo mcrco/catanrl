@@ -12,6 +12,7 @@ from catanrl.features.catanatron_utils import ActorObservationLevel, COLOR_ORDER
 from catanrl.models.wrappers import PolicyNetworkWrapper, PolicyValueNetworkWrapper
 from catanrl.models.wrappers import policy_value_to_policy_only
 from catanrl.players import BeliefAveragedPolicyPlayer, NNPolicyPlayer
+from catanrl.utils.catanatron_map import NumberPlacement
 from catanrl.utils.seeding import derive_seed
 
 from .eval_nn_vs_catanatron import eval
@@ -172,6 +173,7 @@ def evaluate_policy_vs_value(
     vps_to_win: int,
     discard_limit: int,
     show_tqdm: bool = False,
+    number_placement: NumberPlacement = "official_spiral",
 ) -> PolicyEvalResult:
     """Evaluate the legally deployable actor against fixed value bots, by seat."""
     games_per_seat = _require_balanced_games(num_games)
@@ -199,6 +201,7 @@ def evaluate_policy_vs_value(
         discard_limit=discard_limit,
         show_tqdm=show_tqdm,
         nn_seat="first",
+        number_placement=number_placement,
     )
     second = eval(
         player,
@@ -210,6 +213,7 @@ def evaluate_policy_vs_value(
         discard_limit=discard_limit,
         show_tqdm=show_tqdm,
         nn_seat="second",
+        number_placement=number_placement,
     )
     return _combine_seats(first, second)
 
@@ -226,6 +230,7 @@ def evaluate_candidate_vs_champion(
     vps_to_win: int,
     discard_limit: int,
     show_tqdm: bool = False,
+    number_placement: NumberPlacement = "official_spiral",
 ) -> PolicyEvalResult:
     """Run balanced, deployable 1v1 games between candidate and champion."""
     games_per_seat = _require_balanced_games(num_games)
@@ -255,6 +260,7 @@ def evaluate_candidate_vs_champion(
         discard_limit=discard_limit,
         show_tqdm=show_tqdm,
         nn_seat="first",
+        number_placement=number_placement,
     )
     second = eval(
         candidate,
@@ -266,6 +272,7 @@ def evaluate_candidate_vs_champion(
         discard_limit=discard_limit,
         show_tqdm=show_tqdm,
         nn_seat="second",
+        number_placement=number_placement,
     )
     return _combine_seats(first, second)
 

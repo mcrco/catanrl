@@ -15,6 +15,7 @@ from catanatron.players.search import VictoryPointPlayer
 from catanatron.players.value import ValueFunctionPlayer
 from catanatron.players.weighted_random import WeightedRandomPlayer
 
+from catanrl.features.board_tensor import BOARD_HEIGHT, BOARD_WIDTH
 from catanrl.features.catanatron_utils import (
     ActorObservationLevel,
     CriticObservationLevel,
@@ -24,8 +25,6 @@ from catanrl.utils.catanatron_game import PLAYER_COLOR_ORDER
 
 MapType = Literal["BASE", "MINI", "TOURNAMENT"]
 
-BOARD_WIDTH = 21
-BOARD_HEIGHT = 11
 COLOR_ORDER: Tuple[Color, ...] = PLAYER_COLOR_ORDER
 
 

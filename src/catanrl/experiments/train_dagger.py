@@ -13,8 +13,10 @@ from .common_args import (
     DEFAULT_MAX_GRAD_NORM,
     add_device_argument,
     add_experiment_name_argument,
+    add_number_placement_argument,
     add_reward_function_argument,
     add_wandb_arguments,
+    apply_number_placement,
 )
 from ..algorithms.imitation_learning.dagger import train as dagger_train
 from ..algorithms.imitation_learning.dataset import EvictionStrategy
@@ -156,6 +158,7 @@ def main():
         help="Game engine used for DAgger collection (default: python)",
     )
     add_reward_function_argument(parser)
+    add_number_placement_argument(parser)
     parser.add_argument(
         "--fresh-eval-games-per-opponent",
         type=int,
@@ -232,6 +235,13 @@ def main():
 
     try:
         resume = prepare_resume(args, warm_start)
+        apply_number_placement(
+            args,
+            resume_active=resume.active,
+            saved_number_placement=(
+                warm_start.experiment.number_placement if resume.active else None
+            ),
+        )
     except ValueError as exc:
         print(f"Error: {exc}")
         return
@@ -295,6 +305,7 @@ def main():
         "seed": args.seed,
         "load_from_experiment": args.load_from_experiment,
         "load_from_which": args.load_from_which,
+        "number_placement": args.number_placement,
     }
 
     wandb_config = None
@@ -336,6 +347,7 @@ def main():
         expert_config=args.expert,
         opponent_configs=args.opponents,
         map_type=arch.map_type,
+        number_placement=args.number_placement,
         actor_observation_level=arch.actor_observation_level,
         critic_observation_level=arch.critic_observation_level,
         network_mode=arch.network_mode,
@@ -395,6 +407,7 @@ def main():
         game=GameConfig(
             num_players=num_players,
             map_type=arch.map_type,
+            number_placement=args.number_placement,
             vps_to_win=arch.vps_to_win,
             discard_limit=arch.discard_limit,
         ),

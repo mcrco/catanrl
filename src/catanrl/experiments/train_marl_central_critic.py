@@ -12,10 +12,12 @@ from catanrl.experiments.common_args import (
     DEFAULT_TREND_EVAL_SEED,
     add_device_argument,
     add_experiment_name_argument,
+    add_number_placement_argument,
     add_reward_function_argument,
     add_save_every_updates_argument,
     add_train_epochs_argument,
     add_wandb_arguments,
+    apply_number_placement,
 )
 from catanrl.algorithms.ppo.marl_ppo_central_critic import train
 from catanrl.experiment_store import (
@@ -148,6 +150,7 @@ def main():
     add_experiment_name_argument(parser)
     add_wandb_arguments(parser)
     add_reward_function_argument(parser)
+    add_number_placement_argument(parser)
     parser.add_argument("--num-envs", type=int, default=4)
     parser.add_argument(
         "--env-backend",
@@ -186,6 +189,13 @@ def main():
 
     try:
         resume = prepare_resume(args, warm_start)
+        apply_number_placement(
+            args,
+            resume_active=resume.active,
+            saved_number_placement=(
+                warm_start.experiment.number_placement if resume.active else None
+            ),
+        )
     except ValueError as exc:
         print(f"Error: {exc}")
         return
@@ -238,6 +248,7 @@ def main():
         "load_from_experiment": args.load_from_experiment,
         "load_from_which": args.load_from_which,
         "reward_function": args.reward_function,
+        "number_placement": args.number_placement,
         "num_envs": args.num_envs,
         "env_backend": args.env_backend,
         "metric_window": args.metric_window,
@@ -263,6 +274,7 @@ def main():
     policy_model, critic_model = train(
         num_players=arch.num_players,
         map_type=arch.map_type,
+        number_placement=args.number_placement,
         actor_observation_level=arch.actor_observation_level,
         critic_observation_level=arch.critic_observation_level,
         network_mode=arch.network_mode,
@@ -345,6 +357,7 @@ def main():
         game=GameConfig(
             num_players=arch.num_players,
             map_type=arch.map_type,
+            number_placement=args.number_placement,
             vps_to_win=arch.vps_to_win,
             discard_limit=arch.discard_limit,
         ),

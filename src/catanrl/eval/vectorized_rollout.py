@@ -26,6 +26,7 @@ from ..features.catanatron_utils import (
 from ..models.wrappers import PolicyNetworkWrapper, PolicyValueNetworkWrapper, ValueNetworkWrapper
 from ..utils.catanatron_game import SeatOption
 from ..utils.seeding import derive_seed
+from ..utils.catanatron_map import NumberPlacement
 
 
 def _extract_nn_won_from_infos(infos: object, batch_size: int) -> Tuple[Any, Any]:
@@ -177,6 +178,7 @@ def run_policy_value_eval_vectorized(
     critic_observation_level: CriticObservationLevel = "full",
     seed: Optional[int] = None,
     progress_callback: Optional[Callable[[int], None]] = None,
+    number_placement: NumberPlacement = "official_spiral",
 ) -> Tuple[int, List[int], List[float], List[float], List[int], List[int]]:
     """Run vectorized eval for a policy/critic against a single opponent set.
 
@@ -244,6 +246,7 @@ def run_policy_value_eval_vectorized(
         discard_limit=discard_limit,
         expert_config=expert_config if compare_to_expert else None,
         actor_observation_level=actor_observation_level,
+        number_placement=number_placement,
     )
 
     driver_env = envs.driver_env
@@ -459,6 +462,7 @@ def run_policy_h2h_eval_vectorized(
     critic_observation_level: CriticObservationLevel = "full",
     seed: Optional[int] = None,
     progress_callback: Optional[Callable[[int], None]] = None,
+    number_placement: NumberPlacement = "official_spiral",
 ) -> Tuple[int, List[int]]:
     """Run vectorized current-policy-vs-champion H2H evaluation."""
     if device is None:
@@ -492,6 +496,7 @@ def run_policy_h2h_eval_vectorized(
         reward_function="win",
         num_envs=num_envs,
         actor_observation_level="full",
+        number_placement=number_placement,
     )
 
     driver_env = envs.driver_env

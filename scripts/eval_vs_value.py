@@ -25,7 +25,12 @@ from catanrl.experiment_store import (
     backbone_hidden_dims,
     load_experiment,
 )
-from catanrl.experiments.common_args import DEFAULT_EVAL_SEED, DEFAULT_WANDB_PROJECT
+from catanrl.experiments.common_args import (
+    DEFAULT_EVAL_SEED,
+    DEFAULT_WANDB_PROJECT,
+    add_number_placement_argument,
+    apply_number_placement,
+)
 from catanrl.features.catanatron_utils import ActorObservationLevel, COLOR_ORDER
 from catanrl.models.backbones import (
     BackboneConfig,
@@ -137,6 +142,7 @@ def main():
         choices=["BASE", "MINI", "TOURNAMENT"],
         help="Catan map type",
     )
+    add_number_placement_argument(parser)
     parser.add_argument(
         "--opponent-configs",
         type=str,
@@ -263,6 +269,7 @@ def main():
 
     # Experiment path: rebuild model from metadata and adopt its architecture.
     experiment_model = None
+    experiment_number_placement = None
     if args.experiment is not None:
         exp = load_experiment(args.experiment)
         args.model_type = exp.model_type or args.model_type
@@ -276,13 +283,25 @@ def main():
                 f"--opponent-configs implies {num_players} players but experiment "
                 f"'{args.experiment}' was trained for {exp.num_players}."
             )
+        experiment_number_placement = exp.number_placement
         experiment_model = exp.build_policy(which=args.which, device=device)
+
+    try:
+        apply_number_placement(
+            args,
+            experiment_number_placement=experiment_number_placement,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
 
     print(f"\n{'=' * 60}")
     print("Policy Evaluation vs ValueFunctionPlayer")
     print(f"{'=' * 60}")
     print(f"Device: {device}")
-    print(f"Map type: {args.map_type} | Players: {num_players}")
+    print(
+        f"Map type: {args.map_type} | Number placement: {args.number_placement} | "
+        f"Players: {num_players}"
+    )
     print(f"Backbone: {args.backbone_type} | Model type: {args.model_type}")
     print(f"Actor observation: {args.actor_observation_level}")
     print(f"Hidden dims: {args.policy_hidden_dims}")
@@ -342,6 +361,7 @@ def main():
                 discard_limit=args.discard_limit,
                 show_tqdm=True,
                 nn_seat=seat_mode,
+                number_placement=args.number_placement,
             )
         )
 

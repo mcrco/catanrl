@@ -9,6 +9,7 @@ from catanatron.features import create_sample, get_feature_ordering
 from catanatron.game import Game
 from catanatron.gym.board_tensor_features import create_board_tensor, is_graph_feature
 from catanatron.models.player import Color, RandomPlayer
+from catanrl.features.board_tensor import flatten_board
 from catanrl.utils.catanatron_game import COLOR_ORDER
 from catanrl.utils.catanatron_map import build_catan_map
 ObservationLevel = Literal["private", "public", "full"]
@@ -221,7 +222,7 @@ def game_to_features(
     numeric_vector = np.array(
         [float(sample.get(name, 0.0)) for name in numeric_feature_names], dtype=np.float32
     )
-    board_tensor = create_board_tensor(game, color).astype(np.float32, copy=False).reshape(-1)
+    board_tensor = flatten_board(create_board_tensor(game, color).astype(np.float32, copy=False))
     return np.concatenate([numeric_vector, board_tensor], axis=0)
 
 
@@ -254,5 +255,7 @@ def full_game_to_features(
         [float(numeric_sample.get(name, 0.0)) for name in numeric_feature_names],
         dtype=np.float32,
     )
-    board_tensor = create_board_tensor(game, base_color).astype(np.float32, copy=False).reshape(-1)
+    board_tensor = flatten_board(
+        create_board_tensor(game, base_color).astype(np.float32, copy=False)
+    )
     return np.concatenate([numeric_vector, board_tensor], axis=0)

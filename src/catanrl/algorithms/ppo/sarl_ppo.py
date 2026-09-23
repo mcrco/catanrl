@@ -42,6 +42,7 @@ from ...models.models import (
     build_value_network,
 )
 from ...utils.catanatron_action_space import build_action_type_metadata, get_action_space_size
+from ...utils.catanatron_map import NumberPlacement
 from ...models.backbone_builder import build_backbone_config
 from ..common import PolicyAgent
 from .buffers import CentralCriticExperienceBuffer, ExperienceBuffer
@@ -80,6 +81,7 @@ def train(
     device: str | torch.device | None = None,
     wandb_config: dict | None = None,
     map_type: Literal["BASE", "TOURNAMENT", "MINI"] = "BASE",
+    number_placement: NumberPlacement = "official_spiral",
     actor_observation_level: ActorObservationLevel = "private",
     critic_observation_level: CriticObservationLevel = "full",
     vps_to_win: int = 15,
@@ -128,7 +130,7 @@ def train(
     print("Training Policy-Value Network with Single Agent Reinforcement Learning (PPO)")
     print(f"{'=' * 60}")
     print(f"Device: {device}")
-    print(f"Map type: {map_type}")
+    print(f"Map type: {map_type} | Number placement: {number_placement}")
     print(f"Game params: vps_to_win={vps_to_win}, discard_limit={discard_limit}")
     print(f"Total timesteps: {total_timesteps:,}")
     print(f"Rollout steps: {rollout_steps}")
@@ -411,6 +413,7 @@ def train(
         vps_to_win=vps_to_win,
         discard_limit=discard_limit,
         actor_observation_level=actor_observation_level,
+        number_placement=number_placement,
     )
     driver_env = envs.driver_env
     if hasattr(driver_env, "env_single_observation_space"):
@@ -738,6 +741,7 @@ def train(
                         global_step=global_step,
                         device=str(device),
                         num_envs=num_envs,
+                        number_placement=number_placement,
                     )
                     trend_eval_metrics = eval_policy_value_against_baselines(
                         policy_model=policy_model,
@@ -757,6 +761,7 @@ def train(
                         global_step=global_step,
                         device=str(device),
                         num_envs=num_envs,
+                        number_placement=number_placement,
                     )
                     fresh_log = {}
                     for key, value in fresh_eval_metrics.items():

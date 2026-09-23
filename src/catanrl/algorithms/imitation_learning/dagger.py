@@ -52,6 +52,7 @@ from ...features.catanatron_utils import (
     get_observation_indices_from_full,
 )
 from ...utils.catanatron_action_space import get_action_array, get_action_space_size
+from ...utils.catanatron_map import NumberPlacement
 from ...utils.seeding import derive_seed
 from .dataset import AggregatedDataset, EvictionStrategy
 
@@ -622,6 +623,7 @@ def train(
     value_head_type: str = "scalar",
     vps_to_win: int = 15,
     discard_limit: int = 9,
+    number_placement: NumberPlacement = "official_spiral",
     beta_init: float = 1.0,
     beta_decay: float = 0.9,
     beta_min: float = 0.05,
@@ -801,7 +803,7 @@ def train(
     )
     print(f"{'=' * 60}")
     print(f"Device: {device}")
-    print(f"Map type: {map_type} | Players: {num_players}")
+    print(f"Map type: {map_type} | Players: {num_players} | Number placement: {number_placement}")
     print(f"Game params: vps_to_win={vps_to_win}, discard_limit={discard_limit}")
     print(
         f"Backbone: {backbone_type} | Model type: {model_type} | "
@@ -842,6 +844,7 @@ def train(
             num_games=imitation_eval_num_games,
             max_decision_points=imitation_eval_max_decision_points,
             seed=imitation_eval_seed,
+            number_placement=number_placement,
         )
         print(
             f"Frozen imitation eval set: {len(frozen_imitation_eval.decision_points)} decision points."
@@ -945,6 +948,7 @@ def train(
         discard_limit=discard_limit,
         expert_config=expert_config,
         actor_observation_level=actor_observation_level,
+        number_placement=number_placement,
     )
 
     if max_dataset_size is None:
@@ -1122,6 +1126,7 @@ def train(
                             global_step=global_step,
                             device=device,
                             num_envs=num_envs,
+                            number_placement=number_placement,
                             compare_to_expert=eval_compare_to_expert,
                             expert_config=eval_expert_cfg,
                             progress_desc=f"Eval {iteration}/{last_iteration}",

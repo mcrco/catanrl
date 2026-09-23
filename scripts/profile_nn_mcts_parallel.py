@@ -63,7 +63,8 @@ from catanrl.players.nn_mcts_player import (
     _SyncRemoteNNMCTSInferenceBackend,
 )
 from catanrl.utils.catanatron_action_space import get_action_space_size
-from catanrl.utils.catanatron_map import build_catan_map
+from catanrl.utils.catanatron_map import NumberPlacement, build_catan_map
+from catanrl.experiments.common_args import add_number_placement_argument, apply_number_placement
 
 BOARD_WIDTH = 21
 BOARD_HEIGHT = 11
@@ -233,12 +234,15 @@ def make_root_game(
     seed: int,
     vps_to_win: int,
     discard_limit: int,
+    number_placement: NumberPlacement = "official_spiral",
 ) -> Game:
     opponents = [RandomPlayer(color) for color in COLOR_ORDER[1:num_players]]
     players = [player, *opponents]
     game = Game(
         players=players,
-        catan_map=build_catan_map(map_type, seed=seed, number_placement="random"),
+        catan_map=build_catan_map(
+            map_type, seed=seed, number_placement=number_placement
+        ),
         seed=seed,
         vps_to_win=vps_to_win,
         discard_limit=discard_limit,
@@ -289,6 +293,7 @@ def _args_dict(args: argparse.Namespace) -> dict:
         "virtual_loss": args.virtual_loss,
         "vps_to_win": args.vps_to_win,
         "discard_limit": args.discard_limit,
+        "number_placement": args.number_placement,
         "warmup_decisions": args.warmup_decisions,
         "decisions": args.decisions,
         "trials": args.trials,
@@ -399,6 +404,7 @@ def _within_tree_coordinator_main(
         map_type = args_dict["map_type"]
         vps = int(args_dict["vps_to_win"])
         discard = int(args_dict["discard_limit"])
+        number_placement = args_dict.get("number_placement", "official_spiral")
         warmup = int(args_dict["warmup_decisions"])
         decisions = int(args_dict["decisions"])
         trials = int(args_dict["trials"])
@@ -406,7 +412,9 @@ def _within_tree_coordinator_main(
         seed = int(args_dict["seed"]) + worker_id * 100_003
 
         for idx in range(warmup):
-            game = make_root_game(player, num_players, map_type, seed + idx, vps, discard)
+            game = make_root_game(
+                player, num_players, map_type, seed + idx, vps, discard, number_placement
+            )
             player.decide(game, game.playable_actions)
 
         barrier.wait()
@@ -414,7 +422,7 @@ def _within_tree_coordinator_main(
         for _trial in range(trials):
             for idx in range(decisions):
                 game = make_root_game(
-                    player, num_players, map_type, seed + warmup + idx, vps, discard
+                    player, num_players, map_type, seed + warmup + idx, vps, discard, number_placement
                 )
                 player.decide(game, game.playable_actions)
         elapsed = time.perf_counter() - start
@@ -628,7 +636,13 @@ def run_breakdown(
         for idx in range(args.warmup_decisions):
             seed = args.seed + idx
             game = make_root_game(
-                player, args.num_players, args.map_type, seed, args.vps_to_win, args.discard_limit
+                player,
+                args.num_players,
+                args.map_type,
+                seed,
+                args.vps_to_win,
+                args.discard_limit,
+                args.number_placement,
             )
             player.decide(game, game.playable_actions)
 
@@ -645,6 +659,7 @@ def run_breakdown(
                     seed,
                     args.vps_to_win,
                     args.discard_limit,
+                    args.number_placement,
                 )
                 maybe_sync(device)
                 start = time.perf_counter()
@@ -681,6 +696,7 @@ def run_breakdown(
                     seed,
                     args.vps_to_win,
                     args.discard_limit,
+                    args.number_placement,
                 )
                 player.decide(game, game.playable_actions)
             profiler.disable()
@@ -727,19 +743,24 @@ def _across_games_worker_main(
         map_type = args_dict["map_type"]
         vps = int(args_dict["vps_to_win"])
         discard = int(args_dict["discard_limit"])
+        number_placement = args_dict.get("number_placement", "official_spiral")
         warmup = int(args_dict["warmup_decisions"])
         decisions = int(args_dict["decisions"])
         num_simulations = int(args_dict["num_simulations"])
         seed = int(args_dict["seed"]) + worker_id * 100_003
 
         for idx in range(warmup):
-            game = make_root_game(player, num_players, map_type, seed + idx, vps, discard)
+            game = make_root_game(
+                player, num_players, map_type, seed + idx, vps, discard, number_placement
+            )
             player.decide(game, game.playable_actions)
 
         barrier.wait()
         start = time.perf_counter()
         for idx in range(decisions):
-            game = make_root_game(player, num_players, map_type, seed + warmup + idx, vps, discard)
+            game = make_root_game(
+                player, num_players, map_type, seed + warmup + idx, vps, discard, number_placement
+            )
             player.decide(game, game.playable_actions)
         elapsed = time.perf_counter() - start
 
@@ -846,6 +867,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--policy-hidden-dims", type=int, nargs="+", default=[512, 512])
     parser.add_argument("--critic-hidden-dims", type=int, nargs="+", default=[512, 512])
     parser.add_argument("--map-type", choices=["BASE", "MINI", "TOURNAMENT"], default="MINI")
+    add_number_placement_argument(parser)
     parser.add_argument("--num-players", type=int, choices=[2, 3, 4], default=2)
     parser.add_argument(
         "--actor-observation-level",
@@ -920,6 +942,10 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    try:
+        apply_number_placement(args)
+    except ValueError as exc:
+        raise SystemExit(f"Error: {exc}") from exc
     set_seed(args.seed)
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
 
