@@ -36,6 +36,12 @@ def build_policy_model(
     xdim_cnn_channels: Sequence[int] = (64, 128, 128),
     xdim_cnn_kernel_size: Tuple[int, int] = (3, 5),
     xdim_fusion_hidden_dim: int | None = None,
+    graph_hidden_dim: int = 256,
+    graph_global_hidden_dim: int = 96,
+    graph_num_layers: int = 4,
+    graph_head_hidden_dim: int = 256,
+    graph_normalize_inputs: bool = False,
+    graph_semantic_inputs: bool = False,
 ) -> PolicyNetworkWrapper:
     dims = compute_single_agent_dims(
         num_players,
@@ -53,6 +59,14 @@ def build_policy_model(
         xdim_cnn_channels=xdim_cnn_channels,
         xdim_cnn_kernel_size=xdim_cnn_kernel_size,
         xdim_fusion_hidden_dim=xdim_fusion_hidden_dim,
+        num_players=num_players,
+        map_type=map_type,
+        graph_hidden_dim=graph_hidden_dim,
+        graph_global_hidden_dim=graph_global_hidden_dim,
+        graph_num_layers=graph_num_layers,
+        graph_head_hidden_dim=graph_head_hidden_dim,
+        graph_normalize_inputs=graph_normalize_inputs,
+        graph_semantic_inputs=graph_semantic_inputs,
     )
 
     if model_type == "flat":
@@ -83,6 +97,12 @@ def build_critic_model(
     xdim_cnn_channels: Sequence[int] = (64, 128, 128),
     xdim_cnn_kernel_size: Tuple[int, int] = (3, 5),
     xdim_fusion_hidden_dim: int | None = None,
+    graph_hidden_dim: int = 256,
+    graph_global_hidden_dim: int = 96,
+    graph_num_layers: int = 4,
+    graph_head_hidden_dim: int = 256,
+    graph_normalize_inputs: bool = False,
+    graph_semantic_inputs: bool = False,
 ) -> ValueNetworkWrapper:
     dims = compute_single_agent_dims(
         num_players,
@@ -100,6 +120,14 @@ def build_critic_model(
         xdim_cnn_channels=xdim_cnn_channels,
         xdim_cnn_kernel_size=xdim_cnn_kernel_size,
         xdim_fusion_hidden_dim=xdim_fusion_hidden_dim,
+        num_players=num_players,
+        map_type=map_type,
+        graph_hidden_dim=graph_hidden_dim,
+        graph_global_hidden_dim=graph_global_hidden_dim,
+        graph_num_layers=graph_num_layers,
+        graph_head_hidden_dim=graph_head_hidden_dim,
+        graph_normalize_inputs=graph_normalize_inputs,
+        graph_semantic_inputs=graph_semantic_inputs,
     )
 
     model = build_value_network(backbone_config=backbone_config)
@@ -119,6 +147,12 @@ def build_policy_value_model(
     xdim_cnn_channels: Sequence[int] = (64, 128, 128),
     xdim_cnn_kernel_size: Tuple[int, int] = (3, 5),
     xdim_fusion_hidden_dim: int | None = None,
+    graph_hidden_dim: int = 256,
+    graph_global_hidden_dim: int = 96,
+    graph_num_layers: int = 4,
+    graph_head_hidden_dim: int = 256,
+    graph_normalize_inputs: bool = False,
+    graph_semantic_inputs: bool = False,
     value_head_type: str = "scalar",
 ) -> PolicyValueNetworkWrapper:
     """Build a joint policy-value network with a shared backbone."""
@@ -139,6 +173,14 @@ def build_policy_value_model(
         xdim_cnn_channels=xdim_cnn_channels,
         xdim_cnn_kernel_size=xdim_cnn_kernel_size,
         xdim_fusion_hidden_dim=xdim_fusion_hidden_dim,
+        num_players=num_players,
+        map_type=map_type,
+        graph_hidden_dim=graph_hidden_dim,
+        graph_global_hidden_dim=graph_global_hidden_dim,
+        graph_num_layers=graph_num_layers,
+        graph_head_hidden_dim=graph_head_hidden_dim,
+        graph_normalize_inputs=graph_normalize_inputs,
+        graph_semantic_inputs=graph_semantic_inputs,
     )
 
     if model_type == "flat":

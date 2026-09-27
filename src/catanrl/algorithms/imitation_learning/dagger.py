@@ -605,6 +605,12 @@ def train(
     xdim_cnn_kernel_size: Tuple[int, int] = (3, 5),
     xdim_policy_fusion_hidden_dim: Optional[int] = None,
     xdim_critic_fusion_hidden_dim: Optional[int] = None,
+    graph_hidden_dim: int = 256,
+    graph_global_hidden_dim: int = 96,
+    graph_num_layers: int = 4,
+    graph_head_hidden_dim: int = 256,
+    graph_normalize_inputs: bool = False,
+    graph_semantic_inputs: bool = False,
     load_policy_weights: Optional[str] = None,
     load_critic_weights: Optional[str] = None,
     n_iterations: int = 10,
@@ -744,6 +750,7 @@ def train(
         "xdim",
         "xdim_res",
         "xdim_compact",
+        "catan_graph",
     ), f"Unknown backbone_type '{backbone_type}'"
     xdim_cnn_channels = list(xdim_cnn_channels)
     if not xdim_cnn_channels:
@@ -854,6 +861,16 @@ def train(
             "Skipping frozen imitation eval: training expert is not ValueFunctionPlayer (F)."
         )
 
+    graph_backbone_kwargs: Dict[str, Any] = dict(
+        num_players=num_players,
+        map_type=map_type,
+        graph_hidden_dim=graph_hidden_dim,
+        graph_global_hidden_dim=graph_global_hidden_dim,
+        graph_num_layers=graph_num_layers,
+        graph_head_hidden_dim=graph_head_hidden_dim,
+        graph_normalize_inputs=graph_normalize_inputs,
+        graph_semantic_inputs=graph_semantic_inputs,
+    )
     policy_backbone_config = build_backbone_config(
         backbone_type=backbone_type,
         hidden_dims=policy_hidden_dims,
@@ -865,6 +882,7 @@ def train(
         xdim_cnn_channels=xdim_cnn_channels,
         xdim_cnn_kernel_size=xdim_cnn_kernel_size,
         xdim_fusion_hidden_dim=xdim_policy_fusion_hidden_dim,
+        **graph_backbone_kwargs,
     )
 
     if uses_shared_network:
@@ -909,6 +927,7 @@ def train(
             xdim_cnn_channels=xdim_cnn_channels,
             xdim_cnn_kernel_size=xdim_cnn_kernel_size,
             xdim_fusion_hidden_dim=xdim_critic_fusion_hidden_dim,
+            **graph_backbone_kwargs,
         )
         critic_model = build_value_network(backbone_config=critic_backbone_config).to(torch_device)
 

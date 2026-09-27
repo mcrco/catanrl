@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from dataclasses import dataclass, field
-from typing import List, Union, Tuple
+from typing import List, Literal, Tuple, Union
 
 from catanrl.features.board_tensor import BOARD_HEIGHT, BOARD_WIDTH, unflatten_board_nchw
 
@@ -30,9 +30,33 @@ class CrossDimensionalBackboneConfig:
 
 
 @dataclass
+class CatanGraphBackboneConfig:
+    """Canopy-style heterogeneous graph encoder over a Catanatron vector.
+
+    The input contract remains ``[numeric, flattened board tensor]``.  Static
+    indices gather the active Catan nodes and tiles from that tensor; no
+    alternate feature encoder or game representation is introduced.
+    """
+
+    input_dim: int
+    numeric_dim: int
+    board_height: int
+    board_width: int
+    board_channels: int
+    num_players: int
+    map_type: Literal["BASE", "MINI", "TOURNAMENT"]
+    hidden_dim: int = 256
+    global_hidden_dim: int = 96
+    num_layers: int = 4
+    head_hidden_dim: int = 256
+    normalize_inputs: bool = False
+    semantic_inputs: bool = False
+
+
+@dataclass
 class BackboneConfig:
     architecture: str
-    args: Union[MLPBackboneConfig, CrossDimensionalBackboneConfig]
+    args: Union[MLPBackboneConfig, CrossDimensionalBackboneConfig, CatanGraphBackboneConfig]
 
 
 class MLPBackbone(nn.Module):
@@ -270,6 +294,494 @@ class CompactCrossDimensionalBackbone(nn.Module):
         return self.fusion(torch.cat((spatial_features, numeric_features), dim=-1))
 
 
+class _CatanHeteroGraphLayer(nn.Module):
+    """Pre-norm residual node/tile message-passing layer used by Nexus v3."""
+
+    def __init__(self, hidden_dim: int):
+        super().__init__()
+        self.node_norm = nn.LayerNorm(hidden_dim)
+        self.tile_norm = nn.LayerNorm(hidden_dim)
+        self.node_self = nn.Linear(hidden_dim, hidden_dim)
+        self.node_from_node = nn.Linear(hidden_dim, hidden_dim)
+        self.node_from_tile = nn.Linear(hidden_dim, hidden_dim)
+        self.tile_self = nn.Linear(hidden_dim, hidden_dim)
+        self.tile_from_node = nn.Linear(hidden_dim, hidden_dim)
+
+    def forward(
+        self,
+        nodes: torch.Tensor,
+        tiles: torch.Tensor,
+        node_adjacency: torch.Tensor,
+        tile_to_node: torch.Tensor,
+        node_to_tile: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        normalized_nodes = self.node_norm(nodes)
+        normalized_tiles = self.tile_norm(tiles)
+        node_update = (
+            self.node_self(normalized_nodes)
+            + torch.matmul(node_adjacency, self.node_from_node(normalized_nodes))
+            + torch.matmul(tile_to_node, self.node_from_tile(normalized_tiles))
+        )
+        tile_update = self.tile_self(normalized_tiles) + torch.matmul(
+            node_to_tile,
+            self.tile_from_node(normalized_nodes),
+        )
+        return nodes + torch.relu(node_update), tiles + torch.relu(tile_update)
+
+
+def _catan_graph_numeric_denominators(
+    num_players: int,
+    map_type: Literal["BASE", "MINI", "TOURNAMENT"],
+    numeric_dim: int,
+) -> torch.Tensor:
+    """Return bounded, semantic scales without changing the observation vector."""
+    from catanrl.features.catanatron_utils import get_observation_numeric_feature_names
+
+    levels = ("private", "public", "full") if num_players == 2 else ("private", "full")
+    candidates = [
+        get_observation_numeric_feature_names(num_players, map_type, level) for level in levels
+    ]
+    matching_names = [names for names in candidates if len(names) == numeric_dim]
+    if len(matching_names) != 1:
+        raise ValueError(
+            "Cannot identify Catan graph numeric feature ordering for "
+            f"num_players={num_players}, map_type={map_type}, numeric_dim={numeric_dim}"
+        )
+
+    denominators: list[float] = []
+    for name in matching_names[0]:
+        denominator = 1.0
+        if name == "BANK_DEV_CARDS":
+            denominator = 25.0
+        elif name.startswith("BANK_"):
+            denominator = 19.0
+        elif name == "TURN_NUMBER":
+            denominator = 500.0
+        elif "_TURNS_SINCE_" in name:
+            denominator = 200.0
+        elif name.endswith(("_ACTUAL_VPS", "_PUBLIC_VPS")):
+            denominator = 15.0
+        elif name.endswith("_LONGEST_ROAD_LENGTH"):
+            denominator = 15.0
+        elif name.endswith("_ROADS_LEFT"):
+            denominator = 15.0
+        elif name.endswith("_SETTLEMENTS_LEFT"):
+            denominator = 5.0
+        elif name.endswith("_CITIES_LEFT"):
+            denominator = 4.0
+        elif name.endswith("_NUM_RESOURCES_IN_HAND"):
+            denominator = 19.0
+        elif name.endswith("_NUM_DEVS_IN_HAND"):
+            denominator = 25.0
+        elif name.endswith("_VICTORY_POINT_IN_HAND"):
+            denominator = 5.0
+        elif name.endswith("_KNIGHT_PLAYED"):
+            denominator = 14.0
+        elif name.endswith(
+            (
+                "_BRICK_IN_HAND",
+                "_ORE_IN_HAND",
+                "_SHEEP_IN_HAND",
+                "_WHEAT_IN_HAND",
+                "_WOOD_IN_HAND",
+            )
+        ):
+            denominator = 19.0
+        elif name.endswith(
+            (
+                "_MONOPOLY_IN_HAND",
+                "_MONOPOLY_PLAYED",
+                "_ROAD_BUILDING_IN_HAND",
+                "_ROAD_BUILDING_PLAYED",
+                "_YEAR_OF_PLENTY_IN_HAND",
+                "_YEAR_OF_PLENTY_PLAYED",
+            )
+        ):
+            denominator = 2.0
+        denominators.append(denominator)
+    return torch.tensor(denominators, dtype=torch.float32)
+
+
+class CatanGraphBackbone(nn.Module):
+    """Topology-aware shared trunk over the unchanged Catanatron observation.
+
+    Catanatron stores board information on a fixed 21x11 lattice.  This module
+    gathers the active map nodes, linearly recovers per-tile resource/robber
+    planes from their six-node incidence pattern, and applies heterogeneous
+    message passing.  The returned tensor contains pooled, node, and tile
+    embeddings so policy heads can retain spatial identity.
+    """
+
+    node_positions: torch.Tensor
+    edge_positions: torch.Tensor
+    node_edge_incidence: torch.Tensor
+    road_channel_indices: torch.Tensor
+    node_adjacency: torch.Tensor
+    node_adjacency_binary: torch.Tensor
+    node_tile_incidence: torch.Tensor
+    tile_to_node: torch.Tensor
+    node_to_tile: torch.Tensor
+    tile_decoder: torch.Tensor
+    numeric_denominators: torch.Tensor
+
+    def __init__(self, config: CatanGraphBackboneConfig):
+        super().__init__()
+        if config.num_layers < 1:
+            raise ValueError("Catan graph backbones require at least one graph layer")
+        if config.hidden_dim < 1 or config.global_hidden_dim < 1:
+            raise ValueError("Catan graph hidden dimensions must be positive")
+        expected_input = (
+            config.numeric_dim + config.board_width * config.board_height * config.board_channels
+        )
+        if config.input_dim != expected_input:
+            raise ValueError(
+                f"Catan graph input_dim={config.input_dim} does not match "
+                f"numeric+board dimensions ({expected_input})"
+            )
+
+        from catanatron.gym.board_tensor_features import get_node_and_edge_maps
+        from catanatron.models.board import get_edges
+        from catanatron.models.map import build_map
+
+        catan_map = build_map(config.map_type)
+        node_ids = sorted(catan_map.land_nodes)
+        node_to_local = {node_id: index for index, node_id in enumerate(node_ids)}
+        tile_items = list(catan_map.land_tiles.items())
+        num_nodes = len(node_ids)
+        num_tiles = len(tile_items)
+
+        node_positions, edge_position_map = get_node_and_edge_maps()
+        positions = torch.tensor(
+            [node_positions[node_id] for node_id in node_ids],
+            dtype=torch.long,
+        )
+
+        incidence = torch.zeros(num_nodes, num_tiles, dtype=torch.float32)
+        for tile_index, (_, tile) in enumerate(tile_items):
+            for node_id in tile.nodes.values():
+                incidence[node_to_local[node_id], tile_index] = 1.0
+
+        node_adjacency = torch.zeros(num_nodes, num_nodes, dtype=torch.float32)
+        edges = list(get_edges(catan_map.land_nodes))
+        node_edge_incidence = torch.zeros(num_nodes, len(edges), dtype=torch.float32)
+        edge_pairs: list[tuple[int, int]] = []
+        edge_positions: list[tuple[int, int]] = []
+        for edge_index, (first, second) in enumerate(edges):
+            first_local = node_to_local[first]
+            second_local = node_to_local[second]
+            node_adjacency[first_local, second_local] = 1.0
+            node_adjacency[second_local, first_local] = 1.0
+            node_edge_incidence[first_local, edge_index] = 1.0
+            node_edge_incidence[second_local, edge_index] = 1.0
+            edge_pairs.append((first_local, second_local))
+            edge_positions.append(edge_position_map[(first, second)])
+        node_adjacency_binary = node_adjacency.clone()
+        node_adjacency /= node_adjacency.sum(dim=1, keepdim=True).clamp_min(1.0)
+        tile_to_node = incidence / incidence.sum(dim=1, keepdim=True).clamp_min(1.0)
+        # ``transpose`` returns a view.  Clone before normalizing so this does
+        # not scale the raw incidence matrix used by ``tile_decoder`` below.
+        node_to_tile = incidence.transpose(0, 1).clone()
+        node_to_tile = node_to_tile / node_to_tile.sum(
+            dim=1,
+            keepdim=True,
+        ).clamp_min(1.0)
+
+        # Board resource and robber planes are sums of per-tile contributions
+        # at their six corner nodes.  The incidence matrix has full column rank
+        # on supported Catan maps, so its pseudoinverse recovers those tile
+        # values without introducing a second observation representation.
+        tile_decoder = torch.linalg.pinv(incidence)
+
+        self.config = config
+        self.numeric_dim = config.numeric_dim
+        self.board_width = config.board_width
+        self.board_height = config.board_height
+        self.board_channels = config.board_channels
+        self.hidden_dim = config.hidden_dim
+        self.global_hidden_dim = config.global_hidden_dim
+        self.head_hidden_dim = config.head_hidden_dim
+        self.num_nodes = num_nodes
+        self.num_tiles = num_tiles
+        self.num_edges = len(edge_pairs)
+        self.node_ids = tuple(node_ids)
+        self.tile_coordinates = tuple(coordinate for coordinate, _ in tile_items)
+        self.edge_pairs = tuple(edge_pairs)
+        self.pooled_dim = 2 * config.hidden_dim + config.global_hidden_dim
+        self.output_dim = self.pooled_dim + (num_nodes + num_tiles) * config.hidden_dim
+
+        self.register_buffer("node_positions", positions, persistent=False)
+        self.register_buffer(
+            "edge_positions",
+            torch.tensor(edge_positions, dtype=torch.long),
+            persistent=False,
+        )
+        self.register_buffer("node_edge_incidence", node_edge_incidence, persistent=False)
+        self.register_buffer(
+            "road_channel_indices",
+            torch.arange(config.num_players, dtype=torch.long) * 2 + 1,
+            persistent=False,
+        )
+        self.register_buffer("node_adjacency", node_adjacency, persistent=False)
+        self.register_buffer(
+            "node_adjacency_binary",
+            node_adjacency_binary,
+            persistent=False,
+        )
+        self.register_buffer("node_tile_incidence", incidence, persistent=False)
+        self.register_buffer("tile_to_node", tile_to_node, persistent=False)
+        self.register_buffer("node_to_tile", node_to_tile, persistent=False)
+        self.register_buffer("tile_decoder", tile_decoder, persistent=False)
+        self.register_buffer(
+            "numeric_denominators",
+            (
+                _catan_graph_numeric_denominators(
+                    config.num_players,
+                    config.map_type,
+                    config.numeric_dim,
+                )
+                if config.normalize_inputs
+                else torch.ones(config.numeric_dim, dtype=torch.float32)
+            ),
+            persistent=False,
+        )
+
+        semantic_global_dim = 5 + 15 * config.num_players if config.semantic_inputs else 0
+        self.global_projection = nn.Linear(
+            config.numeric_dim + semantic_global_dim,
+            config.global_hidden_dim,
+        )
+        node_input_dim = (
+            16 + 3 * config.num_players if config.semantic_inputs else config.board_channels
+        )
+        tile_input_dim = 8 + config.num_players if config.semantic_inputs else 6
+        self.node_projection = nn.Linear(node_input_dim, config.hidden_dim)
+        self.tile_projection = nn.Linear(tile_input_dim, config.hidden_dim)
+        self.node_injection = nn.Sequential(
+            nn.Linear(config.hidden_dim + config.global_hidden_dim, config.hidden_dim),
+            nn.LayerNorm(config.hidden_dim),
+            nn.ReLU(),
+        )
+        self.tile_injection = nn.Sequential(
+            nn.Linear(config.hidden_dim + config.global_hidden_dim, config.hidden_dim),
+            nn.LayerNorm(config.hidden_dim),
+            nn.ReLU(),
+        )
+        self.graph_layers = nn.ModuleList(
+            _CatanHeteroGraphLayer(config.hidden_dim) for _ in range(config.num_layers)
+        )
+        self._init_weights()
+
+    def _init_weights(self) -> None:
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                orthogonal_init(module)
+
+    def _network_distances(
+        self,
+        buildings: torch.Tensor,
+        incident_roads: torch.Tensor,
+    ) -> torch.Tensor:
+        """Canopy-style distance to each player's road/building network."""
+        visited = (buildings > 0.0) | (incident_roads > 0.0)
+        distances = torch.ones_like(buildings)
+        distances = torch.where(visited, torch.zeros_like(distances), distances)
+        frontier = visited
+        for distance in range(1, 7):
+            neighbors = (
+                torch.einsum(
+                    "nm,bmp->bnp",
+                    self.node_adjacency_binary,
+                    frontier.to(dtype=buildings.dtype),
+                )
+                > 0.0
+            )
+            new_frontier = neighbors & ~visited
+            distances = torch.where(
+                new_frontier,
+                torch.full_like(distances, distance / 6.0),
+                distances,
+            )
+            visited = visited | new_frontier
+            frontier = new_frontier
+        return distances
+
+    def _semantic_spatial_inputs(
+        self,
+        node_raw: torch.Tensor,
+        tile_raw: torch.Tensor,
+        incident_roads: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Recover normalized Nexus-v3-style features from the same board vector."""
+        resource_offset = 2 * self.config.num_players
+        buildings_raw = node_raw[..., 0:resource_offset:2]
+        buildings = buildings_raw / 2.0
+        ports = node_raw[..., resource_offset + 6 : resource_offset + 12]
+
+        tile_resource_prob = tile_raw[..., :5].clamp_min(0.0)
+        tile_robber = (tile_raw[..., 5:6] > 0.5).to(dtype=tile_raw.dtype)
+        tile_resource_pips = tile_resource_prob * 36.0
+        blocked_resource_pips = torch.einsum(
+            "nt,btr->bnr",
+            self.node_tile_incidence,
+            tile_resource_pips * tile_robber,
+        )
+        total_resource_pips = torch.einsum(
+            "nt,btr->bnr",
+            self.node_tile_incidence,
+            tile_resource_pips,
+        )
+        production = (total_resource_pips - blocked_resource_pips) / 13.0
+        blocked_production = blocked_resource_pips / 5.0
+        network_distances = self._network_distances(buildings_raw, incident_roads)
+        node_features = torch.cat(
+            (
+                buildings,
+                ports,
+                production,
+                blocked_production,
+                incident_roads,
+                network_distances,
+            ),
+            dim=-1,
+        )
+
+        tile_building_weights = torch.einsum(
+            "tn,bnp->btp",
+            self.node_to_tile,
+            buildings_raw,
+        )
+        tile_features = torch.cat(
+            (
+                (tile_resource_prob > 1e-6).to(dtype=tile_raw.dtype),
+                tile_resource_prob.sum(dim=-1, keepdim=True) * (36.0 / 5.0),
+                tile_resource_prob.sum(dim=-1, keepdim=True),
+                tile_robber,
+                tile_building_weights,
+            ),
+            dim=-1,
+        )
+
+        player_resource_production = (
+            torch.einsum(
+                "btr,btp->bpr",
+                tile_resource_pips,
+                tile_building_weights * 6.0,
+            )
+            / 35.0
+        )
+        owned_ports = ((buildings_raw > 0.0).unsqueeze(-1) * ports.unsqueeze(2)).amax(dim=1)
+        trade_improvements = torch.maximum(
+            owned_ports[..., :5] * 0.5,
+            owned_ports[..., 5:6] * 0.25,
+        )
+        board_resource_production = tile_resource_pips.sum(dim=1) / 15.0
+        player_blocked_production = (
+            torch.einsum(
+                "bnr,bnp->bpr",
+                blocked_resource_pips,
+                buildings_raw,
+            )
+            / 15.0
+        )
+        global_semantics = torch.cat(
+            (
+                player_resource_production.flatten(start_dim=1),
+                trade_improvements.flatten(start_dim=1),
+                board_resource_production,
+                player_blocked_production.flatten(start_dim=1),
+            ),
+            dim=-1,
+        )
+        return node_features, tile_features, global_semantics
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.ndim != 2 or x.shape[1] != self.config.input_dim:
+            raise ValueError(
+                f"Expected Catan graph input [batch, {self.config.input_dim}], got {tuple(x.shape)}"
+            )
+        batch_size = x.shape[0]
+        numeric = x[:, : self.numeric_dim]
+        if self.config.normalize_inputs:
+            numeric = torch.clamp(numeric / self.numeric_denominators, min=-1.0, max=1.0)
+        board = x[:, self.numeric_dim :].reshape(
+            batch_size,
+            self.board_width,
+            self.board_height,
+            self.board_channels,
+        )
+        node_raw = board[
+            :,
+            self.node_positions[:, 0],
+            self.node_positions[:, 1],
+            :,
+        ]
+        # Road ownership lives at Catanatron's edge pixels. Aggregate incident
+        # roads into the otherwise-zero road channels at each endpoint so the
+        # graph layers retain local network topology without changing the
+        # observation or checkpoint tensor shapes.
+        edge_raw = board[
+            :,
+            self.edge_positions[:, 0],
+            self.edge_positions[:, 1],
+            :,
+        ]
+        edge_roads = edge_raw.index_select(-1, self.road_channel_indices)
+        incident_roads = (
+            torch.einsum(
+                "ne,bep->bnp",
+                self.node_edge_incidence,
+                edge_roads,
+            )
+            / 3.0
+        )
+        node_raw = node_raw.clone()
+        # Under fp16 autocast the einsum above returns half precision while
+        # ``node_raw`` stays float32; index_put requires matching dtypes.
+        node_raw[..., self.road_channel_indices] = incident_roads.to(node_raw.dtype)
+        resource_offset = 2 * self.config.num_players
+        tile_source = node_raw[:, :, resource_offset : resource_offset + 6]
+        tile_raw = torch.einsum("tn,bnc->btc", self.tile_decoder, tile_source)
+        if self.config.semantic_inputs:
+            node_raw, tile_raw, global_semantics = self._semantic_spatial_inputs(
+                node_raw,
+                tile_raw,
+                incident_roads,
+            )
+            numeric = torch.cat((numeric, global_semantics), dim=-1)
+        elif self.config.normalize_inputs:
+            # Catanatron stores dice probabilities (pips/36). Nexus-v3 uses
+            # pips/5 for tiles and normalized production at nodes.
+            tile_raw = tile_raw.clone()
+            tile_raw[..., :5] *= 36.0 / 5.0
+            node_raw[..., 0:resource_offset:2] /= 2.0
+            node_raw[..., resource_offset : resource_offset + 5] *= 36.0 / 13.0
+
+        global_features = torch.relu(self.global_projection(numeric))
+        nodes = torch.relu(self.node_projection(node_raw))
+        tiles = torch.relu(self.tile_projection(tile_raw))
+        node_global = global_features.unsqueeze(1).expand(-1, self.num_nodes, -1)
+        tile_global = global_features.unsqueeze(1).expand(-1, self.num_tiles, -1)
+        nodes = self.node_injection(torch.cat((nodes, node_global), dim=-1))
+        tiles = self.tile_injection(torch.cat((tiles, tile_global), dim=-1))
+        for layer in self.graph_layers:
+            nodes, tiles = layer(
+                nodes,
+                tiles,
+                self.node_adjacency,
+                self.tile_to_node,
+                self.node_to_tile,
+            )
+
+        pooled = torch.cat(
+            (nodes.mean(dim=1), tiles.mean(dim=1), global_features),
+            dim=-1,
+        )
+        return torch.cat(
+            (pooled, nodes.reshape(batch_size, -1), tiles.reshape(batch_size, -1)),
+            dim=-1,
+        )
+
+
 class ResidualCrossDimensionalBackbone(nn.Module):
     """
     Cross-dimensional backbone with residual connections between the CNN
@@ -421,5 +933,9 @@ def create_backbone(config: BackboneConfig) -> Tuple[nn.Module, int]:
         assert isinstance(config.args, CrossDimensionalBackboneConfig)
         backbone = CompactCrossDimensionalBackbone(config.args)
         return backbone, config.args.output_dim
+    elif config.architecture == "catan_graph":
+        assert isinstance(config.args, CatanGraphBackboneConfig)
+        backbone = CatanGraphBackbone(config.args)
+        return backbone, backbone.output_dim
     else:
         raise ValueError(f"Unsupported architecture: {config.architecture}")

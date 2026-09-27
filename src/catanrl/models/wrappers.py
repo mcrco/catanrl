@@ -1,7 +1,18 @@
 import torch.nn as nn
 from typing import Any
 
-from .heads import FlatPolicyHead, HierarchicalPolicyHead, ValueHead, WDLValueHead
+from .heads import (
+    CatanGraphPolicyHead,
+    CatanGraphValueHead,
+    CatanGraphWDLValueHead,
+    FlatPolicyHead,
+    HierarchicalPolicyHead,
+    ValueHead,
+    WDLValueHead,
+)
+
+PolicyHead = FlatPolicyHead | HierarchicalPolicyHead | CatanGraphPolicyHead
+PolicyValueHead = ValueHead | WDLValueHead | CatanGraphValueHead | CatanGraphWDLValueHead
 
 
 class PolicyNetworkWrapper(nn.Module):
@@ -20,7 +31,7 @@ class PolicyNetworkWrapper(nn.Module):
     num_maritime_trades: int
     num_discard_combinations: int
 
-    def __init__(self, backbone: nn.Module, policy_head: FlatPolicyHead | HierarchicalPolicyHead):
+    def __init__(self, backbone: nn.Module, policy_head: PolicyHead):
         super().__init__()
         self.backbone = backbone
         self.policy_head = policy_head
@@ -69,8 +80,8 @@ class PolicyValueNetworkWrapper(nn.Module):
     def __init__(
         self,
         backbone: nn.Module,
-        policy_head: FlatPolicyHead | HierarchicalPolicyHead,
-        value_head: ValueHead | WDLValueHead,
+        policy_head: PolicyHead,
+        value_head: PolicyValueHead,
     ):
         super().__init__()
         self.backbone = backbone

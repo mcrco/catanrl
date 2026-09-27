@@ -252,22 +252,27 @@ def run_ppo_update(
             batch_valid_action_masks = valid_action_masks[batch_indices]
             batch_is_decision = is_decision[batch_indices]
 
+            decision_count = int(np.sum(batch_is_decision))
+            decision_mask_t = torch.as_tensor(batch_is_decision, device=device, dtype=torch.bool)
             if uses_separate_critic:
-                log_probs, entropy, policy_logits = agent.evaluate_actions(
-                    batch_actor_states, batch_actions, batch_valid_action_masks
-                )
+                # Forced rows (including the idle seat in MARL) carry no policy
+                # gradient, so only decision rows go through the actor.
+                if decision_count > 0:
+                    log_probs_d, entropy_d, logits_d = agent.evaluate_actions(
+                        batch_actor_states[decision_mask_t],
+                        batch_actions[decision_mask_t],
+                        batch_valid_action_masks[batch_is_decision],
+                    )
                 values = predict_values(batch_actor_states, batch_critic_states)
             else:
                 log_probs, entropy, policy_logits, values = agent.evaluate_actions_and_values(
                     batch_actor_states, batch_actions, batch_valid_action_masks
                 )
-
-            decision_count = int(np.sum(batch_is_decision))
-            if decision_count > 0:
-                decision_mask_t = torch.as_tensor(batch_is_decision, device=device, dtype=torch.bool)
                 log_probs_d = log_probs[decision_mask_t]
                 entropy_d = entropy[decision_mask_t]
                 logits_d = policy_logits[decision_mask_t]
+
+            if decision_count > 0:
                 old_log_probs_d = batch_old_log_probs[decision_mask_t]
                 advantages_d = batch_advantages[decision_mask_t]
 

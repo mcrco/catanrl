@@ -1,0 +1,25 @@
+# graph-s from scripts/arch_ablation on the arch-ablation branch: the best
+# teacher-neutral architecture (0.5M params). Separate policy + critic,
+# symmetric full observations (actor == critic).
+name: catan-graph-s-flat-2p-full-sep
+
+model:
+  model_type: flat
+  backbone_type: catan_graph
+  policy_hidden_dims: [128]
+  critic_hidden_dims: [128]
+  policy_mode: full
+  critic_mode: full
+  network_mode: separate
+  graph_hidden_dim: 128
+  graph_global_hidden_dim: 64
+  graph_num_layers: 3
+  graph_head_hidden_dim: 128
+  graph_normalize_inputs: true
+  graph_semantic_inputs: true
+
+game:
+  map_type: BASE
+  vps_to_win: 15
+  discard_limit: 9
+  num_players: 2

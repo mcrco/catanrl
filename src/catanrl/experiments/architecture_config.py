@@ -11,12 +11,12 @@ import yaml
 
 ObservationLevel = Literal["private", "public", "full"]
 NetworkMode = Literal["shared", "separate"]
-BackboneType = Literal["mlp", "xdim", "xdim_res", "xdim_compact"]
+BackboneType = Literal["mlp", "xdim", "xdim_res", "xdim_compact", "catan_graph"]
 MapType = Literal["BASE", "MINI", "TOURNAMENT"]
 
 OBSERVATION_LEVEL_CHOICES = ("private", "public", "full")
 NETWORK_MODE_CHOICES = ("shared", "separate")
-BACKBONE_TYPE_CHOICES = ("mlp", "xdim", "xdim_res", "xdim_compact")
+BACKBONE_TYPE_CHOICES = ("mlp", "xdim", "xdim_res", "xdim_compact", "catan_graph")
 MAP_TYPE_CHOICES = ("BASE", "MINI", "TOURNAMENT")
 MODEL_TYPE_CHOICES = ("flat", "hierarchical")
 VALUE_HEAD_TYPE_CHOICES = ("scalar", "wdl")
@@ -40,6 +40,12 @@ class ArchitecturePreset:
     discard_limit: int
     num_players: int | None = None
     value_head_type: str = "scalar"
+    graph_hidden_dim: int = 256
+    graph_global_hidden_dim: int = 96
+    graph_num_layers: int = 4
+    graph_head_hidden_dim: int = 256
+    graph_normalize_inputs: bool = False
+    graph_semantic_inputs: bool = False
 
     @property
     def actor_observation_level(self) -> str:
@@ -89,6 +95,12 @@ def _parse_optional_int(value: object, *, field: str) -> int | None:
     return value
 
 
+def _parse_bool(value: object, *, field: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"'{field}' must be a boolean.")
+    return value
+
+
 def _parse_choice(value: object, *, field: str, choices: Sequence[str]) -> str:
     if not isinstance(value, str) or value not in choices:
         allowed = ", ".join(choices)
@@ -120,7 +132,22 @@ def load_architecture_preset(path: str | Path) -> ArchitecturePreset:
     model = _require_mapping(raw.get("model"), field="model")
     game = _require_mapping(raw.get("game"), field="game")
 
-    kernel = _parse_int_list(model.get("xdim_cnn_kernel_size"), field="model.xdim_cnn_kernel_size")
+    backbone_type = _parse_choice(
+        model.get("backbone_type"),
+        field="model.backbone_type",
+        choices=BACKBONE_TYPE_CHOICES,
+    )
+    model_type = _parse_choice(
+        model.get("model_type"), field="model.model_type", choices=MODEL_TYPE_CHOICES
+    )
+    if backbone_type == "catan_graph" and model_type != "flat":
+        raise ValueError("catan_graph backbones require model.model_type: flat")
+    # Graph presets do not use the CNN fields; keep placeholders so the preset
+    # dataclass (and train_config) stays uniform across backbone families.
+    is_graph = backbone_type == "catan_graph"
+    xdim_channels_raw = model.get("xdim_cnn_channels", [1] if is_graph else None)
+    kernel_raw = model.get("xdim_cnn_kernel_size", [3, 5] if is_graph else None)
+    kernel = _parse_int_list(kernel_raw, field="model.xdim_cnn_kernel_size")
     if len(kernel) != 2:
         raise ValueError("model.xdim_cnn_kernel_size must contain exactly two integers.")
 
@@ -129,14 +156,8 @@ def load_architecture_preset(path: str | Path) -> ArchitecturePreset:
         raise ValueError("game.num_players must be an integer >= 2 when set.")
 
     return ArchitecturePreset(
-        model_type=_parse_choice(
-            model.get("model_type"), field="model.model_type", choices=MODEL_TYPE_CHOICES
-        ),
-        backbone_type=_parse_choice(
-            model.get("backbone_type"),
-            field="model.backbone_type",
-            choices=BACKBONE_TYPE_CHOICES,
-        ),
+        model_type=model_type,
+        backbone_type=backbone_type,
         policy_hidden_dims=_parse_int_list(
             model.get("policy_hidden_dims"), field="model.policy_hidden_dims"
         ),
@@ -152,9 +173,7 @@ def load_architecture_preset(path: str | Path) -> ArchitecturePreset:
         network_mode=_parse_choice(
             model.get("network_mode"), field="model.network_mode", choices=NETWORK_MODE_CHOICES
         ),
-        xdim_cnn_channels=_parse_int_list(
-            model.get("xdim_cnn_channels"), field="model.xdim_cnn_channels"
-        ),
+        xdim_cnn_channels=_parse_int_list(xdim_channels_raw, field="model.xdim_cnn_channels"),
         xdim_cnn_kernel_size=(kernel[0], kernel[1]),
         xdim_policy_fusion_hidden_dim=_parse_optional_int(
             model.get("xdim_policy_fusion_hidden_dim"),
@@ -172,6 +191,28 @@ def load_architecture_preset(path: str | Path) -> ArchitecturePreset:
             model.get("value_head_type", "scalar"),
             field="model.value_head_type",
             choices=VALUE_HEAD_TYPE_CHOICES,
+        ),
+        graph_hidden_dim=_parse_optional_int(
+            model.get("graph_hidden_dim"), field="model.graph_hidden_dim"
+        )
+        or 256,
+        graph_global_hidden_dim=_parse_optional_int(
+            model.get("graph_global_hidden_dim"), field="model.graph_global_hidden_dim"
+        )
+        or 96,
+        graph_num_layers=_parse_optional_int(
+            model.get("graph_num_layers"), field="model.graph_num_layers"
+        )
+        or 4,
+        graph_head_hidden_dim=_parse_optional_int(
+            model.get("graph_head_hidden_dim"), field="model.graph_head_hidden_dim"
+        )
+        or 256,
+        graph_normalize_inputs=_parse_bool(
+            model.get("graph_normalize_inputs", False), field="model.graph_normalize_inputs"
+        ),
+        graph_semantic_inputs=_parse_bool(
+            model.get("graph_semantic_inputs", False), field="model.graph_semantic_inputs"
         ),
     )
 
@@ -193,6 +234,12 @@ def architecture_train_config_fields(arch: ArchitecturePreset) -> dict[str, Any]
         "xdim_cnn_kernel_size": list(arch.xdim_cnn_kernel_size),
         "xdim_policy_fusion_hidden_dim": arch.xdim_policy_fusion_hidden_dim,
         "xdim_critic_fusion_hidden_dim": arch.xdim_critic_fusion_hidden_dim,
+        "graph_hidden_dim": arch.graph_hidden_dim,
+        "graph_global_hidden_dim": arch.graph_global_hidden_dim,
+        "graph_num_layers": arch.graph_num_layers,
+        "graph_head_hidden_dim": arch.graph_head_hidden_dim,
+        "graph_normalize_inputs": arch.graph_normalize_inputs,
+        "graph_semantic_inputs": arch.graph_semantic_inputs,
         "map_type": arch.map_type,
         "vps_to_win": arch.vps_to_win,
         "discard_limit": arch.discard_limit,

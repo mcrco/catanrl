@@ -42,6 +42,7 @@ if TYPE_CHECKING:
 
 from .models.backbones import (
     BackboneConfig,
+    CatanGraphBackboneConfig,
     CrossDimensionalBackboneConfig,
     MLPBackboneConfig,
 )
@@ -126,6 +127,8 @@ def backbone_config_from_dict(data: Dict[str, Any]) -> BackboneConfig:
         return BackboneConfig(
             architecture=architecture, args=CrossDimensionalBackboneConfig(**args)
         )
+    if architecture == "catan_graph":
+        return BackboneConfig(architecture=architecture, args=CatanGraphBackboneConfig(**args))
     raise ValueError(f"Unknown backbone architecture '{architecture}'")
 
 
@@ -434,6 +437,7 @@ _BACKBONE_DISPLAY = {
     "cross_dimensional": "xdim",
     "residual_cross_dimensional": "xdim_res",
     "compact_cross_dimensional": "xdim_compact",
+    "catan_graph": "catan_graph",
 }
 
 
@@ -445,6 +449,8 @@ def backbone_display_type(backbone: BackboneConfig) -> str:
 def backbone_hidden_dims(backbone: BackboneConfig) -> List[int]:
     """Best-effort hidden-layer sizes for display/logging."""
     args = backbone.args
+    if isinstance(args, CatanGraphBackboneConfig):
+        return [args.hidden_dim]
     return list(getattr(args, "hidden_dims", None) or getattr(args, "numeric_hidden_dims", []))
 
 
@@ -518,6 +524,18 @@ def _apply_xdim_backbone_args(args: argparse.Namespace, backbone: BackboneConfig
     _set_arg(args, "xdim_policy_fusion_hidden_dim", bb_args.fusion_hidden_dim)
 
 
+def _apply_graph_backbone_args(args: argparse.Namespace, backbone: BackboneConfig) -> None:
+    if not isinstance(backbone.args, CatanGraphBackboneConfig):
+        return
+    bb_args = backbone.args
+    _set_arg(args, "graph_hidden_dim", bb_args.hidden_dim)
+    _set_arg(args, "graph_global_hidden_dim", bb_args.global_hidden_dim)
+    _set_arg(args, "graph_num_layers", bb_args.num_layers)
+    _set_arg(args, "graph_head_hidden_dim", bb_args.head_hidden_dim)
+    _set_arg(args, "graph_normalize_inputs", bb_args.normalize_inputs)
+    _set_arg(args, "graph_semantic_inputs", bb_args.semantic_inputs)
+
+
 def apply_experiment_architecture_to_args(args: argparse.Namespace, exp: Experiment) -> None:
     """Override architecture-related CLI args from experiment metadata.
 
@@ -540,6 +558,7 @@ def apply_experiment_architecture_to_args(args: argparse.Namespace, exp: Experim
     policy_dims = _hidden_dims_csv(policy.backbone)
     _set_arg(args, "policy_hidden_dims", policy_dims)
     _apply_xdim_backbone_args(args, policy.backbone)
+    _apply_graph_backbone_args(args, policy.backbone)
 
     if policy.observation_level is not None:
         _set_arg(args, "policy_mode", policy.observation_level)
@@ -994,12 +1013,23 @@ def architecture_preset_from_experiment(exp: Experiment) -> "ArchitecturePreset"
     xdim_cnn_kernel_size = (3, 5)
     xdim_policy_fusion_hidden_dim: int | None = None
     xdim_critic_fusion_hidden_dim: int | None = None
+    graph_fields: dict[str, Any] = {}
 
     if isinstance(policy.backbone.args, CrossDimensionalBackboneConfig):
         bb = policy.backbone.args
         xdim_cnn_channels = tuple(bb.cnn_channels)
         xdim_cnn_kernel_size = (bb.cnn_kernel_size[0], bb.cnn_kernel_size[1])
         xdim_policy_fusion_hidden_dim = bb.fusion_hidden_dim
+    elif isinstance(policy.backbone.args, CatanGraphBackboneConfig):
+        graph = policy.backbone.args
+        graph_fields = {
+            "graph_hidden_dim": graph.hidden_dim,
+            "graph_global_hidden_dim": graph.global_hidden_dim,
+            "graph_num_layers": graph.num_layers,
+            "graph_head_hidden_dim": graph.head_hidden_dim,
+            "graph_normalize_inputs": graph.normalize_inputs,
+            "graph_semantic_inputs": graph.semantic_inputs,
+        }
 
     if critic is not None and isinstance(critic.backbone.args, CrossDimensionalBackboneConfig):
         xdim_critic_fusion_hidden_dim = critic.backbone.args.fusion_hidden_dim
@@ -1031,6 +1061,7 @@ def architecture_preset_from_experiment(exp: Experiment) -> "ArchitecturePreset"
         discard_limit=game.discard_limit or tc.get("discard_limit") or 9,
         num_players=game.num_players,
         value_head_type=policy.value_head_type,
+        **graph_fields,
     )
 
 

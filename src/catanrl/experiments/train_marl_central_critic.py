@@ -153,12 +153,27 @@ def main():
     add_number_placement_argument(parser)
     parser.add_argument("--num-envs", type=int, default=4)
     parser.add_argument(
+        "--eval-num-envs",
+        type=int,
+        default=None,
+        help="Parallel Python Catanatron envs for evaluation (default: --num-envs).",
+    )
+    parser.add_argument(
         "--env-backend",
         choices=["python", "cppanatron", "cppanatron-native"],
         default="python",
         help="Game engine used for MARL collection.",
     )
     parser.add_argument("--metric-window", type=int, default=DEFAULT_METRIC_WINDOW)
+    parser.add_argument(
+        "--time-limit-hours",
+        type=float,
+        default=None,
+        help=(
+            "Stop after the first PPO update past this wall-clock budget, evaluate and "
+            "save that update, and write the experiment (in addition to --total-timesteps)."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -250,8 +265,10 @@ def main():
         "reward_function": args.reward_function,
         "number_placement": args.number_placement,
         "num_envs": args.num_envs,
+        "eval_num_envs": args.eval_num_envs,
         "env_backend": args.env_backend,
         "metric_window": args.metric_window,
+        "time_limit_hours": args.time_limit_hours,
     }
     if args.wandb:
         wandb_config = {
@@ -284,6 +301,12 @@ def main():
         xdim_cnn_kernel_size=arch.xdim_cnn_kernel_size,
         xdim_policy_fusion_hidden_dim=arch.xdim_policy_fusion_hidden_dim,
         xdim_critic_fusion_hidden_dim=arch.xdim_critic_fusion_hidden_dim,
+        graph_hidden_dim=arch.graph_hidden_dim,
+        graph_global_hidden_dim=arch.graph_global_hidden_dim,
+        graph_num_layers=arch.graph_num_layers,
+        graph_head_hidden_dim=arch.graph_head_hidden_dim,
+        graph_normalize_inputs=arch.graph_normalize_inputs,
+        graph_semantic_inputs=arch.graph_semantic_inputs,
         total_timesteps=args.total_timesteps,
         rollout_steps=args.rollout_steps,
         policy_lr=args.policy_lr,
@@ -317,6 +340,7 @@ def main():
         save_every_updates=args.save_every_updates,
         target_kl=args.target_kl,
         num_envs=args.num_envs,
+        eval_num_envs=args.eval_num_envs,
         env_backend=args.env_backend,
         reward_function=args.reward_function,
         vps_to_win=arch.vps_to_win,
@@ -324,6 +348,9 @@ def main():
         metric_window=args.metric_window,
         resume_state=resume.state,
         training_state_path=training_state_path,
+        time_limit_seconds=(
+            args.time_limit_hours * 3600.0 if args.time_limit_hours is not None else None
+        ),
     )
 
     if arch.network_mode == "shared":

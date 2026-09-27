@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import random
 import sys
+import time
 from collections import deque
 from typing import Any, Callable, Dict, Literal, Optional, Sequence, Tuple
 
@@ -115,6 +116,12 @@ def train(
     xdim_cnn_kernel_size: Tuple[int, int] = (3, 5),
     xdim_policy_fusion_hidden_dim: Optional[int] = None,
     xdim_critic_fusion_hidden_dim: Optional[int] = None,
+    graph_hidden_dim: int = 256,
+    graph_global_hidden_dim: int = 96,
+    graph_num_layers: int = 4,
+    graph_head_hidden_dim: int = 256,
+    graph_normalize_inputs: bool = False,
+    graph_semantic_inputs: bool = False,
     total_timesteps: int = 1_000_000,
     rollout_steps: int = 4096,
     policy_lr: float = 3e-4,
@@ -148,6 +155,7 @@ def train(
     save_every_updates: int = 1,
     target_kl: Optional[float] = None,
     num_envs: int = 2,
+    eval_num_envs: Optional[int] = None,
     reward_function: Literal["shaped", "win"] = "shaped",
     vps_to_win: int = 15,
     discard_limit: int = 9,
@@ -155,13 +163,16 @@ def train(
     env_backend: MarlEnvBackend = "python",
     resume_state: Optional[Dict] = None,
     training_state_path: Optional[str] = None,
+    time_limit_seconds: Optional[float] = None,
 ) -> Tuple[PolicyNetworkWrapper, ValueNetworkWrapper]:
     """Train a shared policy with a centralized critic using PPO.
 
     When ``resume_state`` is provided the run continues in place (weights,
     optimizers and step counters are restored, and ``total_timesteps`` is treated
     as *additional* steps). When ``training_state_path`` is set, full training
-    state is persisted there at every checkpoint save.
+    state is persisted there at every checkpoint save. ``time_limit_seconds``
+    stops collection after the first PPO update past the wall-clock budget, then
+    evaluates and saves that final update like a scheduled checkpoint.
     """
 
     assert 2 <= num_players <= 4, "num_players must be between 2 and 4"
@@ -171,6 +182,7 @@ def train(
         "xdim",
         "xdim_res",
         "xdim_compact",
+        "catan_graph",
     ), f"Unknown backbone_type '{backbone_type}'"
     if network_mode not in ("separate", "shared"):
         raise ValueError(f"Unknown network_mode '{network_mode}'")
@@ -193,6 +205,9 @@ def train(
     if not xdim_cnn_channels:
         raise ValueError("xdim_cnn_channels cannot be empty")
 
+    # Eval games run on Python Catanatron worker processes, so their count is
+    # bounded by CPU cores independently of the (possibly native) training envs.
+    eval_num_envs = num_envs if eval_num_envs is None else max(1, int(eval_num_envs))
     set_global_seeds(seed)
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     action_space_size = get_action_space_size(num_players, map_type)
@@ -241,6 +256,12 @@ def train(
             f"XDim config: cnn_channels={xdim_cnn_channels}, kernel={xdim_cnn_kernel_size}, "
             f"policy_fusion={xdim_policy_fusion_hidden_dim}, critic_fusion={xdim_critic_fusion_hidden_dim}"
         )
+    elif backbone_type == "catan_graph":
+        print(
+            f"Graph config: hidden={graph_hidden_dim}, global={graph_global_hidden_dim}, "
+            f"layers={graph_num_layers}, head={graph_head_hidden_dim}, "
+            f"normalize={graph_normalize_inputs}, semantic={graph_semantic_inputs}"
+        )
     print(f"Total timesteps: {total_timesteps:,} | Rollout steps: {rollout_steps}")
     print(f"Parallel environments: {num_envs}")
 
@@ -256,6 +277,16 @@ def train(
 
     assert board_shape is not None
     board_channels, board_width, board_height = board_shape
+    graph_backbone_kwargs: Dict[str, Any] = dict(
+        num_players=num_players,
+        map_type=map_type,
+        graph_hidden_dim=graph_hidden_dim,
+        graph_global_hidden_dim=graph_global_hidden_dim,
+        graph_num_layers=graph_num_layers,
+        graph_head_hidden_dim=graph_head_hidden_dim,
+        graph_normalize_inputs=graph_normalize_inputs,
+        graph_semantic_inputs=graph_semantic_inputs,
+    )
     policy_backbone_config = build_backbone_config(
         backbone_type=backbone_type,
         hidden_dims=policy_hidden_dims,
@@ -267,6 +298,7 @@ def train(
         xdim_cnn_channels=xdim_cnn_channels,
         xdim_cnn_kernel_size=xdim_cnn_kernel_size,
         xdim_fusion_hidden_dim=xdim_policy_fusion_hidden_dim,
+        **graph_backbone_kwargs,
     )
 
     if uses_shared_network:
@@ -308,6 +340,7 @@ def train(
             xdim_cnn_channels=xdim_cnn_channels,
             xdim_cnn_kernel_size=xdim_cnn_kernel_size,
             xdim_fusion_hidden_dim=xdim_critic_fusion_hidden_dim,
+            **graph_backbone_kwargs,
         )
         critic_model = build_value_network(backbone_config=critic_backbone_config).to(device)
 
@@ -346,6 +379,28 @@ def train(
             raise ValueError("critic_states must be provided for centralized critic updates.")
         assert critic_model is not None
         return critic_model(critic_states).squeeze(-1)
+
+    def select_marl_actions(
+        actor_states: torch.Tensor, valid_masks: np.ndarray
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Sample actions, running the actor only on rows with a real choice.
+
+        Every step carries one row per seat, and the idle seat (like any forced
+        move) has exactly one legal action with log-probability zero.
+        """
+        actions = np.argmax(valid_masks, axis=1).astype(np.int64)
+        log_probs = np.zeros(len(valid_masks), dtype=np.float32)
+        decision_rows = np.flatnonzero(valid_masks.sum(axis=1) > 1)
+        if decision_rows.size:
+            rows_t = torch.as_tensor(decision_rows, device=actor_states.device)
+            actions[decision_rows], log_probs[decision_rows], _ = (
+                policy_agent.select_actions_batch(
+                    actor_states[rows_t],
+                    valid_masks[decision_rows],
+                    deterministic=deterministic_policy,
+                )
+            )
+        return actions, log_probs
 
     buffer = CentralCriticExperienceBuffer(
         num_rollouts=rollout_steps,
@@ -470,7 +525,7 @@ def train(
                 log_to_wandb=False,
                 global_step=global_step,
                 device=device,
-                num_envs=num_envs,
+                num_envs=eval_num_envs,
                 number_placement=number_placement,
             )
             trend_eval_metrics = eval_policy_value_against_baselines(
@@ -491,7 +546,7 @@ def train(
                 log_to_wandb=False,
                 global_step=global_step,
                 device=device,
-                num_envs=num_envs,
+                num_envs=eval_num_envs,
                 number_placement=number_placement,
             )
 
@@ -535,7 +590,7 @@ def train(
                     discard_limit=discard_limit,
                     log_to_wandb=False,
                     global_step=global_step,
-                    num_envs=num_envs,
+                    num_envs=eval_num_envs,
                     device=device,
                     nn_seat=seat_mode,
                     actor_observation_level=actor_observation_level,
@@ -618,6 +673,9 @@ def train(
 
     try:
         with tqdm(total=total_timesteps, desc="Steps", unit="step", unit_scale=True) as pbar:
+            deadline = (
+                time.monotonic() + time_limit_seconds if time_limit_seconds is not None else None
+            )
             while global_step < target_timesteps:
                 actor_batch, critic_batch, valid_masks = decode_observations(observations)
                 actor_tensor = torch.from_numpy(actor_batch).float().to(device)
@@ -626,9 +684,7 @@ def train(
                         actor_tensor, valid_masks, deterministic=deterministic_policy
                     )
                 else:
-                    actions, log_probs, _ = policy_agent.select_actions_batch(
-                        actor_tensor, valid_masks, deterministic=deterministic_policy
-                    )
+                    actions, log_probs = select_marl_actions(actor_tensor, valid_masks)
                     critic_inputs = torch.from_numpy(critic_batch).float().to(device)
                     value_model.eval()
                     with torch.no_grad():
@@ -797,6 +853,28 @@ def train(
                     # Evaluate policy against catanatron bots and critic value predictions.
                     if ppo_update_count % eval_every_updates == 0:
                         run_and_log_evals()
+
+                    if deadline is not None and time.monotonic() >= deadline:
+                        print(
+                            f"\nWall-clock budget reached after {ppo_update_count} updates "
+                            f"({global_step:,} steps)."
+                        )
+                        if ppo_update_count % save_every_updates != 0 and save_path:
+                            torch.save(
+                                policy_model.state_dict(),
+                                os.path.join(save_path, f"policy_update_{ppo_update_count}.pt"),
+                            )
+                            if critic_model is not None:
+                                torch.save(
+                                    critic_model.state_dict(),
+                                    os.path.join(
+                                        save_path,
+                                        f"policy_update_{ppo_update_count}_critic.pt",
+                                    ),
+                                )
+                        if ppo_update_count % eval_every_updates != 0:
+                            run_and_log_evals()
+                        break
 
     finally:
         persist_training_state()

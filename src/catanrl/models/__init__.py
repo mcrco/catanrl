@@ -3,6 +3,7 @@
 from .backbone_builder import build_backbone_config
 from .backbones import (
     BackboneConfig,
+    CatanGraphBackboneConfig,
     CrossDimensionalBackboneConfig,
     MLPBackboneConfig,
 )
@@ -22,6 +23,7 @@ __all__ = [
     "BackboneConfig",
     "MLPBackboneConfig",
     "CrossDimensionalBackboneConfig",
+    "CatanGraphBackboneConfig",
     "build_backbone_config",
     "build_policy_model",
     "build_critic_model",
