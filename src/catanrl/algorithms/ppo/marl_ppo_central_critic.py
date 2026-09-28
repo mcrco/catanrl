@@ -828,8 +828,12 @@ def train(
                     )
                     value_model.eval()
                     with torch.no_grad():
-                        values = predict_values(actor_tensor, critic_inputs).detach().cpu().numpy()
+                        values = predict_values(actor_tensor, critic_inputs).detach()
                     value_model.train()
+                    if not gpu_rollouts:
+                        values = values.cpu().numpy()
+                    # With GPU rollouts the values are written on-device without a
+                    # host sync, so the env step below overlaps the critic forward.
                 played_action_buffer.append(actions)
 
                 next_observations, rewards, terminations, truncations, infos = envs.step(actions)

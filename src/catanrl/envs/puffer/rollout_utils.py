@@ -60,6 +60,55 @@ def get_action_mask_from_obs(obs: Dict[str, Any]) -> np.ndarray:
     return np.asarray(obs["action_mask"], dtype=np.int8) > 0
 
 
+def _decode_flat_structured_batch(
+    flat_obs: np.ndarray,
+    obs_dtype: Any,
+    actor_dim: int,
+    critic_dim: Optional[int],
+    actor_indices: Optional[np.ndarray],
+    critic_indices: Optional[np.ndarray],
+) -> Optional[Tuple[np.ndarray, Optional[np.ndarray], np.ndarray]]:
+    """Decode a whole batch with one structured view when rows are flat records.
+
+    Current envs emit rows of ``{"action_mask": int8[A], "observation": f32[D]}``;
+    viewing the byte buffer through that dtype replaces the per-row nativize.
+    Actor and critic arrays may be the same object when both views are the full
+    observation; callers treat them as read-only. Returns None for any other
+    layout so the generic path handles it.
+    """
+    fields = getattr(obs_dtype, "fields", None)
+    if not fields or set(fields) != {"observation", "action_mask"}:
+        return None
+    observation_dtype = fields["observation"][0]
+    if observation_dtype.subdtype is None or len(observation_dtype.shape) != 1:
+        return None
+    if flat_obs.ndim != 2 or flat_obs.dtype != np.uint8:
+        return None
+    if flat_obs.shape[1] != obs_dtype.itemsize or not flat_obs.flags.c_contiguous:
+        return None
+
+    records = flat_obs.view(obs_dtype).reshape(flat_obs.shape[0])
+    # Copy to a C-ordered array first: gathering columns straight from the
+    # strided record view yields a column-major result that is slow to reorder.
+    full = np.ascontiguousarray(records["observation"], dtype=np.float32)
+
+    def select(indices: Optional[np.ndarray]) -> np.ndarray:
+        if indices is None or np.array_equal(indices, np.arange(full.shape[1])):
+            return full
+        return full[:, indices]
+
+    actor_batch = select(actor_indices)
+    if actor_batch.shape[1] != actor_dim:
+        return None
+    critic_batch = None
+    if critic_dim is not None:
+        critic_batch = select(critic_indices)
+        if critic_batch.shape[1] != critic_dim:
+            return None
+    action_masks = records["action_mask"] > 0
+    return actor_batch, critic_batch, action_masks
+
+
 def decode_puffer_batch(
     flat_obs: np.ndarray,
     obs_space: Any,
@@ -75,6 +124,12 @@ def decode_puffer_batch(
     and critic views are selected with optional index arrays. If critic_dim is
     None, critic outputs are skipped and returned as None.
     """
+    fast = _decode_flat_structured_batch(
+        flat_obs, obs_dtype, actor_dim, critic_dim, actor_indices, critic_indices
+    )
+    if fast is not None:
+        return fast
+
     # Local import keeps this util torch-free and avoids puffer dependency at import time.
     from pufferlib.emulation import nativize
 
