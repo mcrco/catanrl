@@ -672,10 +672,20 @@ def train(
     observations, infos = envs.reset()
 
     try:
-        with tqdm(total=total_timesteps, desc="Steps", unit="step", unit_scale=True) as pbar:
-            deadline = (
-                time.monotonic() + time_limit_seconds if time_limit_seconds is not None else None
+        # With a wall-clock budget the step target is only a cap, so track progress
+        # against the budget instead.
+        if time_limit_seconds is not None:
+            progress = tqdm(
+                total=int(time_limit_seconds),
+                desc="Budget",
+                unit="s",
+                bar_format="{l_bar}{bar}| {n:.0f}/{total}s [{elapsed}<{remaining}{postfix}]",
             )
+        else:
+            progress = tqdm(total=total_timesteps, desc="Steps", unit="step", unit_scale=True)
+        with progress as pbar:
+            start_time = time.monotonic()
+            deadline = start_time + time_limit_seconds if time_limit_seconds is not None else None
             while global_step < target_timesteps:
                 actor_batch, critic_batch, valid_masks = decode_observations(observations)
                 actor_tensor = torch.from_numpy(actor_batch).float().to(device)
@@ -707,7 +717,12 @@ def train(
                     dones,
                 )
                 global_step += num_envs
-                pbar.update(num_envs)
+                if deadline is None:
+                    pbar.update(num_envs)
+                elif global_step % (num_envs * 64) == 0:
+                    elapsed = min(time.monotonic() - start_time, float(pbar.total))
+                    pbar.update(elapsed - pbar.n)
+                    pbar.set_postfix(steps=f"{global_step:,}", refresh=False)
 
                 for env_idx, start in enumerate(env_offsets):
                     end = start + agents_per_env[env_idx]
@@ -752,13 +767,17 @@ def train(
                             ratio = played_action_type_dist.get(name, 0.0)
                             played_action_type_history[name].append(ratio)
                             played_action_log[f"rollout_played_action_type/{name}"] = ratio
-                        played_action_log["rollout/played_action_type_over_time"] = (
-                            build_action_type_time_series_chart(
-                                title="MARL PPO Played Action Type Over Time",
-                                x_values=played_action_type_steps,
-                                history_by_type=played_action_type_history,
+                        # The chart re-serializes the whole history, so its cost grows
+                        # with every update; rebuild it only at eval cadence. The
+                        # per-type scalars above are logged every update.
+                        if (ppo_update_count + 1) % eval_every_updates == 0:
+                            played_action_log["rollout/played_action_type_over_time"] = (
+                                build_action_type_time_series_chart(
+                                    title="MARL PPO Played Action Type Over Time",
+                                    x_values=played_action_type_steps,
+                                    history_by_type=played_action_type_history,
+                                )
                             )
-                        )
                         played_action_buffer.clear()
                     wandb.log(played_action_log, step=global_step)
 
