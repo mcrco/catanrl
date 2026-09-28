@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 
 from ..common import PolicyAgent
-from .buffers import CentralCriticExperienceBuffer, ExperienceBuffer
+from .buffers import CentralCriticExperienceBuffer, ExperienceBuffer, TorchCentralCriticBuffer
 from .gae import compute_gae_batched
 
 
@@ -58,6 +58,12 @@ def compute_value_diagnostics(
     }
 
 
+def _to_numpy(value):
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu().numpy()
+    return value
+
+
 def _has_nan_grad(parameters) -> bool:
     return any(param.grad is not None and torch.isnan(param.grad).any() for param in parameters)
 
@@ -94,7 +100,7 @@ def run_ppo_update(
     value_model: torch.nn.Module,
     predict_values: Callable[[torch.Tensor, torch.Tensor | None], torch.Tensor],
     policy_optimizer: torch.optim.Optimizer,
-    buffer: ExperienceBuffer | CentralCriticExperienceBuffer,
+    buffer: ExperienceBuffer | CentralCriticExperienceBuffer | TorchCentralCriticBuffer,
     clip_epsilon: float,
     value_coef: float,
     entropy_coef: float,
@@ -106,8 +112,8 @@ def run_ppo_update(
     gae_lambda: float = 0.95,
     max_grad_norm: float = 0.5,
     target_kl: float | None = None,
-    last_actor_states: np.ndarray | None = None,
-    last_critic_states: np.ndarray | None = None,
+    last_actor_states: np.ndarray | torch.Tensor | None = None,
+    last_critic_states: np.ndarray | torch.Tensor | None = None,
     critic_optimizer: torch.optim.Optimizer | None = None,
     include_single_action_fraction: bool = False,
     warn_on_empty: bool = False,
@@ -120,7 +126,7 @@ def run_ppo_update(
             single_action_fraction=0.0 if include_single_action_fraction else None,
         )
 
-    if isinstance(buffer, CentralCriticExperienceBuffer):
+    if isinstance(buffer, (CentralCriticExperienceBuffer, TorchCentralCriticBuffer)):
         (
             actor_states_tmj,
             critic_states_tmj,
@@ -143,6 +149,11 @@ def run_ppo_update(
         ) = buffer.get()
         critic_states_tmj = None
 
+    # States and masks may stay on the buffer's device (GPU rollouts); the small
+    # per-step arrays go through the numpy GAE below either way.
+    actions_tmj, rewards_tmj, old_values_tmj, old_log_probs_tmj, dones_tmj = (
+        _to_numpy(x) for x in (actions_tmj, rewards_tmj, old_values_tmj, old_log_probs_tmj, dones_tmj)
+    )
     time_steps, num_envs = actions_tmj.shape
 
     uses_separate_critic = value_model is not agent.model
@@ -153,9 +164,9 @@ def run_ppo_update(
 
     if last_actor_states is None:
         raise ValueError("last_actor_states is required for PPO bootstrap updates.")
-    next_actor_state_t = torch.from_numpy(last_actor_states).float().to(device)
+    next_actor_state_t = torch.as_tensor(last_actor_states).float().to(device)
     next_critic_state_t = (
-        torch.from_numpy(last_critic_states).float().to(device)
+        torch.as_tensor(last_critic_states).float().to(device)
         if last_critic_states is not None
         else None
     )
@@ -195,8 +206,9 @@ def run_ppo_update(
     value_diagnostics = compute_value_diagnostics(old_values_tmj.reshape(-1), returns)
     valid_action_masks = valid_action_masks_tmj.reshape(time_steps * num_envs, -1)
 
-    single_action_fraction = float((valid_action_masks.sum(axis=1) <= 1).mean())
-    is_decision = valid_action_masks.sum(axis=-1) > 1
+    legal_action_counts = _to_numpy(valid_action_masks.sum(-1))
+    single_action_fraction = float((legal_action_counts <= 1).mean())
+    is_decision = legal_action_counts > 1
     if not np.any(is_decision):
         return _empty_metrics(
             single_action_fraction=single_action_fraction if include_single_action_fraction else None,
@@ -208,8 +220,10 @@ def run_ppo_update(
     advantages_norm = np.zeros_like(advantages, dtype=np.float32)
     advantages_norm[is_decision] = adv_decision.astype(np.float32, copy=False)
 
-    actor_states_t = torch.from_numpy(actor_states).float()
-    critic_states_t = torch.from_numpy(critic_states).float() if critic_states is not None else None
+    actor_states_t = torch.as_tensor(actor_states)
+    critic_states_t = torch.as_tensor(critic_states) if critic_states is not None else None
+    valid_action_masks_t = torch.as_tensor(valid_action_masks)
+    storage_device = actor_states_t.device
     actions_t = torch.from_numpy(actions).long()
     old_log_probs_t = torch.from_numpy(old_log_probs).float()
     advantages_t = torch.from_numpy(advantages_norm).float()
@@ -241,15 +255,18 @@ def run_ppo_update(
                     print(f"Skipping small batch: {len(batch_indices)}")
                 continue
 
-            batch_actor_states = actor_states_t[batch_indices].to(device)
+            storage_indices = torch.from_numpy(batch_indices).to(storage_device)
+            batch_actor_states = actor_states_t[storage_indices].to(device).float()
             batch_critic_states = (
-                critic_states_t[batch_indices].to(device) if critic_states_t is not None else None
+                critic_states_t[storage_indices].to(device).float()
+                if critic_states_t is not None
+                else None
             )
             batch_actions = actions_t[batch_indices].to(device)
             batch_old_log_probs = old_log_probs_t[batch_indices].to(device)
             batch_advantages = advantages_t[batch_indices].to(device)
             batch_returns = returns_t[batch_indices].to(device)
-            batch_valid_action_masks = valid_action_masks[batch_indices]
+            batch_valid_action_masks = valid_action_masks_t[storage_indices].to(device)
             batch_is_decision = is_decision[batch_indices]
 
             decision_count = int(np.sum(batch_is_decision))
@@ -261,7 +278,7 @@ def run_ppo_update(
                     log_probs_d, entropy_d, logits_d = agent.evaluate_actions(
                         batch_actor_states[decision_mask_t],
                         batch_actions[decision_mask_t],
-                        batch_valid_action_masks[batch_is_decision],
+                        batch_valid_action_masks[decision_mask_t],
                     )
                 values = predict_values(batch_actor_states, batch_critic_states)
             else:

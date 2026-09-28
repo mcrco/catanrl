@@ -175,6 +175,15 @@ def main():
     )
     parser.add_argument("--metric-window", type=int, default=DEFAULT_METRIC_WINDOW)
     parser.add_argument(
+        "--rollout-buffer-device",
+        choices=["auto", "cuda", "cpu"],
+        default="auto",
+        help=(
+            "Where to keep PPO rollouts. auto measures a dry-run training step and uses "
+            "the GPU when rollouts, training, and a safety margin fit in free memory."
+        ),
+    )
+    parser.add_argument(
         "--time-limit-hours",
         type=float,
         default=None,
@@ -279,6 +288,7 @@ def main():
         "env_backend": args.env_backend,
         "metric_window": args.metric_window,
         "time_limit_hours": args.time_limit_hours,
+        "rollout_buffer_device": args.rollout_buffer_device,
     }
     if args.wandb:
         wandb_config = {
@@ -359,6 +369,7 @@ def main():
         metric_window=args.metric_window,
         resume_state=resume.state,
         training_state_path=training_state_path,
+        rollout_buffer_device=args.rollout_buffer_device,
         time_limit_seconds=(
             args.time_limit_hours * 3600.0 if args.time_limit_hours is not None else None
         ),

@@ -47,10 +47,11 @@ from ...utils.seeding import set_global_seeds
 from ...models.backbone_builder import build_backbone_config
 from ..common import PolicyAgent
 from .action_stats import build_action_type_time_series_chart, compute_action_distributions
-from .buffers import CentralCriticExperienceBuffer
+from .buffers import CentralCriticExperienceBuffer, TorchCentralCriticBuffer
 from .ppo_update import run_ppo_update
 
 CriticWarmStartMode = Literal["full", "backbone", "none"]
+RolloutBufferDevice = Literal["auto", "cuda", "cpu"]
 MarlEnvBackend = Literal["python", "cppanatron", "cppanatron-native"]
 
 
@@ -62,6 +63,80 @@ def _resolve_marl_env_factory(backend: MarlEnvBackend) -> Callable[..., Any]:
     if backend == "cppanatron-native":
         return make_cppanatron_native_marl_vectorized_envs
     raise ValueError(f"Unknown MARL environment backend: {backend!r}")
+
+
+def _training_peak_bytes(
+    models: Sequence[Tuple[torch.nn.Module, int]],
+    batch_size: int,
+    inference_rows: int,
+    device: torch.device,
+) -> int:
+    """Measure peak CUDA memory for one minibatch forward/backward per model.
+
+    Also covers a collection-sized inference batch and adds gradients plus Adam
+    moments (three parameter-sized buffers per model), which a dry run does not
+    allocate.
+    """
+    torch.cuda.synchronize(device)
+    baseline = torch.cuda.memory_allocated(device)
+    torch.cuda.reset_peak_memory_stats(device)
+    for model, input_dim in models:
+        was_training = model.training
+        # Train-mode forwards update BatchNorm running stats; restore them after.
+        saved_buffers = {name: buf.clone() for name, buf in model.named_buffers()}
+        model.train()
+        outputs = model(torch.zeros(batch_size, input_dim, device=device))
+        outputs = outputs[0] if isinstance(outputs, tuple) else outputs
+        outputs.float().sum().backward()
+        model.zero_grad(set_to_none=True)
+        model.eval()
+        with torch.no_grad():
+            model(torch.zeros(inference_rows, input_dim, device=device))
+        model.train(was_training)
+        with torch.no_grad():
+            for name, buf in model.named_buffers():
+                buf.copy_(saved_buffers[name])
+    peak = torch.cuda.max_memory_allocated(device) - baseline
+    optimizer_bytes = sum(
+        3 * p.numel() * p.element_size() for model, _ in models for p in model.parameters()
+    )
+    torch.cuda.empty_cache()
+    return peak + optimizer_bytes
+
+
+def select_rollout_buffer_device(
+    requested: RolloutBufferDevice,
+    device: torch.device,
+    buffer_bytes: int,
+    models: Sequence[Tuple[torch.nn.Module, int]],
+    batch_size: int,
+    inference_rows: int,
+) -> torch.device:
+    """Put rollouts on the GPU when they fit beside training, else in host memory.
+
+    The margin (10% of the card, at least 1 GiB) leaves room for allocator
+    fragmentation and for other jobs that share the GPU after startup.
+    """
+    if requested == "cpu" or device.type != "cuda":
+        if requested == "cuda":
+            raise ValueError("--rollout-buffer-device cuda requires a CUDA training device")
+        return torch.device("cpu")
+    training_bytes = _training_peak_bytes(models, batch_size, inference_rows, device)
+    free, total = torch.cuda.mem_get_info(device)
+    cached = torch.cuda.memory_reserved(device) - torch.cuda.memory_allocated(device)
+    available = free + cached
+    margin = max(1 << 30, total // 10)
+    fits = buffer_bytes + training_bytes + margin <= available
+    gib = 1 << 30
+    print(
+        f"Rollout buffer: {buffer_bytes / gib:.2f} GiB; training peak {training_bytes / gib:.2f} GiB; "
+        f"GPU available {available / gib:.2f} of {total / gib:.2f} GiB (margin {margin / gib:.2f})"
+    )
+    if requested == "cuda" or fits:
+        if not fits:
+            print("  → forcing the GPU buffer although the estimate does not fit")
+        return device
+    return torch.device("cpu")
 
 
 def save_best_checkpoint_pair(
@@ -167,6 +242,7 @@ def train(
     resume_state: Optional[Dict] = None,
     training_state_path: Optional[str] = None,
     time_limit_seconds: Optional[float] = None,
+    rollout_buffer_device: RolloutBufferDevice = "auto",
 ) -> Tuple[PolicyNetworkWrapper, ValueNetworkWrapper]:
     """Train a shared policy with a centralized critic using PPO.
 
@@ -411,13 +487,49 @@ def train(
             )
         return actions, log_probs
 
-    buffer = CentralCriticExperienceBuffer(
-        num_rollouts=rollout_steps,
-        actor_state_dim=actor_input_dim,
-        critic_state_dim=critic_input_dim,
-        action_space_size=action_space_size,
-        num_envs=num_envs * num_players,
+    # Separate actor and critic nets reading the same observation view (e.g.
+    # full/full) share one stored copy of each state.
+    share_states = not uses_shared_network and np.array_equal(
+        actor_observation_indices, critic_observation_indices
     )
+    buffer_rows = num_envs * num_players
+    buffer_device = select_rollout_buffer_device(
+        rollout_buffer_device,
+        torch.device(device),
+        TorchCentralCriticBuffer.storage_bytes(
+            rollout_steps,
+            actor_input_dim,
+            critic_input_dim,
+            action_space_size,
+            buffer_rows,
+            share_states=share_states,
+        ),
+        [(policy_model, actor_input_dim)]
+        + ([(critic_model, critic_input_dim)] if critic_model is not None else []),
+        batch_size,
+        buffer_rows,
+    )
+    buffer: CentralCriticExperienceBuffer | TorchCentralCriticBuffer
+    if buffer_device.type == "cuda":
+        buffer = TorchCentralCriticBuffer(
+            num_rollouts=rollout_steps,
+            actor_state_dim=actor_input_dim,
+            critic_state_dim=critic_input_dim,
+            action_space_size=action_space_size,
+            num_envs=buffer_rows,
+            device=buffer_device,
+            share_states=share_states,
+        )
+    else:
+        buffer = CentralCriticExperienceBuffer(
+            num_rollouts=rollout_steps,
+            actor_state_dim=actor_input_dim,
+            critic_state_dim=critic_input_dim,
+            action_space_size=action_space_size,
+            num_envs=buffer_rows,
+        )
+    print(f"Rollout buffer device: {buffer_device} (shared actor/critic states: {share_states})")
+    gpu_rollouts = buffer_device.type == "cuda"
 
     env_factory = _resolve_marl_env_factory(env_backend)
     print(f"Environment backend: {env_backend}")
@@ -709,7 +821,11 @@ def train(
                     )
                 else:
                     actions, log_probs = select_marl_actions(actor_tensor, valid_masks)
-                    critic_inputs = torch.from_numpy(critic_batch).float().to(device)
+                    critic_inputs = (
+                        actor_tensor
+                        if share_states
+                        else torch.from_numpy(critic_batch).float().to(device)
+                    )
                     value_model.eval()
                     with torch.no_grad():
                         values = predict_values(actor_tensor, critic_inputs).detach().cpu().numpy()
@@ -721,8 +837,8 @@ def train(
                 dones = np.logical_or(terminations, truncations)
 
                 buffer.add_batch(
-                    actor_batch,
-                    critic_batch,
+                    actor_tensor if gpu_rollouts else actor_batch,
+                    critic_inputs if gpu_rollouts and not uses_shared_network else critic_batch,
                     actions,
                     rewards,
                     values,

@@ -4,6 +4,7 @@ from typing import Tuple
 
 import numpy as np
 import numpy.typing as npt
+import torch
 
 
 class ExperienceBuffer:
@@ -172,3 +173,121 @@ class CentralCriticExperienceBuffer(ExperienceBuffer):
             np.array(self.valid_action_masks[:end], dtype=np.bool_),
             np.array(self.dones[:end], dtype=np.bool_),
         )
+
+
+class TorchCentralCriticBuffer:
+    """Central-critic rollout storage held as torch tensors on ``device``.
+
+    On a GPU this keeps rollouts where the forward passes already put the
+    observations, so PPO minibatches are gathered on-device instead of being
+    copied and uploaded from host memory every step. When actor and critic see
+    the same observation view, ``share_states`` stores it once.
+    """
+
+    def __init__(
+        self,
+        num_rollouts: int,
+        actor_state_dim: int,
+        critic_state_dim: int,
+        action_space_size: int,
+        num_envs: int,
+        device: torch.device | str,
+        share_states: bool = False,
+        state_dtype: torch.dtype = torch.float32,
+    ):
+        if share_states and actor_state_dim != critic_state_dim:
+            raise ValueError("share_states requires equal actor and critic state dims")
+        self.capacity = num_rollouts
+        self.num_envs = num_envs
+        self.device = torch.device(device)
+        self.share_states = share_states
+        shape = (num_rollouts, num_envs)
+        self.states = torch.empty(
+            (*shape, actor_state_dim), dtype=state_dtype, device=self.device
+        )
+        self.critic_states = (
+            self.states
+            if share_states
+            else torch.empty((*shape, critic_state_dim), dtype=state_dtype, device=self.device)
+        )
+        self.actions = torch.empty(shape, dtype=torch.int64, device=self.device)
+        self.rewards = torch.empty(shape, dtype=torch.float32, device=self.device)
+        self.values = torch.empty(shape, dtype=torch.float32, device=self.device)
+        self.log_probs = torch.empty(shape, dtype=torch.float32, device=self.device)
+        self.valid_action_masks = torch.empty(
+            (*shape, action_space_size), dtype=torch.bool, device=self.device
+        )
+        self.dones = torch.empty(shape, dtype=torch.bool, device=self.device)
+        self.index = 0
+
+    @staticmethod
+    def storage_bytes(
+        num_rollouts: int,
+        actor_state_dim: int,
+        critic_state_dim: int,
+        action_space_size: int,
+        num_envs: int,
+        share_states: bool = False,
+        state_bytes: int = 4,
+    ) -> int:
+        rows = num_rollouts * num_envs
+        state_dims = actor_state_dim + (0 if share_states else critic_state_dim)
+        # states + bool masks + int64 action + 3 float32 scalars + bool done
+        return rows * (state_dims * state_bytes + action_space_size + 8 + 12 + 1)
+
+    def _put(self, target: torch.Tensor, value) -> None:
+        target.copy_(torch.as_tensor(value).to(self.device, non_blocking=True))
+
+    def add_batch(
+        self,
+        actor_states,
+        critic_states,
+        actions,
+        rewards,
+        values,
+        log_probs,
+        valid_action_masks,
+        dones,
+    ) -> None:
+        """Store one time step; inputs may be numpy arrays or tensors on any device."""
+        if len(actor_states) != self.num_envs:
+            raise ValueError(f"Expected {self.num_envs} envs, got {len(actor_states)}")
+        if self.index >= self.capacity:
+            raise RuntimeError(
+                f"TorchCentralCriticBuffer capacity exceeded: {self.index + 1}/{self.capacity}"
+            )
+        t = self.index
+        self._put(self.states[t], actor_states)
+        if not self.share_states:
+            self._put(self.critic_states[t], critic_states)
+        self._put(self.actions[t], np.asarray(actions, dtype=np.int64))
+        self._put(self.rewards[t], np.asarray(rewards, dtype=np.float32))
+        self._put(self.values[t], values)
+        self._put(self.log_probs[t], np.asarray(log_probs, dtype=np.float32))
+        self._put(self.valid_action_masks[t], np.asarray(valid_action_masks, dtype=np.bool_))
+        self._put(self.dones[t], np.asarray(dones, dtype=np.bool_))
+        self.index += 1
+
+    def get(self) -> Tuple[torch.Tensor, ...]:
+        """Return time-major views shaped [T, num_envs, ...] (no copies)."""
+        end = self.index
+        return (
+            self.states[:end],
+            self.critic_states[:end],
+            self.actions[:end],
+            self.rewards[:end],
+            self.values[:end],
+            self.log_probs[:end],
+            self.valid_action_masks[:end],
+            self.dones[:end],
+        )
+
+    def clear(self) -> None:
+        self.index = 0
+
+    def __len__(self) -> int:
+        return self.index * self.num_envs
+
+    @property
+    def steps_collected(self) -> int:
+        return self.index
