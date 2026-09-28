@@ -25,6 +25,7 @@ from ..utils.seeding import derive_seed
 from ..utils.catanatron_map import NumberPlacement
 from .eval_nn_vs_catanatron import eval
 from .vectorized_rollout import (
+    EvalEnvBackend,
     SeatOption,
     run_policy_h2h_eval_vectorized,
     run_policy_value_eval_vectorized,
@@ -136,6 +137,7 @@ def eval_policy_against_champion(
     actor_observation_level: ActorObservationLevel = "private",
     critic_observation_level: CriticObservationLevel = "full",
     number_placement: NumberPlacement = "official_spiral",
+    env_backend: EvalEnvBackend = "python",
 ) -> Dict[str, float]:
     """Evaluate the current policy against a frozen champion checkpoint."""
     metrics: Dict[str, float] = {}
@@ -169,6 +171,7 @@ def eval_policy_against_champion(
         critic_observation_level=critic_observation_level,
         seed=seed,
         number_placement=number_placement,
+        env_backend=env_backend,
     )
 
     metrics["eval_h2h/win_rate_vs_champion"] = wins / num_games if num_games else 0.0
@@ -205,6 +208,8 @@ def eval_policy_value_against_baselines(
     critic_observation_level: CriticObservationLevel = "full",
     progress_desc: Optional[str] = None,
     number_placement: NumberPlacement = "official_spiral",
+    env_backend: EvalEnvBackend = "python",
+    num_workers: Optional[int] = None,
 ) -> Dict[str, float]:
     """
     Evaluate policy against baselines and critic prediction accuracy in a single loop.
@@ -316,6 +321,8 @@ def eval_policy_value_against_baselines(
                         seed=seat_seed,
                         progress_callback=eval_pbar.update,
                         number_placement=number_placement,
+                        env_backend=env_backend,
+                        num_workers=num_workers,
                     )
 
                 (
@@ -384,6 +391,8 @@ def eval_policy_value_against_baselines(
                     critic_observation_level=critic_observation_level,
                     seed=seat_seed,
                     number_placement=number_placement,
+                    env_backend=env_backend,
+                    num_workers=num_workers,
                 )
 
             (

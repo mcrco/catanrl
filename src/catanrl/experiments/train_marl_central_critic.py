@@ -156,7 +156,16 @@ def main():
         "--eval-num-envs",
         type=int,
         default=None,
-        help="Parallel Python Catanatron envs for evaluation (default: --num-envs).",
+        help="Parallel envs for evaluation (default: --num-envs).",
+    )
+    parser.add_argument(
+        "--eval-env-backend",
+        choices=["python", "cppanatron"],
+        default="python",
+        help=(
+            "Engine for baseline and head-to-head evals. cppanatron plays F natively "
+            "and is several times faster; python matches historical results."
+        ),
     )
     parser.add_argument(
         "--env-backend",
@@ -266,6 +275,7 @@ def main():
         "number_placement": args.number_placement,
         "num_envs": args.num_envs,
         "eval_num_envs": args.eval_num_envs,
+        "eval_env_backend": args.eval_env_backend,
         "env_backend": args.env_backend,
         "metric_window": args.metric_window,
         "time_limit_hours": args.time_limit_hours,
@@ -341,6 +351,7 @@ def main():
         target_kl=args.target_kl,
         num_envs=args.num_envs,
         eval_num_envs=args.eval_num_envs,
+        eval_env_backend=args.eval_env_backend,
         env_backend=args.env_backend,
         reward_function=args.reward_function,
         vps_to_win=arch.vps_to_win,

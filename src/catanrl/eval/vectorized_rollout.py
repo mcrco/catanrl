@@ -15,6 +15,10 @@ from ..envs import (
     extract_expert_actions_from_infos,
     init_episode_buffers,
 )
+from ..envs.cppanatron import (
+    make_cppanatron_native_marl_vectorized_envs,
+    make_cppanatron_vectorized_envs,
+)
 from ..envs.puffer.multi_agent_env import make_vectorized_envs as make_marl_vectorized_envs
 from ..envs.puffer.single_agent_env import compute_single_agent_dims, make_puffer_vectorized_envs
 from ..features.catanatron_utils import (
@@ -27,6 +31,21 @@ from ..models.wrappers import PolicyNetworkWrapper, PolicyValueNetworkWrapper, V
 from ..utils.catanatron_game import SeatOption
 from ..utils.seeding import derive_seed
 from ..utils.catanatron_map import NumberPlacement
+
+
+EvalEnvBackend = Literal["python", "cppanatron"]
+
+
+def _games_per_env(num_games: int, num_envs: int) -> np.ndarray:
+    """Split games evenly over envs.
+
+    Each env plays a fixed quota from its own seeded episode sequence. Counting
+    the first ``num_games`` completions instead would over-sample short games
+    whenever many envs run concurrently.
+    """
+    quotas = np.full(num_envs, num_games // num_envs, dtype=np.int64)
+    quotas[: num_games % num_envs] += 1
+    return quotas
 
 
 def _extract_nn_won_from_infos(infos: object, batch_size: int) -> Tuple[Any, Any]:
@@ -179,6 +198,8 @@ def run_policy_value_eval_vectorized(
     seed: Optional[int] = None,
     progress_callback: Optional[Callable[[int], None]] = None,
     number_placement: NumberPlacement = "official_spiral",
+    env_backend: EvalEnvBackend = "python",
+    num_workers: Optional[int] = None,
 ) -> Tuple[int, List[int], List[float], List[float], List[int], List[int]]:
     """Run vectorized eval for a policy/critic against a single opponent set.
 
@@ -236,7 +257,7 @@ def run_policy_value_eval_vectorized(
         raise ValueError(f"num_envs must be >= 1, got {num_envs}")
     num_envs = min(num_envs, num_games)
 
-    envs = make_puffer_vectorized_envs(
+    env_kwargs = dict(
         reward_function=reward_function,
         map_type=map_type,
         opponent_configs=list(opponent_configs),
@@ -248,6 +269,19 @@ def run_policy_value_eval_vectorized(
         actor_observation_level=actor_observation_level,
         number_placement=number_placement,
     )
+    if env_backend == "cppanatron":
+        if num_workers is not None:
+            # num_envs may have shrunk to num_games; workers must divide it evenly.
+            num_workers = max(
+                w for w in range(1, min(num_workers, num_envs) + 1) if num_envs % w == 0
+            )
+        envs = make_cppanatron_vectorized_envs(**env_kwargs, num_workers=num_workers)
+    elif env_backend == "python":
+        envs = make_puffer_vectorized_envs(**env_kwargs)
+    else:
+        raise ValueError(f"Unknown eval env backend: {env_backend!r}")
+    games_per_env = _games_per_env(num_games, num_envs)
+    games_done_per_env = np.zeros(num_envs, dtype=np.int64)
 
     driver_env = envs.driver_env
     if hasattr(driver_env, "env_single_observation_space"):
@@ -343,8 +377,10 @@ def run_policy_value_eval_vectorized(
                 ep_buffers[idx].rewards.append(rewards[idx])
 
                 if dones[idx]:
-                    if episodes_completed >= num_games:
+                    if games_done_per_env[idx] >= games_per_env[idx]:
+                        ep_buffers[idx] = EpisodeBuffer(critic_states=[], rewards=[], steps=0)
                         continue
+                    games_done_per_env[idx] += 1
                     ep_rewards = np.array(ep_buffers[idx].rewards, dtype=np.float32)
                     ep_critic_states = np.array(ep_buffers[idx].critic_states, dtype=np.float32)
 
@@ -463,6 +499,7 @@ def run_policy_h2h_eval_vectorized(
     seed: Optional[int] = None,
     progress_callback: Optional[Callable[[int], None]] = None,
     number_placement: NumberPlacement = "official_spiral",
+    env_backend: EvalEnvBackend = "python",
 ) -> Tuple[int, List[int]]:
     """Run vectorized current-policy-vs-champion H2H evaluation."""
     if device is None:
@@ -487,7 +524,7 @@ def run_policy_h2h_eval_vectorized(
         champion_actor_observation_level or actor_observation_level
     )
 
-    envs = make_marl_vectorized_envs(
+    env_kwargs = dict(
         num_players=num_players,
         map_type=map_type,
         vps_to_win=vps_to_win,
@@ -498,6 +535,15 @@ def run_policy_h2h_eval_vectorized(
         actor_observation_level="full",
         number_placement=number_placement,
     )
+    if env_backend == "cppanatron":
+        # In-process batched C++ games; rows are seat-ordered like the Python env.
+        envs = make_cppanatron_native_marl_vectorized_envs(**env_kwargs)
+    elif env_backend == "python":
+        envs = make_marl_vectorized_envs(**env_kwargs)
+    else:
+        raise ValueError(f"Unknown eval env backend: {env_backend!r}")
+    games_per_env = _games_per_env(num_games, num_envs)
+    games_done_per_env = np.zeros(num_envs, dtype=np.int64)
 
     driver_env = envs.driver_env
     obs_space = driver_env.env_single_observation_space
@@ -592,8 +638,10 @@ def run_policy_h2h_eval_vectorized(
                 end = start + int(agents_per_env[env_idx])
                 if not bool(np.all(dones[start:end])):
                     continue
-                if episodes_completed >= num_games:
+                if games_done_per_env[env_idx] >= games_per_env[env_idx]:
+                    episode_steps[env_idx] = 0
                     continue
+                games_done_per_env[env_idx] += 1
 
                 row = start + int(current_slots[env_idx])
                 if winner_has_signal[row]:

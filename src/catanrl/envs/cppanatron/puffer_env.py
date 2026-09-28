@@ -365,6 +365,7 @@ def make_cppanatron_vectorized_envs(
     expert_config: str | None = None,
     actor_observation_level: ActorObservationLevel = "private",
     number_placement: NumberPlacement = DEFAULT_NUMBER_PLACEMENT,
+    num_workers: int | None = None,
 ):
     return puffer_vector.make(
         _make_cppanatron_puffer_env(
@@ -380,4 +381,6 @@ def make_cppanatron_vectorized_envs(
         ),
         num_envs=num_envs,
         backend=puffer_vector.Multiprocessing,
+        # PufferLib derives its own default only when the key is absent.
+        **({} if num_workers is None else {"num_workers": num_workers}),
     )

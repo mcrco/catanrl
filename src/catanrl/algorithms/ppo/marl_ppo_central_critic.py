@@ -8,6 +8,7 @@ from collections import deque
 from typing import Any, Callable, Dict, Literal, Optional, Sequence, Tuple
 
 import numpy as np
+import psutil
 import torch
 import torch.optim as optim
 from tqdm import tqdm
@@ -20,6 +21,7 @@ from ...envs.cppanatron import (
     make_cppanatron_native_marl_vectorized_envs,
 )
 from ...envs.puffer.multi_agent_env import make_vectorized_envs as make_marl_vectorized_envs
+from ...eval.vectorized_rollout import EvalEnvBackend
 from ...eval.training_eval import (
     EvalBaseline,
     eval_policy_against_champion,
@@ -156,6 +158,7 @@ def train(
     target_kl: Optional[float] = None,
     num_envs: int = 2,
     eval_num_envs: Optional[int] = None,
+    eval_env_backend: EvalEnvBackend = "python",
     reward_function: Literal["shaped", "win"] = "shaped",
     vps_to_win: int = 15,
     discard_limit: int = 9,
@@ -208,6 +211,12 @@ def train(
     # Eval games run on Python Catanatron worker processes, so their count is
     # bounded by CPU cores independently of the (possibly native) training envs.
     eval_num_envs = num_envs if eval_num_envs is None else max(1, int(eval_num_envs))
+    # PufferLib allows at most one worker process per physical core and needs
+    # the env count to divide evenly across workers.
+    physical_cores = psutil.cpu_count(logical=False) or 1
+    eval_num_workers = max(
+        w for w in range(1, min(eval_num_envs, physical_cores) + 1) if eval_num_envs % w == 0
+    )
     set_global_seeds(seed)
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     action_space_size = get_action_space_size(num_players, map_type)
@@ -527,6 +536,8 @@ def train(
                 device=device,
                 num_envs=eval_num_envs,
                 number_placement=number_placement,
+                env_backend=eval_env_backend,
+                num_workers=eval_num_workers,
             )
             trend_eval_metrics = eval_policy_value_against_baselines(
                 policy_model=policy_model,
@@ -548,6 +559,8 @@ def train(
                 device=device,
                 num_envs=eval_num_envs,
                 number_placement=number_placement,
+                env_backend=eval_env_backend,
+                num_workers=eval_num_workers,
             )
 
         fresh_log = {}
@@ -595,6 +608,7 @@ def train(
                     nn_seat=seat_mode,
                     actor_observation_level=actor_observation_level,
                     number_placement=number_placement,
+                    env_backend=eval_env_backend,
                 )
                 games = seat_metrics["eval_h2h/games"]
                 win_rate = seat_metrics["eval_h2h/win_rate_vs_champion"]
