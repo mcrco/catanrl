@@ -352,7 +352,13 @@ def train(
 
     if wandb.run is None:
         if wandb_config:
-            wandb.init(**wandb_config)
+            init_kwargs = dict(wandb_config)
+            # A resumed run keeps its original config; push this invocation's
+            # values (e.g. a lowered learning rate) as an explicit update.
+            resumed_config = init_kwargs.pop("config", None) if init_kwargs.get("resume") else None
+            wandb.init(**init_kwargs)
+            if resumed_config is not None:
+                wandb.config.update(resumed_config, allow_val_change=True)
         else:
             wandb.init(mode="disabled")
 
@@ -603,6 +609,18 @@ def train(
             policy_optimizer.load_state_dict(resume_state["policy_optimizer"])
         if critic_optimizer is not None and resume_state.get("critic_optimizer") is not None:
             critic_optimizer.load_state_dict(resume_state["critic_optimizer"])
+        # Loading optimizer state restores the saved learning rates; apply the
+        # rates requested for this invocation so a resume can change them.
+        for optimizer, lr, role in (
+            (policy_optimizer, policy_lr, "policy"),
+            (critic_optimizer, critic_lr, "critic"),
+        ):
+            if optimizer is None:
+                continue
+            for group in optimizer.param_groups:
+                if group["lr"] != lr:
+                    print(f"  {role} learning rate: {group['lr']:g} -> {lr:g}")
+                group["lr"] = lr
         global_step = int(resume_state.get("global_step", 0))
         total_episodes = int(resume_state.get("total_episodes", 0))
         ppo_update_count = int(resume_state.get("ppo_update_count", 0))
@@ -979,6 +997,12 @@ def train(
                             "train/ratio_mean": metrics["ratio_mean"],
                             "train/ratio_std": metrics["ratio_std"],
                             "train/grad_norm": metrics["grad_norm"],
+                            "train/policy_lr": policy_optimizer.param_groups[0]["lr"],
+                            **(
+                                {"train/critic_lr": critic_optimizer.param_groups[0]["lr"]}
+                                if critic_optimizer is not None
+                                else {}
+                            ),
                             "train/early_stop_kl": metrics["early_stop"],
                             **(
                                 {"train/critic_grad_norm": metrics["critic_grad_norm"]}
