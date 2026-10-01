@@ -302,6 +302,20 @@ def train(
         raise ValueError(f"Unknown network_mode '{network_mode}'")
     if policy_lr_schedule not in ("constant", "kl_adaptive"):
         raise ValueError(f"Unknown policy_lr_schedule {policy_lr_schedule!r}")
+    if (
+        policy_lr_schedule == "kl_adaptive"
+        and target_kl is not None
+        and 1.5 * target_kl < 4.0 * adaptive_kl_target
+    ):
+        # KL grows across an update's minibatches, so the mean of the minibatches
+        # that ran sits near half the early-stop threshold. A tight early stop
+        # caps that mean inside the adaptive band and the rate never comes down.
+        print(
+            f"Warning: the KL early stop ({1.5 * target_kl:g} per minibatch) truncates updates "
+            f"before their mean KL can exceed the adaptive LR's upper band "
+            f"({2.0 * adaptive_kl_target:g}); raise --target-kl to at least "
+            f"{8.0 * adaptive_kl_target / 3.0:.3g} so the adaptive rule can lower the rate."
+        )
     if h2h_reference_policy_path is not None and not os.path.exists(h2h_reference_policy_path):
         raise FileNotFoundError(f"H2H reference checkpoint not found: {h2h_reference_policy_path}")
     uses_shared_network = network_mode == "shared"
