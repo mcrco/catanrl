@@ -65,6 +65,28 @@ def _resolve_marl_env_factory(backend: MarlEnvBackend) -> Callable[..., Any]:
     raise ValueError(f"Unknown MARL environment backend: {backend!r}")
 
 
+PolicyLrSchedule = Literal["constant", "kl_adaptive"]
+
+
+def kl_adaptive_lr(lr: float, kl: float, kl_target: float, min_lr: float, max_lr: float) -> float:
+    """Adapt the policy learning rate to keep each update's KL near ``kl_target``.
+
+    Divide the rate by 1.5 when the update's mean KL exceeds twice the target and
+    multiply it by 1.5 when the KL is under half the target, clamped to
+    ``[min_lr, max_lr]``. This is the ``AdaptiveScheduler`` from rl_games by
+    Denys Makoviichuk (https://github.com/Denys88/rl_games,
+    ``rl_games/common/schedulers.py``), the ``schedule: adaptive`` option of
+    NVIDIA's IsaacGymEnvs PPO configs. It carries the adaptive KL penalty
+    coefficient of the PPO paper (Schulman et al., 2017, "Proximal Policy
+    Optimization Algorithms", Sec. 4) over to the step size.
+    """
+    if kl > 2.0 * kl_target:
+        lr /= 1.5
+    elif kl < 0.5 * kl_target:
+        lr *= 1.5
+    return min(max(lr, min_lr), max_lr)
+
+
 def _training_peak_bytes(
     models: Sequence[Tuple[torch.nn.Module, int]],
     batch_size: int,
@@ -243,6 +265,12 @@ def train(
     training_state_path: Optional[str] = None,
     time_limit_seconds: Optional[float] = None,
     rollout_buffer_device: RolloutBufferDevice = "auto",
+    policy_lr_schedule: PolicyLrSchedule = "constant",
+    adaptive_kl_target: float = 0.01,
+    policy_lr_min: float = 1e-5,
+    policy_lr_max: float = 3e-4,
+    entropy_coef_final: Optional[float] = None,
+    h2h_reference_policy_path: Optional[str] = None,
 ) -> Tuple[PolicyNetworkWrapper, ValueNetworkWrapper]:
     """Train a shared policy with a centralized critic using PPO.
 
@@ -252,6 +280,13 @@ def train(
     state is persisted there at every checkpoint save. ``time_limit_seconds``
     stops collection after the first PPO update past the wall-clock budget, then
     evaluates and saves that final update like a scheduled checkpoint.
+
+    ``policy_lr_schedule="kl_adaptive"`` adjusts the policy learning rate after
+    every update with :func:`kl_adaptive_lr` (``policy_lr`` is the starting
+    rate). ``entropy_coef_final`` decays the entropy bonus linearly from
+    ``entropy_coef`` over this invocation's ``total_timesteps``.
+    ``h2h_reference_policy_path`` adds a head-to-head against that fixed policy
+    checkpoint at every eval, logged under ``eval_ref/``.
     """
 
     assert 2 <= num_players <= 4, "num_players must be between 2 and 4"
@@ -265,6 +300,10 @@ def train(
     ), f"Unknown backbone_type '{backbone_type}'"
     if network_mode not in ("separate", "shared"):
         raise ValueError(f"Unknown network_mode '{network_mode}'")
+    if policy_lr_schedule not in ("constant", "kl_adaptive"):
+        raise ValueError(f"Unknown policy_lr_schedule {policy_lr_schedule!r}")
+    if h2h_reference_policy_path is not None and not os.path.exists(h2h_reference_policy_path):
+        raise FileNotFoundError(f"H2H reference checkpoint not found: {h2h_reference_policy_path}")
     uses_shared_network = network_mode == "shared"
     if critic_warm_start not in ("full", "backbone", "none"):
         raise ValueError(f"Unknown critic warm-start mode: {critic_warm_start!r}")
@@ -610,12 +649,13 @@ def train(
         if critic_optimizer is not None and resume_state.get("critic_optimizer") is not None:
             critic_optimizer.load_state_dict(resume_state["critic_optimizer"])
         # Loading optimizer state restores the saved learning rates; apply the
-        # rates requested for this invocation so a resume can change them.
+        # rates requested for this invocation so a resume can change them. An
+        # adaptive policy rate keeps the value it had adapted to.
         for optimizer, lr, role in (
             (policy_optimizer, policy_lr, "policy"),
             (critic_optimizer, critic_lr, "critic"),
         ):
-            if optimizer is None:
+            if optimizer is None or (role == "policy" and policy_lr_schedule == "kl_adaptive"):
                 continue
             for group in optimizer.param_groups:
                 if group["lr"] != lr:
@@ -711,24 +751,19 @@ def train(
         if h2h_eval_games > 0:
             h2h_log["eval_h2h/games"] = 0.0
 
-        if (
-            h2h_eval_games > 0
-            and champion_policy_path is not None
-            and os.path.exists(champion_policy_path)
-        ):
-            total_games = 0.0
-            weighted_wins = 0.0
-            weighted_turns = 0.0
-            base_h2h_seed = h2h_eval_seed if h2h_eval_seed is not None else 0
+        def head_to_head(opponent_path: str, prefix: str, label: str) -> Dict[str, float]:
+            """Balanced-seat games against a policy checkpoint of the same architecture."""
+            log: Dict[str, float] = {}
+            total_games = weighted_wins = weighted_turns = 0.0
             for seat_mode in ("first", "second"):
                 seat_metrics = eval_policy_against_champion(
                     policy_model=policy_model,
                     model_type=model_type,
                     map_type=map_type,
                     num_players=num_players,
-                    champion_policy_path=champion_policy_path,
+                    champion_policy_path=opponent_path,
                     num_games=h2h_eval_games,
-                    seed=base_h2h_seed,
+                    seed=h2h_eval_seed if h2h_eval_seed is not None else 0,
                     vps_to_win=vps_to_win,
                     discard_limit=discard_limit,
                     log_to_wandb=False,
@@ -743,17 +778,27 @@ def train(
                 games = seat_metrics["eval_h2h/games"]
                 win_rate = seat_metrics["eval_h2h/win_rate_vs_champion"]
                 avg_turns = seat_metrics["eval_h2h/avg_turns_vs_champion"]
-                h2h_log[f"eval_h2h/win_rate_vs_champion_{seat_mode}"] = win_rate
-                h2h_log[f"eval_h2h/avg_turns_vs_champion_{seat_mode}"] = avg_turns
+                log[f"{prefix}/win_rate_vs_{label}_{seat_mode}"] = win_rate
+                log[f"{prefix}/avg_turns_vs_{label}_{seat_mode}"] = avg_turns
                 total_games += games
                 weighted_wins += win_rate * games
                 weighted_turns += avg_turns * games
+            log[f"{prefix}/games"] = total_games
+            log[f"{prefix}/win_rate_vs_{label}"] = weighted_wins / total_games
+            log[f"{prefix}/avg_turns_vs_{label}"] = weighted_turns / total_games
+            return log
 
-            h2h_log["eval_h2h/games"] = total_games
-            h2h_log["eval_h2h/win_rate_vs_champion"] = weighted_wins / total_games
-            h2h_log["eval_h2h/avg_turns_vs_champion"] = weighted_turns / total_games
+        if (
+            h2h_eval_games > 0
+            and champion_policy_path is not None
+            and os.path.exists(champion_policy_path)
+        ):
+            h2h_log.update(head_to_head(champion_policy_path, "eval_h2h", "champion"))
         elif h2h_eval_games > 0:
             print("  → Skipping H2H eval (no champion checkpoint available yet)")
+        if h2h_eval_games > 0 and h2h_reference_policy_path is not None:
+            h2h_log.update(head_to_head(h2h_reference_policy_path, "eval_ref", "reference"))
+            print(f"  → H2H vs reference: {h2h_log['eval_ref/win_rate_vs_reference']:.3f}")
 
         wandb.log({**fresh_log, **trend_log, **h2h_log}, step=global_step)
 
@@ -829,6 +874,7 @@ def train(
             progress = tqdm(total=total_timesteps, desc="Steps", unit="step", unit_scale=True)
         with progress as pbar:
             start_time = time.monotonic()
+            schedule_start_step = global_step
             deadline = start_time + time_limit_seconds if time_limit_seconds is not None else None
             while global_step < target_timesteps:
                 actor_batch, critic_batch, valid_masks = decode_observations(observations)
@@ -937,6 +983,10 @@ def train(
                         observations
                     )
                     policy_agent.model.train()
+                    current_entropy_coef = entropy_coef
+                    if entropy_coef_final is not None:
+                        progress = min(1.0, (global_step - schedule_start_step) / total_timesteps)
+                        current_entropy_coef += (entropy_coef_final - entropy_coef) * progress
                     metrics = run_ppo_update(
                         agent=policy_agent,
                         value_model=value_model,
@@ -946,7 +996,7 @@ def train(
                         buffer=buffer,
                         clip_epsilon=clip_epsilon,
                         value_coef=value_coef,
-                        entropy_coef=entropy_coef,
+                        entropy_coef=current_entropy_coef,
                         activity_coef=activity_coef,
                         train_epochs=train_epochs,
                         batch_size=batch_size,
@@ -1003,6 +1053,7 @@ def train(
                                 if critic_optimizer is not None
                                 else {}
                             ),
+                            "train/entropy_coef": current_entropy_coef,
                             "train/early_stop_kl": metrics["early_stop"],
                             **(
                                 {"train/critic_grad_norm": metrics["critic_grad_norm"]}
@@ -1012,6 +1063,15 @@ def train(
                         },
                         step=global_step,
                     )
+                    if policy_lr_schedule == "kl_adaptive" and metrics["num_updates"] > 0:
+                        for group in policy_optimizer.param_groups:
+                            group["lr"] = kl_adaptive_lr(
+                                group["lr"],
+                                metrics["approx_kl"],
+                                adaptive_kl_target,
+                                policy_lr_min,
+                                policy_lr_max,
+                            )
 
                     if save_path and ppo_update_count % save_every_updates == 0:
                         save_dir = save_path

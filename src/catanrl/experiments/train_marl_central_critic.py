@@ -85,6 +85,25 @@ def main():
     parser.add_argument("--clip-epsilon", type=float, default=0.2)
     parser.add_argument("--value-coef", type=float, default=0.5)
     parser.add_argument("--entropy-coef", type=float, default=0.01)
+    parser.add_argument(
+        "--entropy-coef-final",
+        type=float,
+        default=None,
+        help="Decay the entropy bonus linearly to this value over --total-timesteps.",
+    )
+    parser.add_argument(
+        "--policy-lr-schedule",
+        choices=["constant", "kl-adaptive"],
+        default="constant",
+        help=(
+            "kl-adaptive starts at --policy-lr and, after every update, divides the rate by "
+            "1.5 when the mean KL exceeds 2x --adaptive-kl-target or multiplies it by 1.5 "
+            "when the KL is under half of it (rl_games' AdaptiveScheduler)."
+        ),
+    )
+    parser.add_argument("--adaptive-kl-target", type=float, default=0.01)
+    parser.add_argument("--policy-lr-min", type=float, default=1e-5)
+    parser.add_argument("--policy-lr-max", type=float, default=3e-4)
     parser.add_argument("--activity-coef", type=float, default=0.0)
     add_train_epochs_argument(parser, default=4)
     parser.add_argument("--batch-size", type=int, default=256)
@@ -118,6 +137,15 @@ def main():
         type=int,
         default=0,
         help="Current-vs-champion games per seat (first and second) per eval pass (0 disables).",
+    )
+    parser.add_argument(
+        "--h2h-reference-checkpoint",
+        type=str,
+        default=None,
+        help=(
+            "Policy checkpoint of the same architecture to play head-to-head at every eval "
+            "(logged under eval_ref/), as a fixed yardstick beside the moving champion."
+        ),
     )
     parser.add_argument(
         "--h2h-eval-seed",
@@ -259,6 +287,12 @@ def main():
         "clip_epsilon": args.clip_epsilon,
         "value_coef": args.value_coef,
         "entropy_coef": args.entropy_coef,
+        "entropy_coef_final": args.entropy_coef_final,
+        "policy_lr_schedule": args.policy_lr_schedule,
+        "adaptive_kl_target": args.adaptive_kl_target,
+        "policy_lr_min": args.policy_lr_min,
+        "policy_lr_max": args.policy_lr_max,
+        "h2h_reference_checkpoint": args.h2h_reference_checkpoint,
         "activity_coef": args.activity_coef,
         "train_epochs": args.train_epochs,
         "batch_size": args.batch_size,
@@ -368,6 +402,12 @@ def main():
         resume_state=resume.state,
         training_state_path=training_state_path,
         rollout_buffer_device=args.rollout_buffer_device,
+        policy_lr_schedule=args.policy_lr_schedule.replace("-", "_"),
+        adaptive_kl_target=args.adaptive_kl_target,
+        policy_lr_min=args.policy_lr_min,
+        policy_lr_max=args.policy_lr_max,
+        entropy_coef_final=args.entropy_coef_final,
+        h2h_reference_policy_path=args.h2h_reference_checkpoint,
         time_limit_seconds=(
             args.time_limit_hours * 3600.0 if args.time_limit_hours is not None else None
         ),
