@@ -33,7 +33,7 @@ import re
 import subprocess
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Union, cast
+from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Tuple, Union, cast
 
 import torch
 
@@ -1277,6 +1277,25 @@ def build_checkpoint_registry(
 # --------------------------------------------------------------------------- #
 # Experiment naming / location
 # --------------------------------------------------------------------------- #
+def run_paths(experiment_name: str, resume: "ResumeContext") -> Tuple[str, str, str]:
+    """Return (experiment dir, checkpoints dir, training-state path) for a run.
+
+    A resumed run writes back into the directory it was loaded from. That is not
+    ``experiments/<name>`` when the experiment was copied, renamed, or passed by
+    path, and deriving the location from the saved name would then write into a
+    different (possibly existing) experiment.
+    """
+    if resume.active and resume.exp_dir:
+        exp_path = resume.exp_dir
+    else:
+        exp_path = os.path.join(experiments_root(), experiment_name)
+    return (
+        exp_path,
+        os.path.join(exp_path, CHECKPOINTS_DIRNAME),
+        os.path.join(exp_path, TRAINING_STATE_FILENAME),
+    )
+
+
 def default_checkpoints_dir(name: str) -> str:
     """Standard checkpoints directory for a new experiment: experiments/<name>/checkpoints."""
     return os.path.join(experiments_root(), name, CHECKPOINTS_DIRNAME)
@@ -1314,6 +1333,7 @@ def save_experiment(
     wandb_info: Optional[dict] = None,
     notes: Optional[str] = None,
     relative_prefix: str = CHECKPOINTS_DIRNAME,
+    exp_dir: Optional[str] = None,
 ) -> str:
     """Write ``experiments/<name>/`` from explicit network specs.
 
@@ -1325,7 +1345,7 @@ def save_experiment(
     ``experiments/<name>/checkpoints`` directory (see :func:`default_checkpoints_dir`).
     Returns the experiment directory path.
     """
-    exp_path = experiment_dir(name)
+    exp_path = exp_dir or experiment_dir(name)
     os.makedirs(exp_path, exist_ok=True)
 
     registry = build_checkpoint_registry(
@@ -1390,6 +1410,7 @@ __all__ = [
     "discover_checkpoints",
     "build_checkpoint_registry",
     "default_checkpoints_dir",
+    "run_paths",
     "make_experiment_name",
     "save_experiment",
 ]

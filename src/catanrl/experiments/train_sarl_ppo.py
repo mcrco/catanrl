@@ -28,13 +28,12 @@ from ..experiment_store import (
     KIND_VALUE,
     add_load_from_experiment_arguments,
     add_resume_argument,
-    default_checkpoints_dir,
     make_experiment_name,
     network_spec_from_model,
     prepare_resume,
     resolve_training_architecture_and_warm_start,
     save_experiment,
-    training_state_file,
+    run_paths,
     wandb_grouping_kwargs,
 )
 from ..utils.catanatron_action_space import get_action_space_size
@@ -220,9 +219,8 @@ def main():
         if args.wandb and not args.wandb_run_name:
             args.wandb_run_name = experiment_name
 
-    args.save_path = default_checkpoints_dir(experiment_name)
+    experiment_path, args.save_path, training_state_path = run_paths(experiment_name, resume)
     os.makedirs(args.save_path, exist_ok=True)
-    training_state_path = training_state_file(experiment_name)
 
     if not args.opponents:
         args.opponents = ["random"]
@@ -377,6 +375,7 @@ def main():
     exp_path = save_experiment(
         experiment_name,
         args.save_path,
+        exp_dir=experiment_path,
         algorithm="sarl_ppo",
         game=GameConfig(
             num_players=num_players,

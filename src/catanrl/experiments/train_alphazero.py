@@ -36,7 +36,6 @@ from catanrl.experiment_store import (
     add_load_from_experiment_arguments,
     add_resume_argument,
     build_checkpoint_registry,
-    default_checkpoints_dir,
     experiment_dir,
     make_experiment_name,
     network_spec_from_model,
@@ -44,7 +43,7 @@ from catanrl.experiment_store import (
     resolve_training_architecture_and_warm_start,
     save_checkpoint_registry,
     save_experiment,
-    training_state_file,
+    run_paths,
     wandb_grouping_kwargs,
 )
 from catanrl.experiments.architecture_config import (
@@ -833,9 +832,8 @@ def main() -> None:
         if args.wandb and not args.wandb_run_name:
             args.wandb_run_name = experiment_name
 
-    checkpoint_dir = default_checkpoints_dir(experiment_name)
+    experiment_path, checkpoint_dir, state_path = run_paths(experiment_name, resume)
     os.makedirs(checkpoint_dir, exist_ok=True)
-    state_path = training_state_file(experiment_name)
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     config = AlphaZeroConfig(
         mode=args.mode,
@@ -921,6 +919,7 @@ def main() -> None:
         save_experiment(
             experiment_name,
             checkpoint_dir,
+            exp_dir=experiment_path,
             algorithm="mcts_distillation" if args.mode == "distill" else "expert_iteration",
             game=GameConfig(
                 num_players=config.num_players,
