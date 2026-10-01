@@ -68,6 +68,21 @@ Evaluation:
 - `scripts/compare_paired_eval.py`: exact McNemar test between two paired result files.
 - `scripts/native_eval_vs_f.py EXP WHICH GAMES_PER_SEAT OUT_JSON` and `scripts/native_h2h.py EXP WHICH OPP_EXP OPP_WHICH GAMES_PER_SEAT OUT_JSON`: the native vs-F and head-to-head evaluations behind the report's numbers (seed 67, both seats).
 
+### Web UI
+
+To play against saved experiments in Catanatron's web UI:
+
+```bash
+uv sync --extra cu130 --extra web               # adds catanatron[web]
+uv run catanrl-web                              # API on :5001; optional --experiments a,b --device cuda
+cd catanatron/ui && npm install && npm start    # UI on http://localhost:3000
+```
+
+Every saved experiment becomes a player, keyed `CATANRL:<experiment>`.
+Full-information policies appear twice: belief-averaged, which does not see
+your hidden cards, and the oracle (`CATANRL_ORACLE:<experiment>`), which does.
+A model only plays games with the player count and map it was trained on.
+
 ## Experiments
 
 Each run is saved under `experiments/<name>/` (gitignored): `metadata.json`
