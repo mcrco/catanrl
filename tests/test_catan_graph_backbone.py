@@ -96,3 +96,17 @@ def test_graph_experiment_round_trips(tmp_path, monkeypatch):
         assert torch.equal(rebuilt.state_dict()[key], value)
     spec = NetworkSpec.from_dict(exp.metadata.networks["critic"].to_dict())
     assert isinstance(build_network(spec, game).value_head, CatanGraphValueHead)
+
+
+def test_fresh_graph_value_heads_start_near_zero():
+    arch = load_architecture_preset(GRAPH_S_PRESET)
+    x = torch.rand(64, 3770)
+    for seed in range(5):
+        torch.manual_seed(seed)
+        critic = build_critic_model(
+            hidden_dims=arch.critic_hidden_dims,
+            critic_observation_level="full",
+            **_graph_kwargs(arch),
+        )
+        with torch.no_grad():
+            assert critic(x).abs().max() < 0.1

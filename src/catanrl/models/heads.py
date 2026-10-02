@@ -59,6 +59,22 @@ class WDLValueHead(nn.Module):
         return self.values_from_logits(self.logits(x))
 
 
+# Output-layer gain for graph value heads. Their final layer reads non-negative
+# ReLU features, so a gain-1 init starts every prediction at an arbitrary
+# per-seed constant (about -2 to +5 for these heads). With gamma=1 bootstrapping
+# never removes that offset, and a positive one makes every game-ending
+# transition look worse than expected: a from-scratch graph-m MARL run learned
+# to stop building and stall to the turn limit.
+GRAPH_VALUE_OUTPUT_INIT_GAIN = 0.01
+
+
+def _init_graph_value_mlp(value_mlp: nn.Sequential, hidden_gain: float) -> None:
+    linears = [module for module in value_mlp if isinstance(module, nn.Linear)]
+    for module in linears[:-1]:
+        orthogonal_init(module, gain=hidden_gain)
+    orthogonal_init(linears[-1], gain=GRAPH_VALUE_OUTPUT_INIT_GAIN)
+
+
 class CatanGraphValueHead(ValueHead):
     """Deep scalar value integration head over pooled graph features."""
 
@@ -73,9 +89,7 @@ class CatanGraphValueHead(ValueHead):
             nn.ReLU(),
             nn.Linear(hidden_dim, 1),
         )
-        for module in self.value_head:
-            if isinstance(module, nn.Linear):
-                orthogonal_init(module, gain=self.VALUE_OUTPUT_GAIN)
+        _init_graph_value_mlp(self.value_head, self.VALUE_OUTPUT_GAIN)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.value_head(x[:, : self.pooled_dim]).squeeze(-1)
@@ -95,9 +109,7 @@ class CatanGraphWDLValueHead(WDLValueHead):
             nn.ReLU(),
             nn.Linear(hidden_dim, 3),
         )
-        for module in self.value_head:
-            if isinstance(module, nn.Linear):
-                orthogonal_init(module, gain=self.VALUE_OUTPUT_GAIN)
+        _init_graph_value_mlp(self.value_head, self.VALUE_OUTPUT_GAIN)
 
     def logits(self, x: torch.Tensor) -> torch.Tensor:
         return self.value_head(x[:, : self.pooled_dim])
