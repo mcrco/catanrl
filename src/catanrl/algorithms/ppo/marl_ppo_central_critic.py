@@ -22,6 +22,7 @@ from ...envs.cppanatron import (
 )
 from ...envs.puffer.multi_agent_env import make_vectorized_envs as make_marl_vectorized_envs
 from ...eval.vectorized_rollout import EvalEnvBackend
+from ...experiment_store import load_experiment
 from ...eval.training_eval import (
     EvalBaseline,
     eval_policy_against_champion,
@@ -270,7 +271,8 @@ def train(
     policy_lr_min: float = 1e-5,
     policy_lr_max: float = 3e-4,
     entropy_coef_final: Optional[float] = None,
-    h2h_reference_policy_path: Optional[str] = None,
+    h2h_reference_experiment: Optional[str] = None,
+    h2h_reference_which: str = "best",
 ) -> Tuple[PolicyNetworkWrapper, ValueNetworkWrapper]:
     """Train a shared policy with a centralized critic using PPO.
 
@@ -285,8 +287,9 @@ def train(
     every update with :func:`kl_adaptive_lr` (``policy_lr`` is the starting
     rate). ``entropy_coef_final`` decays the entropy bonus linearly from
     ``entropy_coef`` over this invocation's ``total_timesteps``.
-    ``h2h_reference_policy_path`` adds a head-to-head against that fixed policy
-    checkpoint at every eval, logged under ``eval_ref/``.
+    ``h2h_reference_experiment`` adds a head-to-head at every eval against that
+    experiment's ``h2h_reference_which`` policy (rebuilt from its own metadata,
+    so any architecture), logged under ``eval_ref/``.
     """
 
     assert 2 <= num_players <= 4, "num_players must be between 2 and 4"
@@ -316,8 +319,19 @@ def train(
             f"({2.0 * adaptive_kl_target:g}); raise --target-kl to at least "
             f"{8.0 * adaptive_kl_target / 3.0:.3g} so the adaptive rule can lower the rate."
         )
-    if h2h_reference_policy_path is not None and not os.path.exists(h2h_reference_policy_path):
-        raise FileNotFoundError(f"H2H reference checkpoint not found: {h2h_reference_policy_path}")
+    reference_model: Optional[torch.nn.Module] = None
+    reference_observation_level: Optional[ActorObservationLevel] = None
+    if h2h_reference_experiment is not None:
+        reference = load_experiment(h2h_reference_experiment)
+        if reference.num_players != num_players or reference.map_type != map_type:
+            raise ValueError(
+                f"H2H reference {h2h_reference_experiment!r} plays {reference.num_players}-player "
+                f"{reference.map_type}, not {num_players}-player {map_type}"
+            )
+        reference_model = reference.build_policy(
+            which=h2h_reference_which, device=device or ("cuda" if torch.cuda.is_available() else "cpu")
+        )
+        reference_observation_level = reference.policy_spec.observation_level
     uses_shared_network = network_mode == "shared"
     if critic_warm_start not in ("full", "backbone", "none"):
         raise ValueError(f"Unknown critic warm-start mode: {critic_warm_start!r}")
@@ -765,8 +779,14 @@ def train(
         if h2h_eval_games > 0:
             h2h_log["eval_h2h/games"] = 0.0
 
-        def head_to_head(opponent_path: str, prefix: str, label: str) -> Dict[str, float]:
-            """Balanced-seat games against a policy checkpoint of the same architecture."""
+        def head_to_head(
+            opponent_path: Optional[str],
+            prefix: str,
+            label: str,
+            opponent_model: Optional[torch.nn.Module] = None,
+            opponent_observation_level: Optional[ActorObservationLevel] = None,
+        ) -> Dict[str, float]:
+            """Balanced-seat games against a checkpoint of this architecture or a built model."""
             log: Dict[str, float] = {}
             total_games = weighted_wins = weighted_turns = 0.0
             for seat_mode in ("first", "second"):
@@ -788,6 +808,8 @@ def train(
                     actor_observation_level=actor_observation_level,
                     number_placement=number_placement,
                     env_backend=eval_env_backend,
+                    champion_model=opponent_model,
+                    champion_actor_observation_level=opponent_observation_level,
                 )
                 games = seat_metrics["eval_h2h/games"]
                 win_rate = seat_metrics["eval_h2h/win_rate_vs_champion"]
@@ -810,8 +832,16 @@ def train(
             h2h_log.update(head_to_head(champion_policy_path, "eval_h2h", "champion"))
         elif h2h_eval_games > 0:
             print("  → Skipping H2H eval (no champion checkpoint available yet)")
-        if h2h_eval_games > 0 and h2h_reference_policy_path is not None:
-            h2h_log.update(head_to_head(h2h_reference_policy_path, "eval_ref", "reference"))
+        if h2h_eval_games > 0 and reference_model is not None:
+            h2h_log.update(
+                head_to_head(
+                    None,
+                    "eval_ref",
+                    "reference",
+                    opponent_model=reference_model,
+                    opponent_observation_level=reference_observation_level,
+                )
+            )
             print(f"  → H2H vs reference: {h2h_log['eval_ref/win_rate_vs_reference']:.3f}")
 
         wandb.log({**fresh_log, **trend_log, **h2h_log}, step=global_step)

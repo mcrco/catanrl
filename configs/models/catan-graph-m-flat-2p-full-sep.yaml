@@ -1,0 +1,25 @@
+# graph-m from scripts/arch_ablation on the arch-ablation branch (the size of the
+# catan-graph-nexus-v3-semantic-normalized preset, about 2.4M params). Same layout
+# as catan-graph-s-flat-2p-full-sep: separate policy + critic, full observations.
+name: catan-graph-m-flat-2p-full-sep
+
+model:
+  model_type: flat
+  backbone_type: catan_graph
+  policy_hidden_dims: [256]
+  critic_hidden_dims: [256]
+  policy_mode: full
+  critic_mode: full
+  network_mode: separate
+  graph_hidden_dim: 256
+  graph_global_hidden_dim: 96
+  graph_num_layers: 4
+  graph_head_hidden_dim: 256
+  graph_normalize_inputs: true
+  graph_semantic_inputs: true
+
+game:
+  map_type: BASE
+  vps_to_win: 15
+  discard_limit: 9
+  num_players: 2

@@ -139,13 +139,20 @@ def main():
         help="Current-vs-champion games per seat (first and second) per eval pass (0 disables).",
     )
     parser.add_argument(
-        "--h2h-reference-checkpoint",
+        "--h2h-reference-experiment",
         type=str,
         default=None,
         help=(
-            "Policy checkpoint of the same architecture to play head-to-head at every eval "
-            "(logged under eval_ref/), as a fixed yardstick beside the moving champion."
+            "Saved experiment whose policy plays head-to-head at every eval (logged under "
+            "eval_ref/), a fixed yardstick beside the moving champion. Rebuilt from its own "
+            "metadata, so it may be a different architecture."
         ),
+    )
+    parser.add_argument(
+        "--h2h-reference-which",
+        type=str,
+        default="best",
+        help="Checkpoint selector for --h2h-reference-experiment ('best', 'latest', or a step).",
     )
     parser.add_argument(
         "--h2h-eval-seed",
@@ -292,7 +299,8 @@ def main():
         "adaptive_kl_target": args.adaptive_kl_target,
         "policy_lr_min": args.policy_lr_min,
         "policy_lr_max": args.policy_lr_max,
-        "h2h_reference_checkpoint": args.h2h_reference_checkpoint,
+        "h2h_reference_experiment": args.h2h_reference_experiment,
+        "h2h_reference_which": args.h2h_reference_which,
         "activity_coef": args.activity_coef,
         "train_epochs": args.train_epochs,
         "batch_size": args.batch_size,
@@ -407,7 +415,8 @@ def main():
         policy_lr_min=args.policy_lr_min,
         policy_lr_max=args.policy_lr_max,
         entropy_coef_final=args.entropy_coef_final,
-        h2h_reference_policy_path=args.h2h_reference_checkpoint,
+        h2h_reference_experiment=args.h2h_reference_experiment,
+        h2h_reference_which=args.h2h_reference_which,
         time_limit_seconds=(
             args.time_limit_hours * 3600.0 if args.time_limit_hours is not None else None
         ),

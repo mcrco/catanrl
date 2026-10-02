@@ -138,10 +138,20 @@ def eval_policy_against_champion(
     critic_observation_level: CriticObservationLevel = "full",
     number_placement: NumberPlacement = "official_spiral",
     env_backend: EvalEnvBackend = "python",
+    champion_model: Optional[torch.nn.Module] = None,
+    champion_actor_observation_level: Optional[ActorObservationLevel] = None,
 ) -> Dict[str, float]:
-    """Evaluate the current policy against a frozen champion checkpoint."""
+    """Evaluate the current policy against a frozen champion.
+
+    The champion is ``champion_model`` when given (any architecture), otherwise
+    ``champion_policy_path`` loaded into a copy of ``policy_model``.
+    """
     metrics: Dict[str, float] = {}
-    if num_games <= 0 or not champion_policy_path or not os.path.exists(champion_policy_path):
+    if num_games <= 0:
+        return metrics
+    if champion_model is None and (
+        not champion_policy_path or not os.path.exists(champion_policy_path)
+    ):
         return metrics
     if num_players < 2:
         raise ValueError("Champion eval requires at least 2 players.")
@@ -149,9 +159,10 @@ def eval_policy_against_champion(
     torch_device = (
         torch.device(device) if device is not None else next(policy_model.parameters()).device
     )
-    champion_model = copy.deepcopy(policy_model).to(torch_device)
-    champion_state = torch.load(champion_policy_path, map_location=torch_device)
-    champion_model.load_state_dict(champion_state)
+    if champion_model is None:
+        champion_model = copy.deepcopy(policy_model).to(torch_device)
+        champion_state = torch.load(champion_policy_path, map_location=torch_device)
+        champion_model.load_state_dict(champion_state)
     champion_model.eval()
     policy_model.eval()
 
@@ -168,6 +179,7 @@ def eval_policy_against_champion(
         discard_limit=discard_limit,
         nn_seat=nn_seat,
         actor_observation_level=actor_observation_level,
+        champion_actor_observation_level=champion_actor_observation_level,
         critic_observation_level=critic_observation_level,
         seed=seed,
         number_placement=number_placement,
