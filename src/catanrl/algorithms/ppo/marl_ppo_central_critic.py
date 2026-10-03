@@ -1140,22 +1140,21 @@ def train(
                             f"\nWall-clock budget reached after {ppo_update_count} updates "
                             f"({global_step:,} steps)."
                         )
-                        if ppo_update_count % save_every_updates != 0 and save_path:
-                            torch.save(
-                                policy_model.state_dict(),
-                                os.path.join(save_path, f"policy_update_{ppo_update_count}.pt"),
-                            )
-                            if critic_model is not None:
-                                torch.save(
-                                    critic_model.state_dict(),
-                                    os.path.join(
-                                        save_path,
-                                        f"policy_update_{ppo_update_count}_critic.pt",
-                                    ),
-                                )
-                        if ppo_update_count % eval_every_updates != 0:
-                            run_and_log_evals()
                         break
+            # However the run stops, checkpoint and evaluate its final update when
+            # that update is off the save/eval cadence.
+            if ppo_update_count % save_every_updates != 0 and save_path:
+                torch.save(
+                    policy_model.state_dict(),
+                    os.path.join(save_path, f"policy_update_{ppo_update_count}.pt"),
+                )
+                if critic_model is not None:
+                    torch.save(
+                        critic_model.state_dict(),
+                        os.path.join(save_path, f"policy_update_{ppo_update_count}_critic.pt"),
+                    )
+            if ppo_update_count % eval_every_updates != 0:
+                run_and_log_evals()
 
     finally:
         persist_training_state()
