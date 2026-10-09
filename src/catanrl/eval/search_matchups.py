@@ -4,7 +4,9 @@ Agents are described by spec strings:
 
 * ``raw``: the policy's argmax;
 * ``F``: native Catanatron ValueFunctionPlayer;
-* ``mcts:sims=256,c_puct=1.5``: native PUCT MCTS (``run_native_search_policy``).
+* ``mcts:sims=256,c_puct=1.5``: native PUCT MCTS (``run_native_search_policy``);
+* ``2ffs:budget=1024,depth=3,leaf=0.1,slope=0.05,rollout=none,batch=1``:
+  two-fidelity fast-slow search (``catanrl.algorithms.twoffs``).
 
 Every game index is played once with agent A in each seat on the same map and
 game seed, and all workers share one batched GPU inference server. Search cost
@@ -19,7 +21,7 @@ import queue
 import time
 import traceback
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import numpy as np
@@ -45,7 +47,7 @@ def parse_agent(text: str) -> AgentSpec:
     kind = kind.strip().lower()
     if kind == "f":
         kind = "value"
-    if kind not in {"raw", "value", "mcts"}:
+    if kind not in {"raw", "value", "mcts", "2ffs"}:
         raise ValueError(f"unknown agent kind in {text!r}")
     params: dict[str, str] = {}
     for item in filter(None, (part.strip() for part in rest.split(","))):
@@ -56,6 +58,37 @@ def parse_agent(text: str) -> AgentSpec:
     return AgentSpec(kind=kind, params=params, text=text)
 
 
+def twoffs_config_from_params(params: dict[str, str]):
+    from catanrl.algorithms.twoffs.catan import CatanTwoFFSConfig
+
+    config = CatanTwoFFSConfig()
+    rollout = params.get("rollout", "none").lower()
+    mapping: dict[str, Any] = {
+        "budget": ("budget", float),
+        "depth": ("depth", int),
+        "leaf": ("fast_bias_leaf", float),
+        "slope": ("fast_bias_slope", float),
+        "sigma": ("slow_sigma", float),
+        "slow_cost": ("initial_slow_cost", float),
+        "batch": ("slow_batch", int),
+        "delta": ("delta", float),
+        "eps": ("epsilon", float),
+        "max_nodes": ("max_nodes", int),
+        "alpha_power": ("alpha_power", float),
+        "fallback": ("fallback", str),
+    }
+    updates: dict[str, Any] = {}
+    for key, value in params.items():
+        if key == "rollout":
+            continue
+        if key not in mapping:
+            raise ValueError(f"unknown 2ffs parameter {key!r}")
+        name, cast = mapping[key]
+        updates[name] = cast(value)
+    updates["rollout_decisions"] = None if rollout in {"none", "full", "end"} else int(rollout)
+    return replace(config, **updates)
+
+
 @dataclass
 class AgentStats:
     decisions: int = 0
@@ -64,6 +97,12 @@ class AgentStats:
     seconds: float = 0.0
     max_depth: int = 0
     disagreements_with_raw: int = 0
+    # 2FFS only.
+    rollout_evaluations: int = 0
+    stopped: int = 0
+    slow_queries: int = 0
+    fast_queries: int = 0
+    nodes: int = 0
 
     def add(self, other: AgentStats) -> None:
         for name in self.__dataclass_fields__:
@@ -82,6 +121,16 @@ class AgentStats:
         }
         if self.max_depth:
             result[f"{prefix}/max_depth"] = float(self.max_depth)
+        if self.fast_queries or self.slow_queries or self.stopped:
+            result.update(
+                {
+                    f"{prefix}/stopped_fraction": self.stopped / searched,
+                    f"{prefix}/fast_per_search": self.fast_queries / searched,
+                    f"{prefix}/slow_per_search": self.slow_queries / searched,
+                    f"{prefix}/rollout_evals_per_search": self.rollout_evaluations / searched,
+                    f"{prefix}/nodes_per_search": self.nodes / searched,
+                }
+            )
         if self.disagreements_with_raw:
             result[f"{prefix}/raw_disagreement"] = self.disagreements_with_raw / searched
         return result
@@ -93,6 +142,8 @@ class _Agent:
         self.evaluator = evaluator
         self.seed = seed
         self.full_indices = np.arange(OBSERVATION_SIZE)
+        if spec.kind == "2ffs":
+            self.twoffs_config = twoffs_config_from_params(spec.params)
         if spec.kind == "mcts":
             self.sims = int(spec.params.get("sims", 256))
             self.c_puct = float(spec.params.get("c_puct", 1.5))
@@ -133,6 +184,28 @@ class _Agent:
             stats.evaluations += result.diagnostics.neural_evaluations
             stats.max_depth = max(stats.max_depth, result.diagnostics.maximum_depth)
             if result.diagnostics.prior_top1_action != action:
+                stats.disagreements_with_raw += 1
+        elif kind == "2ffs":
+            from catanrl.algorithms.twoffs.catan import search_catan
+
+            outcome = search_catan(
+                game.game.copy(),
+                game.space,
+                self.evaluator,
+                self.twoffs_config,
+                np.random.default_rng(derive_seed(episode_seed, "matchup_2ffs", decision)),
+            )
+            result = outcome.result
+            action = outcome.action
+            stats.evaluations += outcome.network_evaluations
+            stats.rollout_evaluations += outcome.rollout_evaluations
+            stats.stopped += int(result.stopped)
+            stats.fast_queries += result.num_fast_queries
+            stats.slow_queries += result.num_slow_queries
+            stats.nodes += result.num_nodes
+            stats.max_depth = max(stats.max_depth, result.max_depth)
+            # Diagnostic only, outside the search budget.
+            if self._raw_action(game, legal) != action:
                 stats.disagreements_with_raw += 1
         else:  # pragma: no cover - parse_agent validates kinds
             raise ValueError(kind)
@@ -391,4 +464,5 @@ __all__ = [
     "MatchupResult",
     "parse_agent",
     "run_matchup",
+    "twoffs_config_from_params",
 ]

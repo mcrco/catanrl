@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Paired native games between search agents (native MCTS, raw policy, F).
+"""Paired native games between search agents (2FFS, native MCTS, raw policy, F).
 
 Example:
-    eval_search_matchup.py --agents-a raw "mcts:sims=256" --agent-b F --games-per-seat 500
+    eval_search_matchup.py --agents-a raw "mcts:sims=256" "2ffs:budget=256,depth=3" \
+        --agent-b F --games-per-seat 500
 """
 
 from __future__ import annotations
@@ -90,7 +91,7 @@ def main() -> None:
             name=args.wandb_run_name or f"search-matchup-vs-{args.agent_b}-{timestamp}",
             job_type="eval",
             config=config,
-            tags=["native-mcts", "search-matchup"],
+            tags=["2ffs", "native-mcts", "search-matchup"],
         )
 
     def write() -> None:
