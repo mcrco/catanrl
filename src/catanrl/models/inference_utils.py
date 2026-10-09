@@ -9,7 +9,12 @@ from .wrappers import PolicyNetworkWrapper, PolicyValueNetworkWrapper, ValueNetw
 
 
 def values_to_wdl_targets(values: torch.Tensor) -> torch.Tensor:
-    """Map scalar Q values to Canopy-compatible W/D/L training distributions."""
+    """Map scalar Q values to Canopy-compatible W/D/L training distributions.
+
+    Compatible with the WDL value head of Canopy's Nexus-v3 network
+    (https://github.com/cullback/canopy, tag ``catan-nexus-v3``): ``q`` becomes
+    win ``(1 + q) / 2``, draw 0 and loss ``(1 - q) / 2``.
+    """
     bounded = values.clamp(-1.0, 1.0)
     return torch.stack(
         (

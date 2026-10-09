@@ -1,3 +1,15 @@
+"""Shared trunks for CatanRL policy and value networks.
+
+``CatanGraphBackbone`` and its helpers (``CatanGraphBackboneConfig``,
+``_CatanHeteroGraphLayer``, ``_catan_graph_numeric_denominators``) are a port of
+the Nexus-v3 network from Canopy by cullback
+(https://github.com/cullback/canopy), release tag ``catan-nexus-v3`` (commit
+6185983a88ba6802e7fa9893cef5a76a15de2595): the graph layers follow
+``examples/catan/model/nexus_v3.rs`` and the semantic node, tile and global
+features follow ``examples/catan/encoder/nexus_v3.rs``. Canopy has no license
+file. See "Credits / third-party sources" in README.md.
+"""
+
 import torch
 import torch.nn as nn
 from dataclasses import dataclass, field
@@ -32,6 +44,9 @@ class CrossDimensionalBackboneConfig:
 @dataclass
 class CatanGraphBackboneConfig:
     """Canopy-style heterogeneous graph encoder over a Catanatron vector.
+
+    Ported from Canopy's Nexus-v3 network (https://github.com/cullback/canopy,
+    tag ``catan-nexus-v3``); see the module docstring.
 
     The input contract remains ``[numeric, flattened board tensor]``.  Static
     indices gather the active Catan nodes and tiles from that tensor; no
@@ -295,7 +310,12 @@ class CompactCrossDimensionalBackbone(nn.Module):
 
 
 class _CatanHeteroGraphLayer(nn.Module):
-    """Pre-norm residual node/tile message-passing layer used by Nexus v3."""
+    """Pre-norm residual node/tile message-passing layer used by Nexus v3.
+
+    Same update as the graph layer in Canopy's
+    ``examples/catan/model/nexus_v3.rs`` (https://github.com/cullback/canopy,
+    tag ``catan-nexus-v3``).
+    """
 
     def __init__(self, hidden_dim: int):
         super().__init__()
@@ -334,7 +354,12 @@ def _catan_graph_numeric_denominators(
     map_type: Literal["BASE", "MINI", "TOURNAMENT"],
     numeric_dim: int,
 ) -> torch.Tensor:
-    """Return bounded, semantic scales without changing the observation vector."""
+    """Return bounded, semantic scales without changing the observation vector.
+
+    Where Canopy's Nexus-v3 encoder (``examples/catan/encoder/nexus_v3.rs`` in
+    https://github.com/cullback/canopy, tag ``catan-nexus-v3``) normalizes the
+    same quantity, the scale matches it.
+    """
     from catanrl.features.catanatron_utils import get_observation_numeric_feature_names
 
     levels = ("private", "public", "full") if num_players == 2 else ("private", "full")
@@ -404,6 +429,10 @@ def _catan_graph_numeric_denominators(
 
 class CatanGraphBackbone(nn.Module):
     """Topology-aware shared trunk over the unchanged Catanatron observation.
+
+    A port of Canopy's Nexus-v3 network (https://github.com/cullback/canopy,
+    tag ``catan-nexus-v3``, ``examples/catan/model/nexus_v3.rs``) onto
+    Catanatron's observation vector; see the module docstring.
 
     Catanatron stores board information on a fixed 21x11 lattice.  This module
     gathers the active map nodes, linearly recovers per-tile resource/robber
@@ -581,7 +610,12 @@ class CatanGraphBackbone(nn.Module):
         buildings: torch.Tensor,
         incident_roads: torch.Tensor,
     ) -> torch.Tensor:
-        """Canopy-style distance to each player's road/building network."""
+        """Canopy-style distance to each player's road/building network.
+
+        Follows ``compute_network_distances`` in Canopy's ``examples/catan/encoder``
+        (https://github.com/cullback/canopy, tag ``catan-nexus-v3``): BFS hops
+        from the network, scaled by 1/6.
+        """
         visited = (buildings > 0.0) | (incident_roads > 0.0)
         distances = torch.ones_like(buildings)
         distances = torch.where(visited, torch.zeros_like(distances), distances)
@@ -611,7 +645,12 @@ class CatanGraphBackbone(nn.Module):
         tile_raw: torch.Tensor,
         incident_roads: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Recover normalized Nexus-v3-style features from the same board vector."""
+        """Recover normalized Nexus-v3-style features from the same board vector.
+
+        Feature set and scales follow Canopy's
+        ``examples/catan/encoder/nexus_v3.rs`` (https://github.com/cullback/canopy,
+        tag ``catan-nexus-v3``).
+        """
         resource_offset = 2 * self.config.num_players
         buildings_raw = node_raw[..., 0:resource_offset:2]
         buildings = buildings_raw / 2.0

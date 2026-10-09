@@ -1,6 +1,10 @@
 # graph-s from scripts/arch_ablation on the arch-ablation branch: the best
 # teacher-neutral architecture (0.5M params). Separate policy + critic,
 # symmetric full observations (actor == critic).
+# The catan_graph backbone is a port of the Nexus-v3 network from Canopy by
+# cullback (https://github.com/cullback/canopy, tag catan-nexus-v3, commit
+# 6185983a88ba6802e7fa9893cef5a76a15de2595). Canopy has no license file; see
+# "Credits / third-party sources" in README.md.
 name: catan-graph-s-flat-2p-full-sep
 
 model:

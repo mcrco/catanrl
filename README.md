@@ -171,6 +171,22 @@ Because each run records its exact network architecture in `metadata.json`
 directly from the trained model, `load_experiment(...)` rebuilds loadable models
 without re-deriving anything from the weights.
 
+## Credits / third-party sources
+
+- [Canopy](https://github.com/cullback/canopy) by cullback: the `catan_graph`
+  backbone (`CatanGraphBackbone` in `src/catanrl/models/backbones.py`), its graph
+  policy and value heads (`src/catanrl/models/heads.py`) and the graph-s/graph-m
+  presets are a port of Canopy's Nexus-v3 network at release tag
+  `catan-nexus-v3` (commit `6185983a88ba6802e7fa9893cef5a76a15de2595`;
+  `examples/catan/model/nexus_v3.rs` and `examples/catan/encoder/nexus_v3.rs`),
+  adapted to Catanatron's observation vector and action space. Canopy has no
+  license file.
+- [Catanatron](https://github.com/bcollazo/catanatron) by Bryan Collazo
+  (GPL-3.0): the reference engine and baseline opponents. `cppanatron` is a C++
+  rewrite of it (GPL-3.0-or-later).
+- The KL-adaptive policy learning rate is the `AdaptiveScheduler` from
+  [rl_games](https://github.com/Denys88/rl_games) by Denys Makoviichuk.
+
 ## TODO
 
 - [ ] Train sequential model architecture (e.g. RNN, LSTM) or represent all timestep-based information in features, like last time player has played knight and last time robber was moved

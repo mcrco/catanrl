@@ -1,6 +1,10 @@
 # graph-m from scripts/arch_ablation on the arch-ablation branch (the size of the
 # catan-graph-nexus-v3-semantic-normalized preset, about 2.4M params). Same layout
 # as catan-graph-s-flat-2p-full-sep: separate policy + critic, full observations.
+# The catan_graph backbone is a port of the Nexus-v3 network from Canopy by
+# cullback (https://github.com/cullback/canopy, tag catan-nexus-v3, commit
+# 6185983a88ba6802e7fa9893cef5a76a15de2595). Canopy has no license file; see
+# "Credits / third-party sources" in README.md.
 name: catan-graph-m-flat-2p-full-sep
 
 model:

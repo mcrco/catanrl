@@ -76,7 +76,12 @@ def _init_graph_value_mlp(value_mlp: nn.Sequential, hidden_gain: float) -> None:
 
 
 class CatanGraphValueHead(ValueHead):
-    """Deep scalar value integration head over pooled graph features."""
+    """Deep scalar value integration head over pooled graph features.
+
+    Scalar variant of the two-hidden-layer value head in Canopy's Nexus-v3
+    network (``examples/catan/model/nexus_v3.rs`` in
+    https://github.com/cullback/canopy, tag ``catan-nexus-v3``).
+    """
 
     def __init__(self, backbone: CatanGraphBackbone):
         nn.Module.__init__(self)
@@ -96,7 +101,12 @@ class CatanGraphValueHead(ValueHead):
 
 
 class CatanGraphWDLValueHead(WDLValueHead):
-    """Canopy-style two-hidden-layer WDL head over pooled graph features."""
+    """Canopy-style two-hidden-layer WDL head over pooled graph features.
+
+    Ported from the value head of Canopy's Nexus-v3 network
+    (``examples/catan/model/nexus_v3.rs`` in https://github.com/cullback/canopy,
+    tag ``catan-nexus-v3``).
+    """
 
     def __init__(self, backbone: CatanGraphBackbone):
         nn.Module.__init__(self)
@@ -143,7 +153,15 @@ class CatanGraphPolicyHidden(NamedTuple):
 
 
 class CatanGraphPolicyHead(nn.Module):
-    """Topology-aware flat head mapped onto CatanRL's unchanged action array."""
+    """Topology-aware flat head mapped onto CatanRL's unchanged action array.
+
+    Follows the per-position policy heads of Canopy's Nexus-v3 network
+    (``examples/catan/model/nexus_v3.rs`` in https://github.com/cullback/canopy,
+    tag ``catan-nexus-v3``): settlement, city and robber logits are read out of
+    single node or tile embeddings with one hidden layer, while roads (from both
+    endpoint embeddings) and the remaining actions (from the pooled state) get
+    two.
+    """
 
     POLICY_OUTPUT_GAIN = 0.01
 
