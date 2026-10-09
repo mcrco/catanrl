@@ -12,6 +12,14 @@ Searches, seeds and action choice match ``run_native_search_policy`` with
 ``action_temperature=0`` (argmax root visits over legal actions) and the
 per-decision seeds used by ``catanrl.eval.search_matchups``, so records pair
 with that harness's games.
+
+With ``determinizations=K`` the search no longer sees the opponent's hidden
+development cards. At each decision it draws K hands from the exact 1v1 belief
+(``catanrl.beliefs.native_dev_card_belief``), merges identical draws, runs one
+search per distinct hand on a determinized copy of the game with a share of the
+simulations proportional to its multiplicity, and plays the argmax of the
+summed root visits. This is root-sampled determinization (PIMC); without it the
+search is a perfect-information oracle on the true state.
 """
 
 from __future__ import annotations
@@ -25,6 +33,7 @@ import numpy as np
 from cppanatron.catanatron import observation_layout
 
 import cppanatron as cpp
+from catanrl.beliefs.native_dev_card_belief import determinize, sample_hypotheses
 from catanrl.envs.cppanatron import FlatGame
 from catanrl.eval.search_matchups import AgentStats
 from catanrl.utils.seeding import derive_map_and_game_seeds, derive_seed
@@ -44,6 +53,10 @@ class _Board:
     pending: str | None = None
     stats: AgentStats = field(default_factory=AgentStats)
     search_started: float = 0.0
+    plan: list[tuple[tuple[int, ...] | None, int]] = field(default_factory=list)
+    plan_index: int = 0
+    budget: int = 0
+    visits: np.ndarray | None = None
 
 
 def run_batched_native_games(
@@ -55,6 +68,7 @@ def run_batched_native_games(
     settings: dict[str, Any],
     concurrency: int = 256,
     on_record: Callable[[dict[str, Any], AgentStats], None] | None = None,
+    determinizations: int = 0,
 ) -> tuple[list[dict[str, Any]], AgentStats, dict[str, float]]:
     """Play agent A (MCTS with ``simulations``, or raw policy when 0) vs native F.
 
@@ -85,15 +99,51 @@ def run_batched_native_games(
         )
         return _Board(game, a_seat, episode_seed, np.empty(observation_size, dtype=np.float32))
 
-    def finish_search(board: _Board) -> None:
+    def start_search(board: _Board) -> None:
+        """Open the next planned search and request its root evaluation."""
+        game = board.game
+        cards, board.budget = board.plan[board.plan_index]
+        if cards is None:
+            board.search = game.search(
+                c_puct=c_puct,
+                seed=derive_seed(board.episode_seed, "matchup_mcts", board.decision),
+            )
+        else:
+            world = determinize(
+                game.game,
+                board.a_seat,
+                cards,
+                derive_seed(board.episode_seed, "matchup_determinize", board.decision, board.plan_index),
+            )
+            board.search = cpp.MCTSSearch(
+                world,
+                game.space,
+                layout,
+                c_puct=c_puct,
+                seed=derive_seed(board.episode_seed, "matchup_mcts", board.decision, board.plan_index),
+                canonical_pruning=False,
+            )
+        board.simulations = 0
+        board.search.root_observation(board.buffer)
+        board.pending = "root"
+
+    def finish_search(board: _Board) -> bool:
+        """Fold in the finished search; True if another planned search was opened."""
+        visits = board.search.root_visits()
+        board.visits = visits.astype(np.int64) if board.visits is None else board.visits + visits
+        board.search = None
+        board.plan_index += 1
+        if board.plan_index < len(board.plan):
+            start_search(board)
+            return True
         game = board.game
         legal = np.flatnonzero(game.action_mask())
-        visits = board.search.root_visits()
-        action = int(legal[int(np.argmax(visits[legal]))])
+        action = int(legal[int(np.argmax(board.visits[legal]))])
         board.stats.seconds += time.perf_counter() - board.search_started
-        board.search = None
+        board.visits = None
         game.step(action)
         board.decision += 1
+        return False
 
     def advance(board: _Board) -> bool:
         """Advance until a network request is pending; False once the game ends."""
@@ -102,8 +152,9 @@ def run_batched_native_games(
             if game.winner is not None or game.num_turns >= turns_limit:
                 return False
             if board.search is not None:
-                if board.simulations >= simulations:
-                    finish_search(board)
+                if board.simulations >= board.budget:
+                    if finish_search(board):
+                        return True
                     continue
                 board.simulations += 1
                 if board.search.select_leaf(board.buffer) is None:
@@ -125,13 +176,23 @@ def run_batched_native_games(
                 cpp.write_full_observation(game.game, game.current_player, layout, board.buffer)
                 board.pending = "raw"
                 return True
-            board.search = game.search(
-                c_puct=c_puct,
-                seed=derive_seed(board.episode_seed, "matchup_mcts", board.decision),
-            )
-            board.simulations = 0
-            board.search.root_observation(board.buffer)
-            board.pending = "root"
+            if determinizations > 0:
+                draws = sample_hypotheses(
+                    game.game,
+                    board.a_seat,
+                    determinizations,
+                    np.random.default_rng(
+                        derive_seed(board.episode_seed, "matchup_belief", board.decision)
+                    ),
+                )
+                board.plan = [
+                    (cards, max(1, round(simulations * count / determinizations)))
+                    for cards, count in draws
+                ]
+            else:
+                board.plan = [(None, simulations)]
+            board.plan_index = 0
+            start_search(board)
             return True
 
     def record(board: _Board) -> None:
@@ -207,6 +268,7 @@ def _parallel_worker(
     settings: dict[str, Any],
     concurrency: int,
     result_queue,
+    determinizations: int = 0,
 ) -> None:
     import traceback
 
@@ -242,6 +304,7 @@ def _parallel_worker(
             settings=settings,
             concurrency=concurrency,
             on_record=on_record,
+            determinizations=determinizations,
         )
         result_queue.put({"worker_id": worker_id, "done": True, "throughput": throughput})
     except BaseException:
@@ -261,6 +324,7 @@ def run_batched_native_parallel(
     concurrency: int = 64,
     progress: bool = True,
     label: str = "",
+    determinizations: int = 0,
 ) -> tuple[list[dict[str, Any]], AgentStats, dict[str, float]]:
     """``run_batched_native_games`` split over processes with their own model copy.
 
@@ -290,6 +354,7 @@ def run_batched_native_parallel(
                 settings,
                 concurrency,
                 result_queue,
+                determinizations,
             ),
             daemon=True,
         )

@@ -105,6 +105,8 @@ def main() -> None:
                 and spec_a.kind in {"raw", "mcts"}
                 and spec_b.kind == "value"
             )
+            if not batched and "dets" in spec_a.params:
+                raise ValueError("dets= (root determinization) needs the batched native driver")
             if batched:
                 # Same seeds and per-decision search seeds as run_matchup.
                 scenarios = [
@@ -123,6 +125,7 @@ def main() -> None:
                     processes=args.native_processes,
                     concurrency=args.native_concurrency,
                     label=agent_a,
+                    determinizations=int(spec_a.params.get("dets", 0)),
                 )
                 result = MatchupResult(agent_a=agent_a, agent_b=args.agent_b, records=records, stats_a=stats_a)
                 result.seconds = throughput["wall_seconds"]
