@@ -186,6 +186,12 @@ without re-deriving anything from the weights.
   rewrite of it (GPL-3.0-or-later).
 - The KL-adaptive policy learning rate is the `AdaptiveScheduler` from
   [rl_games](https://github.com/Denys88/rl_games) by Denys Makoviichuk.
+- 2FFS (`src/catanrl/algorithms/twoffs/`) implements Peter Chen and Xi Chen,
+  ["Two-Fidelity Best-Action Identification for Stochastic Minimax
+  Tree"](https://arxiv.org/abs/2606.01708) (NeurIPS 2026). Its core follows the
+  control flow of the authors' reference implementation
+  ([PeterLauLukChen/2FFS](https://github.com/PeterLauLukChen/2FFS),
+  `method/twoffs/twoffs.py`), which has no license file.
 
 ## TODO
 
@@ -1361,20 +1367,51 @@ done
 
 ---
 
-## Phase 5 — native MCTS at deployment
+## Phase 5 — 2FFS vs native MCTS
 
-Shaped-reward critics predict win probability (a loss pays 0), so the search
-matchup harness maps their values to the zero-sum `2p - 1` before the native
-search negates them across players. The older native-MCTS scripts pass the raw
-critic value, which biases them against moves that end the turn.
+[2FFS](https://arxiv.org/abs/2606.01708) (Chen & Chen, NeurIPS 2026) is a
+fixed-confidence best-action identification algorithm for stochastic minimax
+trees. Each node keeps an interval combining a cheap, biased fast oracle
+(`V_F +- B(h)`), an unbiased slow oracle's confidence interval, and the minimax
+backup of its children. 2FFS stops once one root action's lower bound clears
+every other upper bound.
+
+`catanrl.algorithms.twoffs.core` follows the authors' reference implementation
+(`github.com/PeterLauLukChen/2FFS`). On their generated trees, it reproduces
+their recommendations and fast/slow query counts exactly (72/72 runs, including
+runs with hundreds of slow samples). The Catan adapter
+(`catanrl.algorithms.twoffs.catan`) uses:
+
+- chance nodes for dice totals, development-card draws by the remaining deck,
+  and robber steals by the victim's hand (mirroring the native MCTS);
+- the frozen critic as the fast oracle, with `B(h) = leaf + slope * h`;
+- argmax-policy self-play rollouts with sampled chance outcomes as the slow
+  oracle, which is unbiased for the deployed policy's value;
+- an evaluation budget per move. If the stopping rule has not fired when it
+  runs out, the search recommends either the leader (largest lower bound) or
+  the policy's favourite among the actions not yet eliminated (`prior`).
+
+Shaped-reward critics predict win probability (a loss pays 0), so values are
+mapped to the zero-sum `2p - 1` before any search negates them across players.
+This applies to the MCTS baseline too: the older native-MCTS scripts pass the
+raw critic value, which biases them against moves that end the turn.
+
+Envelope calibration (`scripts/calibrate_twoffs_envelope.py`, 349 positions
+from reference-vs-F games): the critic misses the mean of 32 policy rollouts
+by about 0.22 RMS in zero-sum units after removing rollout noise. Its one-ply
+Bellman residual is 0.13 at the 90th percentile. The median gap between the
+best and second-best one-ply values is only 0.013. The critic's one-ply argmax
+matches the policy argmax at just 43% of positions. Full rollouts cost about 82
+network evaluations each and their outcomes are +-1, so certifying even one
+node to +-0.25 needs about 1,000 of them.
 
 Matchups (`scripts/eval_search_matchup.py`) use the graph-s reference
 (`m-graph-s-full-full-native-g1-from-warm-s42-20261001`, update 1500). They
 play native F with paired seeds, swapping seats on each game index. Raw and MCTS
-games use the lockstep-batched native driver (`catanrl.eval.batched_native_mcts`);
-other pairings use per-game workers sharing a CUDA-graphed inference server
-(`catanrl.eval.batched_inference`). "Paired" deltas are exact McNemar tests on
-the shared games.
+games use the lockstep-batched native driver (`catanrl.eval.batched_native_mcts`).
+2FFS games use per-game workers sharing a CUDA-graphed inference server. 2FFS
+rows use the first 200 games of the 1,000-game set; "paired" deltas are exact
+McNemar tests on those shared games.
 
 | Agent | Games | Win vs F | Paired vs raw | Network evals / move | Overrides policy |
 | ----- | ----- | -------- | ------------- | -------------------- | ---------------- |
@@ -1382,9 +1419,17 @@ the shared games.
 | MCTS 64 | 1,000 | 89.9% | +0.7 (p=0.37) | 63 | |
 | MCTS 256 | 1,000 | 91.3% | +2.1 (p=0.02) | 249 | ~2% (16-game timing run) |
 | MCTS 1024 | 1,000 | 92.7% | +3.5 (p=0.0002) | 983 | |
+| 2FFS calibrated (0.3 + 0.13h), prior fallback | 200 | 85.0% | +0.0 (0 discordant) | 870 | 0.5% |
+| 2FFS tight (0.05 + 0.02h), prior fallback | 200 | 79.0% | -6.0 (p=0.08) | 776 | 11% |
+| 2FFS tight (0.05 + 0.02h), leader fallback | 200 | 45.0% | -40.0 (p<1e-16) | 762 | 63% |
+| 2FFS calibrated (0.3 + 0.13h), leader fallback | 200 | 33.0% | -52.0 (p<1e-25) | 871 | 64% |
 
-MCTS gains over raw grow with budget: +0.7, +2.1 and +3.5 points at 64, 256
-and 1,024 simulations. A 2FFS vs native MCTS comparison lives on branch `twoffs`.
+All 2FFS rows use depth 3, a 1,024-evaluation budget, and batches of four
+rollouts. Raw scores 85.0%, MCTS 64 89.5% and MCTS 1024 95.5% on those 200
+games. At a matched budget of about 1,000 evaluations per move, MCTS 1024 beats
+the best 2FFS variant by 10.5 points on the shared games (24 vs 3 discordant,
+p=5e-5). MCTS gains over raw grow with budget: +0.7, +2.1 and +3.5 points at
+64, 256 and 1,024 simulations.
 
 The MCTS rows above search the true game, so they see the opponent's hidden
 development cards. `mcts:sims=256,dets=K` searches K belief-sampled
@@ -1403,6 +1448,18 @@ own. One sampled hand does as well as eight. Determinized MCTS still beats the
 raw policy clearly for the WDL model (+4.6, p=2e-5) but only marginally for the
 reference (+1.1, p=0.27).
 
+Conclusion: 2FFS does not suit this critic/policy pair. With the calibrated
+envelope it almost never certifies a move (1%), so it defers to the policy and
+spends about 870 evaluations per move to play exactly the raw policy. With a
+tight envelope it certifies 16-17% of moves. Playing only those certified moves
+and deferring to the policy elsewhere (tight, prior) costs about 6 points, so
+even its certified choices are worse than the policy's. Whenever it ranks moves
+by its own intervals, it overrides the policy about 63% of the time and
+collapses to 33-45%. The cause is structural. 2FFS ignores the policy prior,
+the critic barely separates sibling moves, and slow +-1 rollouts are far too
+noisy to certify anything within a game-time budget. PUCT MCTS keeps the policy
+prior and is the only search here that beats the raw policy.
+
 Throughput notes: the graph backbone's small-batch forward is dominated by
 kernel launches (~6 ms whatever the batch up to ~32 rows); replaying CUDA graphs
 cuts it to ~2 ms. The native search has one pending leaf, so per-game workers
@@ -1413,10 +1470,14 @@ simulation, and holds about 39 MB per 256-simulation tree. Size concurrency so
 that processes x boards x tree size stays well under RAM.
 
 ```bash
+uv run scripts/calibrate_twoffs_envelope.py --games 24 --stride 6 --rollouts 32
 uv run scripts/eval_search_matchup.py --agents-a raw "mcts:sims=64" --agent-b F \
   --games-per-seat 500 --native-processes 8 --native-concurrency 32
 uv run scripts/eval_search_matchup.py --agents-a "mcts:sims=1024" --agent-b F \
   --games-per-seat 500 --native-processes 8 --native-concurrency 12
+uv run scripts/eval_search_matchup.py --agent-b F --games-per-seat 100 --num-workers 16 \
+  --agents-a "2ffs:budget=1024,depth=3,leaf=0.3,slope=0.13,batch=4,fallback=prior" \
+             "2ffs:budget=1024,depth=3,leaf=0.05,slope=0.02,batch=4"
 ```
 
 
