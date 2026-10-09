@@ -17,9 +17,11 @@ import torch
 
 from catanrl.envs.cppanatron.puffer_env import TURNS_LIMIT
 from catanrl.eval.batched_inference import value_transform_for_reward
+from catanrl.eval.batched_native_mcts import run_batched_native_parallel
 from catanrl.eval.paired_comparison import exact_mcnemar
-from catanrl.eval.search_matchups import parse_agent, run_matchup
+from catanrl.eval.search_matchups import MatchupResult, parse_agent, run_matchup
 from catanrl.experiment_store import load_experiment
+from catanrl.utils.seeding import derive_seed
 
 
 def main() -> None:
@@ -33,6 +35,13 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=67)
     parser.add_argument("--max-rows", type=int, default=2048)
     parser.add_argument("--max-wait-ms", type=float, default=1.0)
+    parser.add_argument(
+        "--native-processes",
+        type=int,
+        default=8,
+        help="Processes for lockstep-batched raw/MCTS games against F (0 disables)",
+    )
+    parser.add_argument("--native-concurrency", type=int, default=64)
     parser.add_argument("--output", default=None)
     parser.add_argument("--wandb", action="store_true")
     parser.add_argument("--wandb-project", default="catan")
@@ -90,21 +99,53 @@ def main() -> None:
     try:
         for index, agent_a in enumerate(args.agents_a):
             print(f"\n=== {agent_a} vs {args.agent_b} ({args.games_per_seat} per seat) ===", flush=True)
-            result = run_matchup(
-                policy_model=policy,
-                critic_model=critic,
-                model_type=experiment.model_type or "flat",
-                device=device,
-                agent_a=agent_a,
-                agent_b=args.agent_b,
-                games_per_seat=args.games_per_seat,
-                num_workers=args.num_workers,
-                seed=args.seed,
-                settings=settings,
-                max_rows=args.max_rows,
-                max_wait_ms=args.max_wait_ms,
+            spec_a, spec_b = parse_agent(agent_a), parse_agent(args.agent_b)
+            batched = (
+                args.native_processes > 0
+                and spec_a.kind in {"raw", "mcts"}
+                and spec_b.kind == "value"
             )
-            summary = result.summary()
+            if batched:
+                # Same seeds and per-decision search seeds as run_matchup.
+                scenarios = [
+                    (seat, derive_seed(args.seed, "search_matchup_episode", game_index))
+                    for game_index in range(args.games_per_seat)
+                    for seat in range(2)
+                ]
+                records, stats_a, throughput = run_batched_native_parallel(
+                    experiment_name=args.experiment,
+                    which=args.which,
+                    value_transform=settings["value_transform"],
+                    scenarios=scenarios,
+                    simulations=int(spec_a.params.get("sims", 256)) if spec_a.kind == "mcts" else 0,
+                    c_puct=float(spec_a.params.get("c_puct", 1.5)),
+                    settings={**settings, "seed": args.seed},
+                    processes=args.native_processes,
+                    concurrency=args.native_concurrency,
+                    label=agent_a,
+                )
+                result = MatchupResult(agent_a=agent_a, agent_b=args.agent_b, records=records, stats_a=stats_a)
+                result.seconds = throughput["wall_seconds"]
+                summary = result.summary()
+                summary["server_rows_per_second"] = throughput["server_rows_per_second"]
+                summary.pop("server_mean_batch_rows", None)
+                summary["driver"] = "batched-native"
+            else:
+                result = run_matchup(
+                    policy_model=policy,
+                    critic_model=critic,
+                    model_type=experiment.model_type or "flat",
+                    device=device,
+                    agent_a=agent_a,
+                    agent_b=args.agent_b,
+                    games_per_seat=args.games_per_seat,
+                    num_workers=args.num_workers,
+                    seed=args.seed,
+                    settings=settings,
+                    max_rows=args.max_rows,
+                    max_wait_ms=args.max_wait_ms,
+                )
+                summary = result.summary()
             payload["matchups"][agent_a] = {
                 "summary": summary,
                 "records": sorted(result.records, key=lambda r: (r["episode_seed"], r["a_seat"])),
