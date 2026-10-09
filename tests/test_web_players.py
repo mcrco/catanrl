@@ -1,21 +1,23 @@
 import json
-import pickle
 
 import pytest
-import torch
-from catanatron.models.player import Color
-from catanatron.web.models import GameState, db, get_game_state
-from catanatron.web.web_players import WEB_PLAYERS
 
-from catanrl import web
-from catanrl.experiment_store import (
+pytest.importorskip("flask", reason="needs the web extra (uv sync --extra web)")
+
+import torch  # noqa: E402
+from catanatron.models.player import Color  # noqa: E402
+from catanatron.registry import REGISTRY  # noqa: E402
+from catanatron.web.models import StoredGame, db, get_game_state  # noqa: E402
+
+from catanrl import web  # noqa: E402
+from catanrl.experiment_store import (  # noqa: E402
     KIND_POLICY,
     GameConfig,
     network_spec_from_model,
     save_experiment,
 )
-from catanrl.experiments.architecture_config import load_architecture_preset
-from catanrl.models import build_policy_model
+from catanrl.experiments.architecture_config import load_architecture_preset  # noqa: E402
+from catanrl.models import build_policy_model  # noqa: E402
 
 GRAPH_S_PRESET = "configs/models/catan-graph-s-flat-2p-full-sep.yaml"
 
@@ -60,8 +62,8 @@ def experiments_dir(tmp_path, monkeypatch):
     (tmp_path / "unfinished" / "checkpoints").mkdir(parents=True)  # no metadata.json
     web.clear_caches()
     yield tmp_path
-    for key in [k for k in WEB_PLAYERS if k.startswith(web.KEY_PREFIX)]:
-        WEB_PLAYERS.pop(key)
+    for key in [k for k in REGISTRY if k.startswith(web.KEY_PREFIX)]:
+        REGISTRY.pop(key)
     web.clear_caches()
 
 
@@ -72,32 +74,37 @@ def client(experiments_dir):
 
 
 def test_full_info_experiment_registers_belief_and_oracle_players(client):
-    players = json.loads(client.get("/api/players").data)
-    keys = [p["key"] for p in players]
-    assert keys[:4] == ["HUMAN", "RANDOM", "CATANATRON", "WEIGHTED_RANDOM"]
-    assert keys[4:] == ["CATANRL:graph-exp", "CATANRL_ORACLE:graph-exp"]
-    assert "unfinished" not in " ".join(keys)
+    players = {p["key"]: p for p in json.loads(client.get("/api/players").data)}
+    catanrl_keys = sorted(k for k in players if k.startswith(web.KEY_PREFIX))
+    assert catanrl_keys == ["CATANRL_GRAPH-EXP", "CATANRL_ORACLE_GRAPH-EXP"]
+    assert players["CATANRL_GRAPH-EXP"]["name"] == "graph-exp (belief-averaged)"
+    assert players["CATANRL_GRAPH-EXP"]["is_bot"] is True
+    assert players["CATANRL_GRAPH-EXP"]["params"] == []  # nothing a browser can re-point
+    assert {"HUMAN", "CATANATRON"} <= set(players)
+
+    seat = {"key": "CATANRL_GRAPH-EXP", "params": {"which": "latest"}}
+    assert client.post("/api/games", json={"players": [seat, "HUMAN"]}).status_code == 400
 
 
-def test_players_pickle_by_reference_and_share_the_cached_model(client):
-    response = client.post("/api/games", json={"players": ["CATANRL:graph-exp", "HUMAN"]})
+def test_players_are_stored_by_key_and_share_the_cached_model(client):
+    response = client.post("/api/games", json={"players": ["CATANRL_GRAPH-EXP", "HUMAN"]})
     assert response.status_code == 200
     game_id = json.loads(response.data)["game_id"]
 
     with client.application.app_context():
-        row = db.session.query(GameState).filter_by(uuid=game_id).first()
-        assert len(row.pickle_data) < 200_000  # no network weights in the row
+        row = db.session.get(StoredGame, game_id)
+        assert {"key": "CATANRL_GRAPH-EXP", "params": {}} in json.loads(row.player_specs)
         game = get_game_state(game_id)
     # Seating order is shuffled, so find the bot by type; its color is fixed.
     bot = next(p for p in game.state.players if isinstance(p, web.ExperimentBeliefPlayer))
     assert bot.color == Color.RED
+    assert bot.EXPERIMENT == "graph-exp"
     assert bot.model is web.cached_policy("graph-exp", "best", "cpu")
-    assert pickle.loads(pickle.dumps(bot)).model is bot.model
 
 
 def test_bot_plays_its_turns_through_the_api(client):
     response = client.post(
-        "/api/games", json={"players": ["CATANRL_ORACLE:graph-exp", "CATANRL:graph-exp"]}
+        "/api/games", json={"players": ["CATANRL_ORACLE_GRAPH-EXP", "CATANRL_GRAPH-EXP"]}
     )
     game_id = json.loads(response.data)["game_id"]
     before = json.loads(client.get(f"/api/games/{game_id}/states/latest").data)
@@ -107,16 +114,14 @@ def test_bot_plays_its_turns_through_the_api(client):
 
 
 def test_bot_refuses_games_it_was_not_trained_for(client):
-    response = client.post(
-        "/api/games", json={"players": ["CATANRL:graph-exp", "RANDOM", "RANDOM"]}
-    )
+    response = client.post("/api/games", json={"players": ["CATANRL_GRAPH-EXP", "R", "R"]})
     game_id = json.loads(response.data)["game_id"]
     with pytest.raises(ValueError, match="trained for 2 players"):
         for _ in range(6):  # initial placement: every seat acts within 6 ticks
             client.post(f"/api/games/{game_id}/actions", json={})
 
     response = client.post(
-        "/api/games", json={"players": ["CATANRL:graph-exp", "RANDOM"], "map_template": "MINI"}
+        "/api/games", json={"players": ["CATANRL_GRAPH-EXP", "R"], "map_template": "MINI"}
     )
     game_id = json.loads(response.data)["game_id"]
     with pytest.raises(ValueError, match="BASE map"):

@@ -1,8 +1,9 @@
 """Play against trained catanrl policies in the Catanatron Web UI.
 
-Catanatron's web server (``catanatron[web]``) keeps a registry of the players
-selectable in its UI. This module adds one entry per saved experiment so the
-trained models show up in the player dropdown next to the built-in bots.
+Catanatron's web server (``catanatron[web]``) seats any player in its registry
+(``catanatron.registry.REGISTRY``) and lists them in the UI's player dropdown.
+This module registers one player class per saved experiment, so the trained
+models show up next to the built-in bots.
 
 Run the API server with one of::
 
@@ -12,11 +13,11 @@ Run the API server with one of::
 
 and the UI with ``npm start`` inside ``catanatron/ui``.
 
-Catanatron pickles the whole ``Game`` (players included) into its database on
-every move and unpickles it on every request. The players defined here
-therefore never pickle the network: only the reference needed to find it again
-in a process-level cache, so a game's rows stay small and no request rebuilds
-a model.
+Catanatron stores each seat as its registry key and rebuilds the players from
+it on every request. So each experiment gets its own class, which names the
+experiment in class attributes rather than params (the API publishes and
+accepts params, so a browser could otherwise point a seat at any model), and
+models are cached per process so a rebuild never reloads one.
 """
 
 from __future__ import annotations
@@ -25,13 +26,12 @@ import argparse
 import os
 import threading
 from collections.abc import Sequence
-from functools import partial
 from typing import Literal, cast
 
 from catanatron.models.map import build_map
 from catanatron.models.player import Color
+from catanatron.registry import REGISTRY
 from catanatron.web import create_app as create_catanatron_app
-from catanatron.web import register_web_player
 
 from catanrl.experiment_store import (
     METADATA_FILENAME,
@@ -45,8 +45,9 @@ from catanrl.players import BeliefAveragedPolicyPlayer, NNPolicyPlayer
 
 DEFAULT_WHICH = "best"
 DEFAULT_DEVICE = "cpu"
-KEY_PREFIX = "CATANRL"
-ORACLE_KEY_PREFIX = "CATANRL_ORACLE"
+# Registry keys are upper-cased, and ":" would start a param in a player spec.
+KEY_PREFIX = "CATANRL_"
+ORACLE_KEY_PREFIX = "CATANRL_ORACLE_"
 
 ENV_EXPERIMENTS = "CATANRL_WEB_EXPERIMENTS"
 ENV_WHICH = "CATANRL_WEB_WHICH"
@@ -96,43 +97,29 @@ def clear_caches() -> None:
 # Players
 # --------------------------------------------------------------------------- #
 class _ExperimentBackedPlayer:
-    """Mixin: pickle by reference and refuse games the model was not trained for."""
+    """Mixin: a policy from one saved experiment, refusing games it was not
+    trained for. :func:`experiment_player_class` binds a subclass to an
+    experiment through the class attributes below."""
 
-    experiment: str
-    which: str
-    device: str
-
-    def _remember_spec(self, experiment: str, which: str, device: str) -> None:
-        self.experiment = experiment
-        self.which = which
-        self.device = device
-
-    def __getstate__(self):
-        return {
-            "color": self.color,  # type: ignore[attr-defined]
-            "experiment": self.experiment,
-            "which": self.which,
-            "device": self.device,
-        }
-
-    def __setstate__(self, state):
-        self.__init__(**state)  # type: ignore[misc]
+    EXPERIMENT: str
+    WHICH: str = DEFAULT_WHICH
+    DEVICE: str = DEFAULT_DEVICE
 
     def __repr__(self) -> str:
-        return f"{type(self).__name__}({self.experiment}):{self.color.value}"  # type: ignore[attr-defined]
+        return f"{type(self).__name__}({self.EXPERIMENT}):{self.color.value}"  # type: ignore[attr-defined]
 
     def decide(self, game, playable_actions):
-        exp = cached_experiment(self.experiment)
+        exp = cached_experiment(self.EXPERIMENT)
         num_players = len(game.state.colors)
         if num_players != exp.num_players:
             raise ValueError(
-                f"Experiment '{self.experiment}' was trained for {exp.num_players} players "
+                f"Experiment '{self.EXPERIMENT}' was trained for {exp.num_players} players "
                 f"but this game has {num_players}."
             )
         expected_land_tiles = len(build_map(exp.map_type).land_tiles)
         if len(game.state.board.map.land_tiles) != expected_land_tiles:
             raise ValueError(
-                f"Experiment '{self.experiment}' was trained on the {exp.map_type} map; "
+                f"Experiment '{self.EXPERIMENT}' was trained on the {exp.map_type} map; "
                 f"this game uses a different map template."
             )
         return super().decide(game, playable_actions)  # type: ignore[misc]
@@ -145,49 +132,58 @@ class ExperimentPolicyPlayer(_ExperimentBackedPlayer, NNPolicyPlayer):
     policy sees the opponents' hidden cards.
     """
 
-    def __init__(
-        self,
-        color: Color,
-        experiment: str,
-        which: str = DEFAULT_WHICH,
-        device: str = DEFAULT_DEVICE,
-    ):
-        exp = cached_experiment(experiment)
+    def __init__(self, color: Color, params=None):
+        exp = cached_experiment(self.EXPERIMENT)
         NNPolicyPlayer.__init__(
             self,
             color,
             model_type=exp.model_type or "flat",
-            model=cached_policy(experiment, which, device),
+            model=cached_policy(self.EXPERIMENT, self.WHICH, self.DEVICE),
             map_type=cast(MapType, exp.map_type),
             actor_observation_level=cast(
                 ActorObservationLevel, exp.policy_spec.observation_level or "private"
             ),
-            device=device,
+            device=self.DEVICE,
+            params=params,
         )
-        self._remember_spec(experiment, which, device)
 
 
 class ExperimentBeliefPlayer(_ExperimentBackedPlayer, BeliefAveragedPolicyPlayer):
     """Full-information policy from a saved experiment, marginalized over the
     belief about opponents' hidden dev cards so it does not cheat."""
 
-    def __init__(
-        self,
-        color: Color,
-        experiment: str,
-        which: str = DEFAULT_WHICH,
-        device: str = DEFAULT_DEVICE,
-    ):
-        exp = cached_experiment(experiment)
+    def __init__(self, color: Color, params=None):
+        exp = cached_experiment(self.EXPERIMENT)
         BeliefAveragedPolicyPlayer.__init__(
             self,
             color,
             model_type=exp.model_type or "flat",
-            model=cached_policy(experiment, which, device),
+            model=cached_policy(self.EXPERIMENT, self.WHICH, self.DEVICE),
             map_type=cast(MapType, exp.map_type),
-            device=device,
+            device=self.DEVICE,
+            params=params,
         )
-        self._remember_spec(experiment, which, device)
+
+
+def experiment_player_class(
+    base: type[_ExperimentBackedPlayer],
+    experiment: str,
+    which: str = DEFAULT_WHICH,
+    device: str = DEFAULT_DEVICE,
+    label: str | None = None,
+) -> type:
+    """A ``base`` subclass bound to one experiment, ready to register."""
+    return type(
+        base.__name__,
+        (base,),
+        {
+            "EXPERIMENT": experiment,
+            "WHICH": which,
+            "DEVICE": device,
+            "LABEL": label or experiment,
+            "__doc__": f"{experiment} ({which} checkpoint). {base.__doc__}",
+        },
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -210,7 +206,7 @@ def register_experiment_players(
     which: str = DEFAULT_WHICH,
     device: str = DEFAULT_DEVICE,
 ) -> list[str]:
-    """Register web players for the given experiments (default: all discovered).
+    """Register players for the given experiments (default: all discovered).
 
     Full-information policies get two entries: the belief-averaged player (the
     fair one to play against) and the raw oracle. Others get a single entry.
@@ -228,20 +224,22 @@ def register_experiment_players(
                 raise
             continue  # e.g. a run that is still training; skip it silently.
 
-        spec = {"experiment": name, "which": which, "device": device}
         if exp.policy_spec.observation_level == "full":
             entries = [
-                (f"{KEY_PREFIX}:{name}", ExperimentBeliefPlayer, f"{name} (belief-averaged)"),
+                (f"{KEY_PREFIX}{name}", ExperimentBeliefPlayer, f"{name} (belief-averaged)"),
                 (
-                    f"{ORACLE_KEY_PREFIX}:{name}",
+                    f"{ORACLE_KEY_PREFIX}{name}",
                     ExperimentPolicyPlayer,
                     f"{name} (oracle: sees hidden cards)",
                 ),
             ]
         else:
-            entries = [(f"{KEY_PREFIX}:{name}", ExperimentPolicyPlayer, name)]
-        for key, player_cls, label in entries:
-            register_web_player(key, partial(player_cls, **spec), label)
+            entries = [(f"{KEY_PREFIX}{name}", ExperimentPolicyPlayer, name)]
+        for key, base, label in entries:
+            key = key.upper()  # as the registry stores it
+            REGISTRY.register(
+                key, experiment_player_class(base, name, which, device, label), replace=True
+            )
             keys.append(key)
     return keys
 

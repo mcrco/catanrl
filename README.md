@@ -78,10 +78,11 @@ uv run catanrl-web                              # API on :5001; optional --exper
 cd catanatron/ui && npm install && npm start    # UI on http://localhost:3000
 ```
 
-Every saved experiment becomes a player, keyed `CATANRL:<experiment>`.
-Full-information policies appear twice: belief-averaged, which does not see
-your hidden cards, and the oracle (`CATANRL_ORACLE:<experiment>`), which does.
-A model only plays games with the player count and map it was trained on.
+Every saved experiment becomes a player in Catanatron's registry, keyed
+`CATANRL_<EXPERIMENT>`. Full-information policies appear twice:
+`<experiment> (belief-averaged)`, which does not see your hidden cards, and the
+oracle (`CATANRL_ORACLE_<EXPERIMENT>`), which does. A model only plays games
+with the player count and map it was trained on.
 
 ## Experiments
 
