@@ -295,9 +295,11 @@ def run_self_play_eval(
     ]
 
     for episode_seed in tqdm(episode_seeds, disable=not show_tqdm):
+        # Game seeds only its own RNG; NN MCTS samples from the global ones.
+        random.seed(episode_seed)
+        np.random.seed(episode_seed % (2**32))
+        torch.manual_seed(episode_seed)
         map_seed, game_seed = derive_map_and_game_seeds(episode_seed)
-        for player in players:
-            player.reset_state()
 
         game = Game(
             players=players,
@@ -340,8 +342,6 @@ def _run_self_play_episode_indices(
         np.random.seed(episode_seed % (2**32))
         torch.manual_seed(episode_seed)
         map_seed, game_seed = derive_map_and_game_seeds(episode_seed)
-        for player in players:
-            player.reset_state()
 
         game = Game(
             players=players,

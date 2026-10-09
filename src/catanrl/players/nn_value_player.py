@@ -1,10 +1,11 @@
 import torch
 import numpy as np
-from typing import Tuple, List
+from dataclasses import dataclass
+from typing import Optional, Tuple, List
 
 from catanatron.game import Game
 from catanatron.players.value import ValueFunctionPlayer
-from catanatron.cli.cli_players import register_cli_player
+from catanatron.registry import REGISTRY
 
 from catanrl.features.catanatron_utils import (
     compute_feature_vector_dim,
@@ -25,14 +26,13 @@ class NNValuePlayer(ValueFunctionPlayer):
         model_path: str,
         input_dim: int,
         output_range: Tuple[float, float] = (-1, 1),
-        epsilon=None,
         map_type: str = "BASE",
         num_players: int = 2,
         numeric_features: List[str] | None = None,
-        **kwargs,
+        params: Optional[ValueFunctionPlayer.Params] = None,
     ):
-        # Initialize with a dummy value_fn_builder_name since we'll override decide
-        super().__init__(color, value_fn_builder_name="base_fn", is_bot=True, epsilon=epsilon, **kwargs)
+        # decide() is overridden, so of the params only epsilon is used
+        super().__init__(color, params)
         
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.output_range = output_range
@@ -65,7 +65,8 @@ class NNValuePlayer(ValueFunctionPlayer):
         if len(playable_actions) == 1:
             return playable_actions[0]
 
-        if self.epsilon is not None and np.random.random() < self.epsilon:
+        epsilon = self.params.epsilon
+        if epsilon is not None and np.random.random() < epsilon:
             return np.random.choice(playable_actions)
 
         best_value = float("-inf")
@@ -85,48 +86,51 @@ class NNValuePlayer(ValueFunctionPlayer):
         return super().__repr__().replace("ValueFunctionPlayer", "NNValuePlayer")
 
 
-def create_nn_value_player(color, map_template='BASE'):
+class PretrainedNNValuePlayer(NNValuePlayer):
     """
-    Factory function to create NNValuePlayer.
-    
-    Args:
-        color: Player color
-        map_template: Map template - 'BASE' (default), 'm' or 'MINI' for mini map, 
-                      't' or 'TOURNAMENT' for tournament map
+    NNValuePlayer with the pretrained value network for a map template,
+    registered as NNV (e.g. NNV:map_template=MINI).
     """
-    # Normalize map template parameter
-    map_type_map = {
-        'm': 'MINI',
-        'MINI': 'MINI',
-        't': 'TOURNAMENT',
-        'TOURNAMENT': 'TOURNAMENT',
-        'BASE': 'BASE',
-        'b': 'BASE',
-    }
-    map_type = map_type_map.get(map_template if isinstance(map_template, str) else 'BASE', 'BASE')
-    
-    # Use different model weights based on map type
-    model_paths = {
-        'MINI': 'weights/f-f-mini-10k-samp0.1/f-f-mini-10k-samp0.1-joint_policy_value.pt',
-        'BASE': 'weights/f-f-base-10k-samp0.1/f-f-base-10k-samp0.1_value.pt',  # Update with your base map model
-        'TOURNAMENT': 'weights/f-f-tournament-10k-samp0.1/f-f-tournament-10k-samp0.1_value.pt',  # Update with your tournament map model
-    }
-    model_path = model_paths.get(map_type, model_paths['BASE'])
-    
-    # Calculate input dimension and numeric feature list
-    num_players = 2
-    numeric_features = list(get_numeric_feature_names(num_players, map_type))
-    input_dim = compute_feature_vector_dim(num_players, map_type)
-    
-    return NNValuePlayer(
-        color=color,
-        model_path=model_path,
-        input_dim=input_dim,
-        map_type=map_type,
-        num_players=num_players,
-        numeric_features=numeric_features,
-    )
+
+    @dataclass(frozen=True)
+    class Params(ValueFunctionPlayer.Params):
+        # 'BASE' (default), 'm' or 'MINI' for mini map, 't' or 'TOURNAMENT' for tournament map
+        map_template: str = 'BASE'
+
+    def __init__(self, color, params=None):
+        params = params if params is not None else self.Params()
+        # Normalize map template parameter
+        map_type_map = {
+            'm': 'MINI',
+            'MINI': 'MINI',
+            't': 'TOURNAMENT',
+            'TOURNAMENT': 'TOURNAMENT',
+            'BASE': 'BASE',
+            'b': 'BASE',
+        }
+        map_type = map_type_map.get(params.map_template, 'BASE')
+
+        # Use different model weights based on map type
+        model_paths = {
+            'MINI': 'weights/f-f-mini-10k-samp0.1/f-f-mini-10k-samp0.1-joint_policy_value.pt',
+            'BASE': 'weights/f-f-base-10k-samp0.1/f-f-base-10k-samp0.1_value.pt',  # Update with your base map model
+            'TOURNAMENT': 'weights/f-f-tournament-10k-samp0.1/f-f-tournament-10k-samp0.1_value.pt',  # Update with your tournament map model
+        }
+        model_path = model_paths.get(map_type, model_paths['BASE'])
+
+        num_players = 2
+        numeric_features = list(get_numeric_feature_names(num_players, map_type))
+        input_dim = compute_feature_vector_dim(num_players, map_type)
+
+        super().__init__(
+            color=color,
+            model_path=model_path,
+            input_dim=input_dim,
+            map_type=map_type,
+            num_players=num_players,
+            numeric_features=numeric_features,
+            params=params,
+        )
 
 
-register_cli_player("NNV", create_nn_value_player)
-
+REGISTRY.register("NNV", PretrainedNNValuePlayer, replace=True)

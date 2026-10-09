@@ -8,11 +8,12 @@ import traceback
 from dataclasses import dataclass, field
 from typing import Any, Literal, Sequence
 
+import catanatron.players  # noqa: F401  (registers the builtin bots)
 import numpy as np
 import torch
-from catanatron.cli.cli_players import CLI_PLAYERS
 from catanatron.game import Game
 from catanatron.models.player import Player
+from catanatron.registry import REGISTRY
 from catanatron.state_functions import get_actual_victory_points
 
 from catanrl.algorithms.alphazero.parallel_self_play import run_inference_server_workers
@@ -59,13 +60,7 @@ def _assign_episode_seeds(num_games: int, num_workers: int, seed: int) -> list[l
 
 def _build_opponents(opponents_str: str) -> list[Player]:
     player_keys = [key.strip() for key in opponents_str.split(",") if key.strip()]
-    cli_players_by_code = {cli_player.code: cli_player for cli_player in CLI_PLAYERS}
-    players: list[Player] = []
-    for index, key in enumerate(player_keys):
-        parts = key.split(":")
-        cli_player = cli_players_by_code[parts[0]]
-        players.append(cli_player.import_fn(COLOR_ORDER[index + 1], *parts[1:]))
-    return players
+    return [REGISTRY.build(key, COLOR_ORDER[index + 1]) for index, key in enumerate(player_keys)]
 
 
 def _worker_main(
@@ -111,8 +106,6 @@ def _worker_main(
             np.random.seed(episode_seed % (2**32))
             torch.manual_seed(episode_seed)
             map_seed, game_seed = derive_map_and_game_seeds(episode_seed)
-            for player in players:
-                player.reset_state()
 
             game = Game(
                 players=players,

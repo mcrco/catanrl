@@ -133,7 +133,7 @@ class _RecordingValuePlayer(ValueFunctionPlayer):
         if len(playable_actions) == 1:
             return playable_actions[0]
 
-        value_fn = get_value_fn(self.value_fn_builder_name, self.params)
+        value_fn = get_value_fn(self.value_fn_builder_name, self.params.weights)
         values = np.empty(len(playable_actions), dtype=np.float64)
         for i, action in enumerate(playable_actions):
             game_copy = game.copy()
@@ -202,8 +202,6 @@ def _generate_decision_points(
             _RecordingValuePlayer(COLOR_ORDER[i], sink, map_type, max_decision_points)
             for i in range(num_players)
         ]
-        for player in players:
-            player.reset_state()
         map_seed, game_seed = derive_map_and_game_seeds(episode_seed)
         game = Game(
             players=players,

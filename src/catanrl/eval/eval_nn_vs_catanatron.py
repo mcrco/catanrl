@@ -32,10 +32,8 @@ def eval(
     episode_seeds = [derive_seed(seed, "episode", game_idx) for game_idx in range(num_games)]
     for episode_seed in tqdm(episode_seeds, disable=not show_tqdm):
         map_seed, game_seed = derive_map_and_game_seeds(episode_seed)
-        # Ensure each game starts from a clean player state and fresh map.
-        # Reusing player internals or a previously-mutated map can skew win rates.
-        for player in players:
-            player.reset_state()
+        # Build a fresh map per game: reusing a previously-mutated map can skew
+        # win rates. Game resets each seated player through its before() hook.
         game = Game(
             players=players,
             catan_map=build_catan_map(

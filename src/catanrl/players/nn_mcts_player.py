@@ -490,7 +490,7 @@ class NNMCTSPlayer(Player):
         inference_backend: _NNMCTSInferenceBackend | None = None,
         **kwargs,
     ):
-        super().__init__(color, is_bot=True, **kwargs)
+        super().__init__(color, **kwargs)
 
         self.device = (
             str(device) if device is not None else ("cuda" if torch.cuda.is_available() else "cpu")
@@ -995,13 +995,17 @@ class NNMCTSPlayer(Player):
         if name in {"victorypoint", "vp"}:
             return lambda color: VictoryPointPlayer(color)
         if name in {"alphabeta", "ab"}:
-            return lambda color: AlphaBetaPlayer(color, depth=2, prunning=True)
+            return lambda color: AlphaBetaPlayer(
+                color, AlphaBetaPlayer.Params(depth=2, prunning=True)
+            )
         if name in {"sameturnalphabeta", "sab"}:
             return lambda color: SameTurnAlphaBetaPlayer(color)
         if name in {"mcts", "m"}:
-            return lambda color: MCTSPlayer(color, 100)
+            return lambda color: MCTSPlayer(color, MCTSPlayer.Params(num_simulations=100))
         if name in {"playouts", "greedyplayouts", "g"}:
-            return lambda color: GreedyPlayoutsPlayer(color, 25)
+            return lambda color: GreedyPlayoutsPlayer(
+                color, GreedyPlayoutsPlayer.Params(num_playouts=25)
+            )
         raise ValueError(
             f"Unknown opponent_policy '{policy}'. "
             "Use 'self' or one of: random, weighted, value, victorypoint, alphabeta, "

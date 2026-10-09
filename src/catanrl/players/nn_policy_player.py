@@ -31,7 +31,7 @@ class NNPolicyPlayer(Player):
         device: str | torch.device | None = None,
         **kwargs,
     ):
-        super().__init__(color, is_bot=True, **kwargs)
+        super().__init__(color, **kwargs)
 
         self.device = (
             str(device) if device is not None else ("cuda" if torch.cuda.is_available() else "cpu")

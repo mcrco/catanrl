@@ -84,7 +84,7 @@ def eval_policy_against_baselines(
     # Evaluate against RandomPlayer
     wins, vps, total_vps, turns = eval(
         nn_player,
-        [RandomPlayer(COLOR_ORDER[1], is_bot=True)],
+        [RandomPlayer(COLOR_ORDER[1])],
         map_type=map_type,
         num_games=num_games,
         seed=seed,

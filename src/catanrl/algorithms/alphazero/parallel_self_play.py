@@ -298,7 +298,6 @@ def _training_worker_main(
             torch.manual_seed(episode_seed)
             map_seed, game_seed = derive_map_and_game_seeds(episode_seed)
             for player in players:
-                player.reset_state()
                 player.reset_samples()
 
             game = Game(

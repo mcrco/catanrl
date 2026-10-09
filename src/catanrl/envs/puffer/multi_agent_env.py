@@ -218,9 +218,6 @@ class ParallelCatanatronPufferEnv(PufferEnv):
             number_placement=self.number_placement,
         )
         players = [Player(color) for color in self.colors_order]
-        for player in players:
-            player.reset_state()
-
         self.game = Game(
             players=players,
             seed=game_seed,

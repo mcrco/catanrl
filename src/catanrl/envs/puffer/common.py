@@ -82,15 +82,23 @@ def create_opponents(opponent_configs: List[str]) -> List[Player]:
             elif player_type in {"alphabeta", "ab"}:
                 depth = int(params[0]) if params else 2
                 pruning = params[1].lower() != "false" if len(params) > 1 else True
-                opponents.append(AlphaBetaPlayer(color, depth=depth, prunning=pruning))
+                opponents.append(
+                    AlphaBetaPlayer(color, AlphaBetaPlayer.Params(depth=depth, prunning=pruning))
+                )
             elif player_type in {"sameturnalphabeta", "sab"}:
                 opponents.append(SameTurnAlphaBetaPlayer(color))
             elif player_type in {"mcts", "m"}:
                 num_simulations = int(params[0]) if params else 100
-                opponents.append(MCTSPlayer(color, num_simulations))
+                opponents.append(
+                    MCTSPlayer(color, MCTSPlayer.Params(num_simulations=num_simulations))
+                )
             elif player_type in {"playouts", "greedyplayouts", "g"}:
                 num_playouts = int(params[0]) if params else 25
-                opponents.append(GreedyPlayoutsPlayer(color, num_playouts))
+                opponents.append(
+                    GreedyPlayoutsPlayer(
+                        color, GreedyPlayoutsPlayer.Params(num_playouts=num_playouts)
+                    )
+                )
             else:
                 print(
                     f"Warning: Unknown opponent type '{player_type}', defaulting to RandomPlayer"
@@ -120,15 +128,15 @@ def create_expert(expert_config: str) -> Player:
     if player_type in {"alphabeta", "ab"}:
         depth = int(params[0]) if params else 2
         pruning = params[1].lower() != "false" if len(params) > 1 else True
-        return AlphaBetaPlayer(color, depth=depth, prunning=pruning)
+        return AlphaBetaPlayer(color, AlphaBetaPlayer.Params(depth=depth, prunning=pruning))
     if player_type in {"sameturnalphabeta", "sab"}:
         return SameTurnAlphaBetaPlayer(color)
     if player_type in {"mcts", "m"}:
         num_simulations = int(params[0]) if params else 100
-        return MCTSPlayer(color, num_simulations)
+        return MCTSPlayer(color, MCTSPlayer.Params(num_simulations=num_simulations))
     if player_type in {"playouts", "greedyplayouts", "g"}:
         num_playouts = int(params[0]) if params else 25
-        return GreedyPlayoutsPlayer(color, num_playouts)
+        return GreedyPlayoutsPlayer(color, GreedyPlayoutsPlayer.Params(num_playouts=num_playouts))
     raise ValueError(f"Unknown expert type: {expert_config}")
 
 

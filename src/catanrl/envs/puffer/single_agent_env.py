@@ -222,8 +222,6 @@ class SingleAgentCatanatronPufferEnv(PufferEnv):
             seed=map_seed,
             number_placement=self.number_placement,
         )
-        for player in self.players:
-            player.reset_state()
         self.game = Game(
             players=self.players,
             seed=game_seed,
@@ -234,7 +232,8 @@ class SingleAgentCatanatronPufferEnv(PufferEnv):
         if not self._allow_upstream_shuffle:
             force_player_order(self.game, self.players)
         if self.expert_player is not None:
-            self.expert_player.reset_state()
+            # Seated players get before() from Game; the expert only advises.
+            self.expert_player.before(self.game)
 
         self._advance_until_p0_decision()
         observation = self._get_observation()

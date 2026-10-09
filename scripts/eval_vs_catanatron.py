@@ -8,10 +8,11 @@ allowing plug-and-play evaluation of DAgger-trained models.
 import argparse
 from typing import Literal, Sequence
 
+import catanatron.players  # noqa: F401  (registers the builtin bots)
 import torch
 import wandb
-from catanatron.cli.cli_players import CLI_PLAYERS
 from catanatron.models.player import Player
+from catanatron.registry import REGISTRY
 
 from catanrl.envs.puffer.common import compute_single_agent_dims
 from catanrl.eval.eval_nn_vs_catanatron import eval
@@ -123,20 +124,8 @@ def parse_opponents(opponents_str: str) -> list[Player]:
             f"Too many opponents ({len(player_keys)}). Maximum supported is {len(COLOR_ORDER) - 1}."
         )
 
-    players: list[Player] = []
-    cli_players_by_code = {cli_player.code: cli_player for cli_player in CLI_PLAYERS}
-    supported_codes = ", ".join(sorted(cli_players_by_code.keys()))
-
-    for i, key in enumerate(player_keys):
-        parts = key.split(":")
-        code = parts[0]
-        cli_player = cli_players_by_code.get(code)
-        if cli_player is None:
-            raise ValueError(f"Unknown opponent code '{code}'. Available codes: {supported_codes}")
-        params = [COLOR_ORDER[i + 1]] + parts[1:]
-        players.append(cli_player.import_fn(*params))
-
-    return players
+    # A bad key or param raises SpecError, a ValueError listing the registered keys.
+    return [REGISTRY.build(key, COLOR_ORDER[i + 1]) for i, key in enumerate(player_keys)]
 
 
 def main():
@@ -182,7 +171,7 @@ def main():
         default="F",
         help=(
             "Comma-separated catanatron-play style opponent configs. "
-            "Examples: 'F', 'AB:2', 'F,AB:2,R'"
+            "Examples: 'F', 'AB:2', 'AB:2:prunning=true', 'F,AB:2,R'"
         ),
     )
     parser.add_argument(
