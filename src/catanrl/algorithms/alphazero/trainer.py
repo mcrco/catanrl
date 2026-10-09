@@ -30,7 +30,6 @@ from ...models.inference_utils import values_to_wdl_targets
 from ...models.heads import FlatPolicyHead, HierarchicalPolicyHead, WDLValueHead
 from ...models.wrappers import PolicyNetworkWrapper, PolicyValueNetworkWrapper, ValueNetworkWrapper
 from .native_self_play import generate_native_self_play_data
-from .native_search import PolicyTarget
 from ...utils.catanatron_map import NumberPlacement
 from .parallel_self_play import SelfPlayExperience, generate_self_play_data
 
@@ -61,9 +60,6 @@ class AlphaZeroConfig:
     value_scale: float = 1.0
     tree_reuse: bool = False
     canonical_pruning: bool = False
-    policy_target: PolicyTarget = "visits"
-    c_visit: float = 50.0
-    c_scale: float = 1.0
     full_search_probability: float = 1.0
     fast_simulations: int = 64
     search_value_weight_max: float = 0.0
@@ -192,15 +188,6 @@ class AlphaZeroTrainer:
             raise ValueError("search_value_weight_max must be between 0 and 1.")
         if config.search_value_weight_ramp_iterations < 0:
             raise ValueError("search_value_weight_ramp_iterations cannot be negative.")
-        if config.policy_target not in ("visits", "completed-q"):
-            raise ValueError("policy_target must be 'visits' or 'completed-q'.")
-        if (
-            not np.isfinite(config.c_visit)
-            or config.c_visit < 0.0
-            or not np.isfinite(config.c_scale)
-            or config.c_scale < 0.0
-        ):
-            raise ValueError("c_visit and c_scale must be finite and non-negative.")
 
         self.device = torch.device(
             config.device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -455,9 +442,6 @@ class AlphaZeroTrainer:
                 full_search_probability=self.config.full_search_probability,
                 fast_simulations=self.config.fast_simulations,
                 search_value_weight=search_value_weight,
-                policy_target=self.config.policy_target,
-                c_visit=self.config.c_visit,
-                c_scale=self.config.c_scale,
             )
         experiences, stats = self_play_generator(**self_play_kwargs)
         self.replay_buffer.extend(experiences)

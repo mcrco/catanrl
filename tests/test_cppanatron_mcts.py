@@ -9,7 +9,6 @@ from typing import cast
 import cppanatron as cpp
 
 from catanrl.algorithms.alphazero.native_search import (
-    _completed_q_policy,
     _native_observations_match,
     run_native_search_policy,
     step_game_and_reconcile_search,
@@ -223,23 +222,6 @@ def test_native_search_policy_reports_depth_and_policy_effect():
     assert np.isfinite(diagnostics.value_shift)
     assert diagnostics.elapsed_seconds > 0.0
     assert result.policy.sum() == pytest.approx(1.0)
-
-
-def test_completed_q_policy_improves_logits_and_completes_unvisited_actions():
-    policy = _completed_q_policy(
-        logits=np.zeros(3),
-        visits=np.array([10.0, 2.0, 0.0]),
-        action_values=np.array([0.5, -0.5, np.nan]),
-        network_value=0.0,
-        c_visit=0.0,
-        c_scale=1.0,
-        temperature=1.0,
-    )
-
-    expected = np.exp(np.array([10.0, 0.0, 5.0]))
-    expected /= expected.sum()
-    np.testing.assert_allclose(policy, expected)
-    assert policy[0] > policy[2] > policy[1]
 
 
 def test_native_self_play_game_emits_standard_legal_training_fields():

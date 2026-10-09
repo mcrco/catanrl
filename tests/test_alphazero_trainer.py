@@ -385,9 +385,6 @@ def test_collect_self_play_can_dispatch_to_native_backend(
     assert called["full_search_probability"] == 1.0
     assert called["fast_simulations"] == 64
     assert called["search_value_weight"] == 0.0
-    assert called["policy_target"] == "visits"
-    assert called["c_visit"] == 50.0
-    assert called["c_scale"] == 1.0
     assert stats["experiences"] == 1.0
     assert len(trainer.replay_buffer) == 1
 
@@ -518,7 +515,7 @@ def test_cli_native_self_play_requires_plain_mcts() -> None:
         )
 
 
-def test_cli_completed_q_policy_target_requires_native_search() -> None:
+def test_cli_parses_native_soft_policy_options() -> None:
     args = parse_args(
         [
             "--mode",
@@ -529,33 +526,14 @@ def test_cli_completed_q_policy_target_requires_native_search() -> None:
             "cppanatron",
             "--ismcts-determinizations",
             "1",
-            "--policy-target",
-            "completed-q",
-            "--c-visit",
-            "50",
-            "--c-scale",
-            "1",
             "--soft-policy-temperature",
             "4",
             "--soft-policy-weight",
             "8",
         ]
     )
-    assert args.policy_target == "completed-q"
     assert args.soft_policy_temperature == 4.0
     assert args.soft_policy_weight == 8.0
-
-    with pytest.raises(SystemExit):
-        parse_args(
-            [
-                "--mode",
-                "iterate",
-                "--config",
-                "model.yaml",
-                "--policy-target",
-                "completed-q",
-            ]
-        )
 
 
 def test_policy_players_respect_existing_model_device() -> None:
