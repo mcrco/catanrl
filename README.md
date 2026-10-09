@@ -1361,6 +1361,67 @@ done
 
 ---
 
+## Phase 5 — native MCTS at deployment
+
+Shaped-reward critics predict win probability (a loss pays 0), so the search
+matchup harness maps their values to the zero-sum `2p - 1` before the native
+search negates them across players. The older native-MCTS scripts pass the raw
+critic value, which biases them against moves that end the turn.
+
+Matchups (`scripts/eval_search_matchup.py`) use the graph-s reference
+(`m-graph-s-full-full-native-g1-from-warm-s42-20261001`, update 1500). They
+play native F with paired seeds, swapping seats on each game index. Raw and MCTS
+games use the lockstep-batched native driver (`catanrl.eval.batched_native_mcts`);
+other pairings use per-game workers sharing a CUDA-graphed inference server
+(`catanrl.eval.batched_inference`). "Paired" deltas are exact McNemar tests on
+the shared games.
+
+| Agent | Games | Win vs F | Paired vs raw | Network evals / move | Overrides policy |
+| ----- | ----- | -------- | ------------- | -------------------- | ---------------- |
+| raw policy | 1,000 | 89.2% | — | 1 | — |
+| MCTS 64 | 1,000 | 89.9% | +0.7 (p=0.37) | 63 | |
+| MCTS 256 | 1,000 | 91.3% | +2.1 (p=0.02) | 249 | ~2% (16-game timing run) |
+| MCTS 1024 | 1,000 | 92.7% | +3.5 (p=0.0002) | 983 | |
+
+MCTS gains over raw grow with budget: +0.7, +2.1 and +3.5 points at 64, 256
+and 1,024 simulations. A 2FFS vs native MCTS comparison lives on branch `twoffs`.
+
+The MCTS rows above search the true game, so they see the opponent's hidden
+development cards. `mcts:sims=256,dets=K` searches K belief-sampled
+determinizations instead. Each draws the opponent's hand from the exact 1v1
+belief, with the deck rebuilt to match through cppanatron's
+`determinize_development_cards`, and the root visits are summed. On the same
+1,000 games:
+
+| Model | Raw | MCTS 256, sees hidden cards | Determinized 8 x 32 | Determinized 1 x 256 |
+| ----- | --- | --------------------------- | ------------------- | -------------------- |
+| reference (update 1500) | 89.2% | 91.3% | 90.3% (-1.0, p=0.18) | 90.5% (-0.8, p=0.30) |
+| WDL scratch (best) | 85.7% | 90.7% | 90.3% (-0.4, p=0.67) | |
+
+Seeing the hidden cards is worth under a point and is not significant on its
+own. One sampled hand does as well as eight. Determinized MCTS still beats the
+raw policy clearly for the WDL model (+4.6, p=2e-5) but only marginally for the
+reference (+1.1, p=0.27).
+
+Throughput notes: the graph backbone's small-batch forward is dominated by
+kernel launches (~6 ms whatever the batch up to ~32 rows); replaying CUDA graphs
+cuts it to ~2 ms. The native search has one pending leaf, so per-game workers
+make every simulation a separate round trip (~2.4k evals/s). Lockstep batching
+across boards reaches ~10k evals/s and plays identical games. At that point the
+C++ expansion is the limit: it copies a game per child, about 300 us per
+simulation, and holds about 39 MB per 256-simulation tree. Size concurrency so
+that processes x boards x tree size stays well under RAM.
+
+```bash
+uv run scripts/eval_search_matchup.py --agents-a raw "mcts:sims=64" --agent-b F \
+  --games-per-seat 500 --native-processes 8 --native-concurrency 32
+uv run scripts/eval_search_matchup.py --agents-a "mcts:sims=1024" --agent-b F \
+  --games-per-seat 500 --native-processes 8 --native-concurrency 12
+```
+
+
+---
+
 # Current Best Strategy (outdated, will be replaced by new experiments soon)
 
 Everything below describes an older model trained on outdated code. It will be
