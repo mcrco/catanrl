@@ -66,7 +66,7 @@ Evaluation:
 - `scripts/eval_policy_h2h.py`: head-to-head between two experiments (`--deployable` for belief averaging).
 - `scripts/eval_vs_catanatron.py`: evaluation vs Catanatron bots on the Python engine.
 - `scripts/compare_paired_eval.py`: exact McNemar test between two paired result files.
-- Native eval helpers: `catanrl.eval.vectorized_rollout.run_policy_value_eval_vectorized(..., env_backend="cppanatron")` (vs F) and `catanrl.eval.training_eval.eval_policy_against_champion(..., env_backend="cppanatron")` (head-to-head) produce the report's native numbers.
+- `scripts/native_eval_vs_f.py EXP WHICH GAMES_PER_SEAT OUT_JSON` and `scripts/native_h2h.py EXP WHICH OPP_EXP OPP_WHICH GAMES_PER_SEAT OUT_JSON`: the native vs-F and head-to-head evaluations behind the report's numbers (seed 67, both seats).
 
 ## Experiments
 
