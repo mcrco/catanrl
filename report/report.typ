@@ -1,6 +1,6 @@
 // catanrl research report. Compile with:
 //   typst compile report/report.typ report/report.pdf
-// Organized by question and finding. Superseded results go to "Earlier experiments".
+// Organized by question and finding. Superseded results are replaced; git history keeps them.
 
 #let accent = rgb("#1f4e8c")
 #let muted = rgb("#5f5e5a")
@@ -104,10 +104,9 @@ catanrl trains agents for two-player Catan under Catanatron's rules @catanatron 
 ) <tab:headline>
 
 *Key findings.*
-+ *Architecture.* On a teacher-neutral outcome-prediction test the graph network beats an MLP, which beats the cross-dimensional CNN (outcome loss 0.396 vs 0.464 vs 0.83 nats), with 30× fewer parameters than the CNN (@sec:ablation). Under the reference's RL recipe a CNN replica trailed graph-s by 7–12 points vs F in training-time evaluations, won about a third of its games against the reference and trained about 4× slower (@sec:cnn-replica).
++ *graph-s is the model.* On a teacher-neutral outcome-prediction test the graph network beats an MLP, which beats the cross-dimensional CNN (outcome loss 0.396 vs 0.464 vs 0.83 nats), with 30× fewer parameters than the CNN (@sec:ablation). Under the reference's RL recipe a graph-m replica ties graph-s head-to-head (50.6%) at about 2.3× the training cost per step, and a CNN replica trails it by 7–12 points vs F at about a quarter of its training speed (@sec:cnn-replica).
 + *Recipe.* DAgger from F, then MARL PPO with $gamma = 0.99$, then a $gamma = 1$ continuation produces the reference. The $gamma = 1$ stage adds 1.6 points over a matched $gamma = 0.99$ control (@sec:gamma).
 + *Warm start.* From-scratch runs with $gamma = 1$ and a KL-adaptive learning rate reach 86–87% vs F after 94–98M environment steps but lose head-to-head to the reference (45.3–48.1%).
-+ *Size.* graph-s is large enough. A graph-m replica of the reference lineage ties it head-to-head (50.6%) at about 2.3× the training cost per step.
 + *Reward.* A pure win/loss (WDL) reward trains MARL PPO from scratch at least as well as the shaped reward (51.9% head-to-head, $p approx 0.02$), and its critic is already zero-sum, as search needs.
 + *Search.* Native MCTS improves every model, and the gain grows with budget: +0.7, +2.1 and +3.5 points at 64, 256 and 1024 simulations for the reference, and +5.0 points at 256 for the WDL model.
 + *Hidden information is worth under a point.* Belief averaging matches the oracle for raw policies, and determinized MCTS is within 0.4–1.0 points of oracle MCTS (not significant). One sampled hand works as well as eight. Going forward, all evaluations use determinizations.
@@ -205,10 +204,10 @@ The native vs-F evaluation feeds the full-information actor the true state, so i
 
 = Architectures <sec:arch>
 
-All current models use *separate* policy and critic networks with the same architecture and `full` observations ("full/full separate"). Earlier shared policy–value networks collapsed under PPO (@sec:history).
+All models use *separate* policy and critic networks with the same architecture and `full` observations ("full/full separate").
 
 == Cross-dimensional CNN (xdim)
-The xdim backbone follows Gendre and Kaneko's cross-dimensional network for Catan @gendre2020catan. The board tensor goes through three convolutions (3 × 5 kernels, batch norm, ReLU), is flattened and projected. The numeric features go through an MLP, and a two-layer MLP fuses both branches. The D-M size used since Phase 1 (channels 64/128/128, widths 2048) has about *78.5M parameters per network*, 60.6M of them in the projection of the convolution output. D-S (32/64/64, width 1024) has 19.8M.
+The xdim backbone follows Gendre and Kaneko's cross-dimensional network for Catan @gendre2020catan. The board tensor goes through three convolutions (3 × 5 kernels, batch norm, ReLU), is flattened and projected. The numeric features go through an MLP, and a two-layer MLP fuses both branches. The D-M size (channels 64/128/128, widths 2048) has about *78.5M parameters per network*, 60.6M of them in the projection of the convolution output. D-S (32/64/64, width 1024) has 19.8M.
 
 == MLP
 A plain MLP over the concatenated observation, used as a baseline in the architecture ablation (`mlp-512`: 2.4M parameters; `mlp-2048`: 12.6M).
@@ -245,13 +244,13 @@ The ablation on branch `arch-ablation` (`scripts/arch_ablation/FINDINGS.md`) tra
     [MLP], [`mlp-512`], [2.4M], [0.464], [0.60], [0.35],
     [MLP (larger)], [`mlp-2048`], [12.6M], [0.540], [0.67], [0.41],
     [CNN (xdim)], [`xdim-default`], [16.8M], [0.831], [1.13], [0.53],
-    [CNN (xdim)], [`xdim-compact-m`, \ `xdim-d-s`], [2.0M / 19.8M], [0.91 / 0.88], [1.29 / 1.16], [0.53 / 0.59],
+    [CNN (xdim)], [`xdim-d-s`], [19.8M], [0.88], [1.16], [0.59],
   ),
   caption: [Teacher-neutral outcome loss (win/draw/loss cross-entropy, nats) on held-out games. Graph < MLP < CNN.],
 ) <tab:ablation>
 
 Findings:
-- *Graph < MLP < CNN.* The graph networks' outcome loss is about half the CNN's and 15% below the MLP's, with 4–30× fewer parameters. The CNN predicts the winner *worse than a coin flip* at every size from 2M to 20M parameters. Its validation loss is best after 250–750 steps and then rises: the value head memorizes. The same order held on search-value targets, with seed spread of ±0.001–0.007.
+- *Graph < MLP < CNN.* The graph networks' outcome loss is about half the CNN's and 15% below the MLP's, with 4–30× fewer parameters. The CNN predicts the winner *worse than a coin flip* at both sizes tested (16.8M and 19.8M parameters). Its validation loss is best after 250–750 steps and then rises: the value head memorizes. The same order held on search-value targets, with seed spread of ±0.001–0.007.
 - *Policy imitation is biased toward the teacher's family.* Search targets carry the teacher's logit shape, so each family fits its own teacher's policy best. Imitating F's argmax (the old DAgger proxy) has the same flaw. Do not compare architectures by imitation loss.
 - *Within the graph family.* A transformer over the same node and tile tokens matches message passing, so the structured head is what matters. Semantic inputs help the value (removing them costs about 10σ). Size does not matter at this data scale (about 110k samples; every model overfits within 1–2 epochs): graph-s (0.5M) is at least as good as graph-m (2.4M) and graph-l (6.8M).
 - *Speed.* Training step at batch 512: MLP 3 ms, graph-s 26 ms, xdim D-M 120 ms. The graph nets are launch-bound (about 200 small kernels per forward). CUDA graphs (`torch.compile(mode="reduce-overhead")`) cut graph-s from 3.0 ms to 0.39 ms at batch 1.
@@ -310,7 +309,7 @@ Training-time evaluations of both continuations stayed between 85.6% and 88.8% (
 With $gamma = 1$, bootstrapping never removes a constant offset in the critic. The graph value head's output layer reads non-negative ReLU features, and with gain-1 orthogonal initialization a fresh critic predicted an arbitrary per-seed constant between about −2 and +5. In the first from-scratch graph-m run the initial value was about +5.2, so every game-ending transition looked worse than expected. The policy learned to stop building and stall every game to the turn limit, and the run was aborted at 4.5M steps. The output layer now uses gain 0.01, so fresh critics start within ±0.05 of zero (commit `c5d653e`). The graph-m runs and the WDL run use it; graph-s scratch v2 predates it.
 
 == KL-adaptive policy learning rate
-After every PPO update the policy learning rate is divided by 1.5 if the update's mean KL exceeds twice the target, multiplied by 1.5 if it is below half the target, and clamped to \[1e-5, 3e-4\] (`--policy-lr-schedule kl-adaptive`). This is the `AdaptiveScheduler` of rl_games by Denys Makoviichuk @rlgames (the `schedule: adaptive` option in IsaacGymEnvs' PPO configs), which applies the adaptive KL penalty rule of the PPO paper @schulman2017ppo (Sec. 4) to the step size. A constant rate failed both ways. At 2e-4 the first from-scratch graph-s run hit the KL early stop on about 99% of updates, and at 5e-5 progress is slow once the policy sharpens. The adapted rate settled at about 0.9–1.3e-4 for graph-s and 4–6e-5 for graph-m.
+After every PPO update the policy learning rate is divided by 1.5 if the update's mean KL exceeds twice the target, multiplied by 1.5 if it is below half the target, and clamped to \[1e-5, 3e-4\] (`--policy-lr-schedule kl-adaptive`). This is the `AdaptiveScheduler` of rl_games by Denys Makoviichuk @rlgames (the `schedule: adaptive` option in IsaacGymEnvs' PPO configs), which applies the adaptive KL penalty rule of the PPO paper @schulman2017ppo (Sec. 4) to the step size. A constant rate failed both ways. At 2e-4 the first from-scratch graph-s run (v0, $gamma = 0.99$) hit the KL early stop on about 99% of updates. Continued at 5e-5, it reached 83.95% belief-averaged after 77.8M steps, and progress at that rate is slow once the policy sharpens. The adapted rate settled at about 0.9–1.3e-4 for graph-s and 4–6e-5 for graph-m.
 
 The early stop must be loose enough not to hide the KL from the schedule. KL grows across an update's minibatches, so the mean over the minibatches that ran sits near half the stop threshold. With `--target-kl 0.02` (stop at 0.03), about 97% of updates stopped early, their mean KL (about 0.011) stayed inside the adaptive band, and the rate sat at its cap. That run (scratch v1) was aborted. v2 uses `--target-kl 0.05`, and the trainer now warns when 1.5 × `target_kl` is below four times the adaptive target.
 
@@ -531,46 +530,7 @@ A comparison of 2FFS with native MCTS lives on branch `twoffs`.
 = Open questions <sec:open>
 
 - Does a WDL warm-start lineage (DAgger, then WDL MARL with $gamma = 1$) beat the shaped reference, given that WDL from scratch beat shaped from scratch?
-- Can search improve training, not just play? Frozen-teacher distillation with the old CNN gave at most about one point (@sec:history). The graph network, native search and zero-sum critics change the setup enough to revisit it.
-
-// ---------------------------------------------------------------- history
-
-= Earlier experiments <sec:history>
-
-These experiments came before the native engine, the graph network and the current evaluation protocol. They used the xdim CNN, mostly the Python Catanatron engine, 500–2,000-game evaluations and board generation from before official-spiral number placement became the default. Their absolute win rates are *not comparable* with the sections above; the findings carry over. Launch commands are in the scripts named below and in git history (`README.md` before this report).
-
-== Phase 1: DAgger model-size sweep (xdim)
-DAgger from F (40 iterations, 8,192 steps per iteration, β decay 0.97 to 0.1) over xdim sizes D-S (1024 × 2), D-M (2048 × 2), D-L (3072 × 2) and D-XL. D-M learned faster and better than D-S. D-L gave no clear gain for its width, so D-XL was skipped. A shared policy–value backbone matched separate networks under DAgger. D-M became the default size until the graph network replaced it.
-
-== Phase 2: SARL and MARL, shared vs separate, full vs public
-- *SARL PPO vs F* (`train-sarl-ppo`, 16.4M steps, warm-started from DAgger). The separate public-actor/full-critic run reached 57.2% / 56.8% (first / second seat). The *shared* public policy–value network improved early and then degraded badly in three runs (baseline, value coefficient 0.25, policy LR 5e-5 with value coefficient 0.25). A control that split the shared checkpoint into separate public policy and public critic networks did not collapse and became the strongest SARL policy, which points at the shared trunk rather than the public critic.
-- *MARL self-play with a central critic.* `m-sep-pub-full` (public actor, full critic) beat the first SARL policy 61.2% and the stronger separate public/public SARL policy 52.1% over 2,000 games (95% CI 49.9–54.3%).
-
-== Phase 2.5: MCTS and deployment ablations (Python IS-MCTS)
-With 8 determinizations × 64 simulations, search lifted the shaped MARL policy from 52.05% to 56.75% vs F (+4.70, McNemar $p = 0.0008$, 2,000 games). An earlier 56.55% result was invalid: it paired the policy with a critic from a different update, so policies and critics are now saved as pairs. A win/loss-reward variant ($gamma = 0.999$, $lambda = 0.99$) had a much weaker raw policy (44.85%) and a +2.45-point search gain that was not conclusive ($p = 0.085$). Modeling the opponent inside search as F rather than as self-play did not help (54.25% vs 56.75%, $p = 0.079$). The determinization-vs-depth sweep was not completed.
-
-== Phase 2.6: PPO update intensity
-An 8.2M-step screen of epochs, batch size and learning rate (seed-123 selection). Only halving the policy LR (T3: 2 epochs, batch 1,024, policy LR 5e-5) improved steadily: best / final / last-3 mean 56.2% / 55.4% / 54.7%, against 47.2% / 43.0% / 43.8% for the old setting. More minibatches at the old LR (T2) peaked early and degraded, so the actor step size was the issue. Two 16.4M-step T3 seeds confirmed a 54–55% plateau.
-
-== Phase 2.7: full-information actor and belief averaging
-A full/full xdim model (DAgger, then MARL) scored *58.50% as the oracle and 58.50% belief-averaged*, against 52.05% for the public-actor reference. Training on full information and marginalizing over the exact belief at test time lost nothing. Every later model uses this recipe. Python IS-MCTS at 8 × 152 reached 60.70% (+2.2, not conclusive) and took 16.6 hours.
-
-== Phase 3: search distillation (Expert Iteration gate)
-`train-alphazero --mode distill` trained the student policy on frozen-teacher MCTS visit targets @anthony2017exit.
-- The first run collapsed (57.8% → 16.0%) because the student loss used an unmasked softmax over all 313 actions. PPO leaves illegal logits unconstrained, so the denominator was meaningless.
-- With the mask fixed, targets were almost one-hot (0.022 nats). Raw visit targets (`--target-temperature 1.0`) raised target entropy to 0.22 nats.
-- The full 512-game gate gave a student at 59.10% vs the source's 57.80% (+1.30, paired $p = 0.25$) and 50.6% head-to-head ($p = 0.61$).
-
-Expert Iteration was not started: the gain, if real, was about a point.
-
-== Phase 4: rollout length and credit horizon
-From the full/full xdim checkpoint, 8.2M-step runs compared 512- vs 2,048-step rollouts and $gamma slash lambda$ = 0.99/0.95 (effective TD horizon about 17 steps) vs 0.999/0.99 (about 91 steps). No variant beat the source (59.8%): R512-H91 reached 59.6% / 56.2% (best / last-3 mean), R2048-H91 58.4% / 54.9%, and R2048-H17 59.4% / 56.5%. Every update hit the per-minibatch KL stop, so the long rollouts used only about 20% of their planned minibatches, which confounds the comparison. The H91 critic was also much harder to fit (explained variance 0.28–0.39 vs about 0.6). A fixed-reuse follow-up (one epoch, no KL stop) beat its source 52.35% head-to-head (2,000 games, $p = 0.04$). Continuing it at half the policy LR won 55.05% ($p = 7 times 10^(-6)$), even though its small training evaluation peaked at step 0. Lesson: small training-time evaluations can miss real gains that a held-out head-to-head detects. (These results are from the `stash-marl-h2h-selection` branch's README.)
-
-== Path to the graph-s reference
-- `dagger-graph-s-full-native-s42-20260927`: DAgger on the native engine, 47.5% vs F after 24 iterations.
-- `m-graph-s-full-full-native-s42-20260927`: MARL $gamma = 0.99$ for 53.2M steps. Update 3000 was selected at 89.0% on 400 training games and scored 87.3% held out.
-- `m-graph-s-full-full-native-fresh-s42-20260928`: graph-s from scratch with $gamma = 0.99$ and a constant policy LR of 2e-4, which hit the KL early stop on about 99% of updates. It was continued at 5e-5 to 77.8M steps and reached 83.95% belief-averaged (update 4750). This failure motivated the KL-adaptive LR.
-- Scratch v1 (KL-adaptive with `--target-kl 0.02`) was aborted at 9.3M steps because the early stop hid the KL. The first graph-m scratch run was aborted at 4.5M steps when it stalled games because of the critic's initial offset.
+- Can search improve training, not just play? Native MCTS adds 2–5 points at deployment (@sec:search). Expert iteration would test whether graph-s can absorb that gain into its raw policy.
 
 // ---------------------------------------------------------------- credits
 
@@ -617,6 +577,6 @@ Runs live under `experiments/<name>/` (gitignored), each with `metadata.json` (e
 
 = Updating this report
 #set par(justify: false)
-- Add new results to the section that answers their question and update @sec:summary if a headline changes. Move superseded results to @sec:history with their key numbers.
+- Add new results to the section that answers their question and update @sec:summary if a headline changes. Replace superseded results instead of accumulating them; git history keeps old versions.
 - Report win rates with Wilson intervals, both seats and the game count. Use paired seeds and McNemar tests when comparing agents on the same games. Evaluate search agents with determinizations.
 - Keep plotted data in `report/data/` and compile with `typst compile report/report.typ report/report.pdf`. Commit the PDF with the source.
