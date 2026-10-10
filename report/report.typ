@@ -19,7 +19,7 @@
   header: context {
     if counter(page).get().first() > 1 [
       #set text(size: 8pt, fill: muted)
-      catanrl research report #h(1fr) last updated 9 October 2026
+      catanrl research report #h(1fr) last updated 10 October 2026
     ]
   },
 )
@@ -81,7 +81,7 @@
   #v(-0.5em)
   #text(size: 13pt)[Reinforcement learning for two-player Catan: research report]
   #v(0.1em)
-  #text(size: 9pt, fill: muted)[Living document, updated with each experiment · last updated 9 October 2026 · #link("https://github.com/mcrco/catanrl")[github.com/mcrco/catanrl]]
+  #text(size: 9pt, fill: muted)[Living document, updated with each experiment · last updated 10 October 2026 · #link("https://github.com/mcrco/catanrl")[github.com/mcrco/catanrl]]
 ]
 #v(0.4em)
 
@@ -104,7 +104,7 @@ catanrl trains agents for two-player Catan under Catanatron's rules @catanatron 
 ) <tab:headline>
 
 *Key findings.*
-+ *Architecture.* On a teacher-neutral outcome-prediction test the graph network beats an MLP, which beats the cross-dimensional CNN (outcome loss 0.396 vs 0.464 vs 0.83 nats), with 30× fewer parameters than the CNN (@sec:ablation).
++ *Architecture.* On a teacher-neutral outcome-prediction test the graph network beats an MLP, which beats the cross-dimensional CNN (outcome loss 0.396 vs 0.464 vs 0.83 nats), with 30× fewer parameters than the CNN (@sec:ablation). Under the reference's RL recipe a CNN replica trailed graph-s by 7–12 points vs F in training-time evaluations, won about a third of its games against the reference and trained about 4× slower (@sec:cnn-replica).
 + *Recipe.* DAgger from F, then MARL PPO with $gamma = 0.99$, then a $gamma = 1$ continuation produces the reference. The $gamma = 1$ stage adds 1.6 points over a matched $gamma = 0.99$ control (@sec:gamma).
 + *Warm start.* From-scratch runs with $gamma = 1$ and a KL-adaptive learning rate reach 86–87% vs F after 94–98M environment steps but lose head-to-head to the reference (45.3–48.1%).
 + *Size.* graph-s is large enough. A graph-m replica of the reference lineage ties it head-to-head (50.6%) at about 2.3× the training cost per step.
@@ -256,7 +256,7 @@ Findings:
 - *Within the graph family.* A transformer over the same node and tile tokens matches message passing, so the structured head is what matters. Semantic inputs help the value (removing them costs about 10σ). Size does not matter at this data scale (about 110k samples; every model overfits within 1–2 epochs): graph-s (0.5M) is at least as good as graph-m (2.4M) and graph-l (6.8M).
 - *Speed.* Training step at batch 512: MLP 3 ms, graph-s 26 ms, xdim D-M 120 ms. The graph nets are launch-bound (about 200 small kernels per forward). CUDA graphs (`torch.compile(mode="reduce-overhead")`) cut graph-s from 3.0 ms to 0.39 ms at batch 1.
 
-Supervised fit is only a proxy. The decisive test is RL strength under the same recipe, which the CNN replica now running tests (@sec:ongoing).
+Supervised fit is only a proxy. The decisive test, RL strength under the same recipe, agrees: the CNN replica of the reference lineage trails graph-s by 7–12 points (@sec:cnn-replica).
 
 // ---------------------------------------------------------------- training
 
@@ -337,7 +337,7 @@ One RTX 2070 SUPER (8 GB) and a 31 GB host run everything. @tab:throughput lists
     [Native evaluations vs F and H2H], [5–7× faster than the Python evaluator, matching within noise (89.0% vs 87.5% on 400 games)],
     [W&B action-type chart rebuilt only at eval cadence], [it had grown to about 2 s per update, about an hour per 8-hour run],
   ),
-  caption: [Throughput work. A full graph-s run sustains about 3.1k environment steps/s including evaluations (98.3M steps in 8.75 h); graph-m about 1.3k.],
+  caption: [Throughput work. A full graph-s run sustains about 3.1k environment steps/s including evaluations (98.3M steps in 8.75 h); graph-m about 1.3k; the xdim D-M CNN about 0.8k.],
 ) <tab:throughput>
 
 // ---------------------------------------------------------------- results
@@ -384,6 +384,23 @@ The warm-started reference used 73.7M MARL steps after a short DAgger stage. Eve
 
 == graph-s is large enough
 The graph-m warm replica, identical to the reference lineage except for the network, ties the reference head-to-head (50.6%, $p = 0.46$) and is 2.3 points *lower* against F. From scratch, graph-m edges graph-s at equal steps (53.3% head-to-head at 98.3M steps, 52.6% at 49M), but it takes about 2.3 times longer per step (about 20 h vs 8.75 h for 98.3M steps). The warm-started graph-m beats scratch graph-m (51.9%), as for graph-s. We keep graph-s.
+
+== The CNN does not match graph-s under the same recipe <sec:cnn-replica>
+The architecture ablation ranked the CNN last on a supervised proxy (@sec:ablation). To test RL strength, the xdim D-M CNN (about 78.5M parameters per network, full/full separate) repeated the reference lineage with every setting unchanged: DAgger, MARL with $gamma = 0.99$, then $gamma = 1$ from update 3000. Its training-time head-to-head opponent was the graph-s reference.
+
+#figure(
+  btable(
+    columns: (1fr, auto, auto, auto),
+    align: (left, right, right, right),
+    header: ([Lineage], [Best vs F, $gamma = 0.99$], [Best vs F, $gamma = 1$], [Steps/s, $gamma = 1$]),
+    [graph-s (reference)], [89.0 #aside[(400 games)]], [88.8], [3.3k],
+    [graph-m warm replica], [88.7], [89.4], [1.5k],
+    [xdim D-M CNN replica], [81.7], [77.5 #aside[(to update 500)]], [0.8k],
+  ),
+  caption: [Lineages with identical settings. Training-time evaluations vs F (2,000 games unless noted). Steps/s is end to end, including evaluations.],
+) <tab:cnn>
+
+The CNN's $gamma = 1$ stage made no progress. Over updates 0, 250 and 500 it scored 77.2%, 77.5% and 75.8% vs F, and won 34.5%, 34.6% and 32.2% of 1,000 games against the reference. graph-s's own $gamma = 1$ stage did not move its training-time score (89.0% → 88.8%), so the remaining 1,000 updates were unlikely to close an 11–12-point gap, and we ended the stage at update 500. All CNN numbers are training-time evaluations, which are optimistic by up to 2 points (@sec:eval); the gap is far larger than that bias.
 
 == Win/loss reward trains from scratch at least as well as shaping
 The WDL run uses the shaped v2 recipe with a different reward. The only other difference is the near-zero value-head initialization, which v2 predates. WDL led clearly at the first evaluation (41.5% vs 28.7% vs F at 4.1M steps). The curves were level through about 45M steps, and WDL was slightly ahead on most evaluations after about 49M (@fig:curves). In direct play WDL beat shaped v2's final checkpoint 51.9% over 4,000 games (±1.5 points, $p approx 0.02$), even though WDL stopped at 94.4M steps against v2's 98.3M. Its belief-averaged score (87.35%) is the highest of the from-scratch runs. WDL's critic is zero-sum by construction, which suits search directly, and it gains the most from MCTS (@sec:search). Shaped reward has no demonstrated advantage for from-scratch MARL PPO here.
@@ -509,13 +526,10 @@ Knowing the hidden cards is worth under a point and is not significant on its ow
 
 A comparison of 2FFS with native MCTS lives on branch `twoffs`.
 
-// ---------------------------------------------------------------- ongoing
+// ---------------------------------------------------------------- open questions
 
-= Ongoing <sec:ongoing>
+= Open questions <sec:open>
 
-*CNN replica of the reference lineage (running).* The architecture ablation ranked the CNN last on a supervised proxy. This run tests whether a CNN can match the graph network under the identical RL recipe. It replicates the graph-s reference lineage with the xdim D-M CNN (full/full separate, about 78.5M parameters per network): DAgger (`dagger-xdim-full-native-s42-20261009`), MARL $gamma = 0.99$ for 3,000 updates (`m-xdim-full-full-native-warm-s42-20261009`), then $gamma = 1$ for 1,500 updates from update 3000 (`m-xdim-full-full-native-g1-from-warm-s42-20261009`). Every setting matches the graph-s and graph-m lineages; training-time H2H is against the graph-s reference. The post-evaluation will run native vs F (5,000 games per seat) and native H2H vs the reference (2,000 per seat) for update 1500, `best` and the latest checkpoint, plus a belief-averaged evaluation of update 1500. *Results pending.*
-
-*Open questions.*
 - Does a WDL warm-start lineage (DAgger, then WDL MARL with $gamma = 1$) beat the shaped reference, given that WDL from scratch beat shaped from scratch?
 - Can search improve training, not just play? Frozen-teacher distillation with the old CNN gave at most about one point (@sec:history). The graph network, native search and zero-sum critics change the setup enough to revisit it.
 
@@ -595,7 +609,7 @@ Runs live under `experiments/<name>/` (gitignored), each with `metadata.json` (e
     [graph-s scratch WDL], [`m-graph-s-full-full-native-scratch-g1-wdl-s42-20261007`],
     [graph-m scratch (shaped, zero-init critic)], [`m-graph-m-full-full-native-scratch-g1-klada-zinit-s42-20261002`],
     [graph-m DAgger, MARL $gamma = 0.99$, $gamma = 1$], [`dagger-graph-m-full-native-s42-20261003` \ `m-graph-m-full-full-native-warm-s42-20261003` \ `m-graph-m-full-full-native-g1-from-warm-s42-20261003`],
-    [xdim replica (running)], [`dagger-xdim-full-native-s42-20261009` \ `m-xdim-full-full-native-warm-s42-20261009` \ `m-xdim-full-full-native-g1-from-warm-s42-20261009`],
+    [xdim CNN replica], [`dagger-xdim-full-native-s42-20261009` \ `m-xdim-full-full-native-warm-s42-20261009` \ `m-xdim-full-full-native-g1-from-warm-s42-20261009`],
     [graph-s from scratch v0 ($gamma = 0.99$)], [`m-graph-s-full-full-native-fresh-s42-20260928`],
   ),
   caption: [Experiments behind Sections 5–7. Search-matchup outputs: `experiments/twoffs-vs-mcts-20261004`, `wdl-mcts-20261007`, `determinized-mcts-20261008`.],
